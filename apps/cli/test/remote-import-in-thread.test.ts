@@ -78,6 +78,40 @@ test('a fetched plugin\'s imports are fetched on demand through the in-thread ho
   }
 });
 
+// Issue #89, end to end: a dependency written as a bare CDN URL, which answers with a module that re-exports a
+// file beneath its own path. Mirrored, the first was the FILE `ms@2.1.3` and the second needed that name as a
+// directory. The module keeps its URL instead — the `import.meta.url` it would have in a browser — and its
+// bare imports reach what a mirrored file's would: the plugins and host singletons linked into the cache.
+test('a URL import keeps its URL, and its own imports — root-relative, bare, typed — load', { timeout: 30_000 }, async () => {
+  const srv = await serve({
+    '/ms@2.1.3': `export { default } from "/ms@2.1.3/es2022/ms.mjs";\nexport { bare } from "fixture-bare";\nexport const self = import.meta.url;\n`,
+    '/ms@2.1.3/es2022/ms.mjs': `export default () => '1m';\n`,
+    '/typed.ts': `export const typed: string = 'stripped';\n`,
+  });
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-fetch-')));
+  const dotPlugins = join(dir, '.plugins');
+  const hostDir = join(dotPlugins, 'plugins.example.com');
+  try {
+    mkdirSync(join(hostDir, 'p'), { recursive: true });
+    writeFileSync(join(hostDir, 'p', 'index.ts'),
+      `export { default as ms, bare, self } from '${srv.origin}/ms@2.1.3';\nexport { typed } from '${srv.origin}/typed.ts';\n`);
+    mkdirSync(join(dotPlugins, 'node_modules', 'fixture-bare'), { recursive: true });
+    writeFileSync(join(dotPlugins, 'node_modules', 'fixture-bare', 'package.json'),
+      JSON.stringify({ name: 'fixture-bare', type: 'module', exports: './index.js' }));
+    writeFileSync(join(dotPlugins, 'node_modules', 'fixture-bare', 'index.js'), `export const bare = 'bare';\n`);
+
+    const mod = await import(pathToFileURL(join(hostDir, 'p', 'index.ts')).href);
+    assert.equal(mod.ms(), '1m');
+    assert.equal(mod.self, `${srv.origin}/ms@2.1.3`);
+    assert.equal(mod.bare, 'bare');
+    assert.equal(mod.typed, 'stripped');
+    assert.equal(existsSync(join(dotPlugins, new URL(srv.origin).host)), false, 'nothing mirrored under the CDN\'s name');
+  } finally {
+    await srv.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a fetched plugin\'s import that nothing serves fails with the file that asked for it', { timeout: 30_000 }, async () => {
   const srv = await serve({});
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-fetch-')));

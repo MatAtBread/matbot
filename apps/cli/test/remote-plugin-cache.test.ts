@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
          planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
+import { mirrorPath } from '@matatbread/matbot-tool-plugin/cache-layout';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -197,7 +198,8 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
   const files: Record<string, string> = {
     '/c/package.json': JSON.stringify({
       name: '@fixture/matbot-remote-c', matbotRuntime: ['node'],
-      exports: { '.': './index.ts' }, files: ['never-served.json'],
+      // …nor one whose name could only be mirrored outside the cache: skipped with a warning like any other.
+      exports: { '.': './index.ts' }, files: ['never-served.json', 'assets/a%2Fb.png'],
     }),
     '/c/index.ts': `export const plugin = { apiVersion: '0.4' };\n`,
   };
@@ -214,6 +216,18 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
   }
 });
 
+// The mirror maps a plugin package's URLs onto paths, and two spellings survive URL parsing that would put
+// one outside `.plugins/<host>/`. Dot segments do not, encoded or not — the parser has already resolved them.
+test('a mirrored path stays inside its host\'s directory', () => {
+  const dotPlugins = join(tmpdir(), '.plugins');
+  assert.equal(mirrorPath('https://h.example/a/%2e%2e/%2E%2e/x.ts', dotPlugins), join(dotPlugins, 'h.example', 'x.ts'));
+  assert.equal(mirrorPath('https://h.example/a/b%40c.ts', dotPlugins), join(dotPlugins, 'h.example', 'a', 'b@c.ts'));
+  assert.throws(() => mirrorPath('https://h.example/a/..%2F..%2F..%2Fx.ts', dotPlugins), /outside the plugin cache/);
+  assert.throws(() => mirrorPath('https://h.example/a/..%5c..%5cx.ts', dotPlugins), /outside the plugin cache/);
+  assert.throws(() => mirrorPath('http://../x.ts', dotPlugins), /outside the plugin cache/, 'a host of `..` parses');
+  assert.throws(() => mirrorPath('http://.restore/x.ts', dotPlugins), /outside the plugin cache/, 'and so does bookkeeping');
+});
+
 test('a declared dependency nothing satisfies is reported, named well enough to act on', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-notes-'));
   const dotPlugins = join(dir, '.plugins');
@@ -226,7 +240,7 @@ test('a declared dependency nothing satisfies is reported, named well enough to 
     assert.match(notes, /"@fixture\/matbot-remote-b".*plugins:/s);
     // An ordinary registry dependency says this route installs nothing.
     assert.match(notes, /"left-pad"/);
-    assert.match(notes, /installs no dependencies/);
+    assert.match(notes, /installed into its cache directory when it is added/);
     // A host singleton is not a finding: it resolves to the host's copy by construction.
     assert.equal(/matbot-plugin-api/.test(notes), false);
 
@@ -404,6 +418,42 @@ test('a fetched plugin\'s dependencies install into its cache root and make it l
     // A fresh URL: the earlier failed resolution must not be what this re-reads.
     const mod = await import(`${pathToFileURL(m.entry).href}?installed=1`) as { plugin: { ms: number } };
     assert.equal(mod.plugin.ms, 3600000, 'the dependency resolves from the cache root');
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A directory standing where the entry goes is not the entry. Returned as one, it failed later as a
+// directory import with nothing to say why; refused here, the failure names the path.
+test('a directory at the entry\'s cache path is not taken for the cached entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/y/package.json': JSON.stringify({ name: '@fixture/matbot-remote-y', matbotRuntime: ['node'], exports: './main.js' }),
+    '/y/main.js': `export const plugin = { apiVersion: '0.4' };\n`,
+  });
+  try {
+    await mkdir(join(dotPlugins, new URL(srv.origin).host, 'y', 'main.js'), { recursive: true });
+    await assert.rejects(materializeRemote(`${srv.origin}/y/`, dotPlugins, dir), /EISDIR|main\.js/);
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A directory standing where the entry goes is not the entry. Returned as one, it failed later as a
+// directory import with nothing to say why; refused here, the failure names the path.
+test('a directory at the entry\'s cache path is not taken for the cached entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/y/package.json': JSON.stringify({ name: '@fixture/matbot-remote-y', matbotRuntime: ['node'], exports: './main.js' }),
+    '/y/main.js': `export const plugin = { apiVersion: '0.4' };\n`,
+  });
+  try {
+    await mkdir(join(dotPlugins, new URL(srv.origin).host, 'y', 'main.js'), { recursive: true });
+    await assert.rejects(materializeRemote(`${srv.origin}/y/`, dotPlugins, dir), /EISDIR.*main\.js/);
   } finally {
     await srv.stop();
     await rm(dir, { recursive: true, force: true });

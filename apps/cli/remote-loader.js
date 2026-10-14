@@ -12,52 +12,142 @@
 //   - an absolute URL import was dropped from both buckets and then failed at load.
 //
 // Node already walks the graph correctly, lazily, and including dynamic imports. So resolution is where
-// the fetching belongs: when a module inside `.plugins/` asks for something we do not have, fetch it,
-// write it where its identity says it lives, and hand back the file: URL.
+// the fetching belongs: when a fetched module asks for something we do not have, fetch it, store it under
+// its identity, and hand that back.
 //
-// IDENTITY STAYS `file:`. A fetched plugin is a real package on disk — that is what lets `import.meta.url`
-// work with `createRequire`/`fileURLToPath`, lets `discover_local` walk the tree and reconstruct each
-// package's URL, lets docker-bash mount `projectRoot` read-only so the model can read what it fetched, and
-// lets a CommonJS dependency load at all. The URL is where a file CAME from; the path is what it IS.
+// TWO IDENTITIES, by what the thing is.
+//
+// A PLUGIN'S OWN FILES are `file:`, mirrored under `.plugins/<host>/<path…>`. A plugin is a package, which
+// was a file tree before it was served, so the mirror loses nothing — and being a real package on disk is
+// what lets a Node-only plugin read its own files through `import.meta.url`, lets the dependencies `plugin
+// add` installs beside it resolve, lets `discover_local` walk the tree, and lets docker-bash mount it
+// read-only so the model can read what it fetched.
+//
+// A MODULE IMPORTED BY ABSOLUTE URL keeps that URL, as it does in the browser. A CDN's URL space is not a
+// file tree: `https://esm.sh/ms@2.1.3` is a module AND the parent of `/ms@2.1.3/es2022/ms.mjs`, unpkg answers
+// `lit@3?module` from `lit@3.3.3/index.js?module=`, and `?bundle` names a different module from the same path.
+// Mirrored, each of those was a special case (issue #89 was the first). As its own URL, each is just how URLs
+// work: Node resolves the module's imports against the URL that answered, and the cache is a store keyed on
+// the URL, which never has to be a path.
 
-import { mkdir, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, writeFile, rename } from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Worker, MessageChannel, receiveMessageOnPort, isMainThread, workerData, parentPort } from 'node:worker_threads';
 import path from 'node:path';
+// The mirror's layout is stated once, in the package that also writes a plugin's entry into it. A plain .js
+// file there, so that this one — which runs before anything strips types, and again on a worker with no
+// hooks — can import it at all.
+import { mirrorPath, mirroredFile, candidatesFor, schemeFor, recordOrigin } from '@matatbread/matbot-tool-plugin/cache-layout';
 
 const CACHE_DIR = '.plugins';
 
 // Per request, headers and body together. The worker reads the same value, inheriting this environment.
 const FETCH_TIMEOUT_MS = Number(process.env.MATBOT_FETCH_TIMEOUT_MS) || 30_000;
 
-// The scheme is not recoverable from the mirrored path — `.plugins/<host>/<path…>` deliberately keys on
-// host so one origin is one directory — so each host records its own. Absent means https, which is what
-// every cache written before this file existed came from.
+// ── Modules imported by URL ─────────────────────────────────────────────────────
 //
-// Written by plugins/tool-plugin/src/remote-cache.ts, which cannot import the name from here (`plugins/`
-// may not depend on `apps/`) — keep the two in sync, as with the `mbfresh` stamp shared with core.
-const ORIGIN_FILE = '.origin';
+// `.plugins/.urls/`, a dot-directory so neither the cache scan nor `cacheLocation` reads it as a host. Each
+// URL asked for has a record naming the URL that answered it (`<key>.json`), and each URL that answered has
+// its body (`<key>.src`), where the key is a hash of the URL. Named by hash because a name derived from the
+// URL is the mirror again: a path cannot be both a file and a directory, and `%2F` decodes into one.
+//
+// A record is written after its body, and each by rename, so a reader that finds a record finds the body —
+// another process sharing the cache (a background job) can be fetching the same URL.
+const URL_STORE = '.urls';
 
-const schemeByHostDir = new Map();
+const keyOf = url => createHash('sha256').update(url).digest('hex').slice(0, 32);
+const recordPath = (dotPlugins, url) => path.join(dotPlugins, URL_STORE, keyOf(url) + '.json');
+const bodyPath = (dotPlugins, url) => path.join(dotPlugins, URL_STORE, keyOf(url) + '.src');
 
-function schemeFor(hostDir) {
-  const cached = schemeByHostDir.get(hostDir);
-  if (cached !== undefined) return cached;
-  let scheme = 'https:';
-  try { scheme = readFileSync(path.join(hostDir, ORIGIN_FILE), 'utf8').trim() || 'https:'; }
-  catch { /* pre-existing cache, or a host we have not recorded — https */ }
-  schemeByHostDir.set(hostDir, scheme);
-  return scheme;
+// Where each module that answered by URL lives — its cache, so its own imports resolve from there, and the
+// file holding its body, so its load finds it. A module is always resolved before anything it imports, in the
+// process that loads it, so this is never asked about a URL it has not been told.
+const homeOf = new Map();
+
+const isFile = p => statSync(p, { throwIfNoEntry: false })?.isFile() ?? false;
+
+function storedUrl(url, dotPlugins) {
+  let answered;
+  try { answered = JSON.parse(readFileSync(recordPath(dotPlugins, url), 'utf8')).answered; }
+  catch { return fromMirror(url, dotPlugins); }
+  if (typeof answered !== 'string') return undefined;
+  const body = bodyPath(dotPlugins, answered);
+  return isFile(body) ? { url: answered, body } : undefined;
 }
 
-/** Record which scheme a host was fetched over, so a later boot can reconstruct its URLs. */
-export async function recordOrigin(dotPlugins, url) {
-  const u = new URL(url);
-  const hostDir = path.join(dotPlugins, u.host);
-  await mkdir(hostDir, { recursive: true });
-  await writeFile(path.join(hostDir, ORIGIN_FILE), u.protocol, 'utf8');
-  schemeByHostDir.set(hostDir, u.protocol);
+// A cache written before URL imports had their own store mirrored them, and an install that upgrades
+// offline would otherwise lose every plugin that has one. So a mirrored file answers for its URL from where
+// it is — nothing is copied or written, so a cache this process cannot write (a read-only image) answers
+// too. Not for a URL with a query, which the mirror dropped — the file there may be another query's module
+// — and not for a redirect, which the mirror could not record, so the file answers for the URL it was saved
+// under, as it always did. A plugin's own files are never reached here: `pluginPackageOf` refuses those first.
+function fromMirror(url, dotPlugins) {
+  if (new URL(url).search !== '') return undefined;
+  let file;
+  try { file = mirroredFile(url, dotPlugins); } catch { return undefined; }
+  return file === undefined ? undefined : { url, body: file };
+}
+
+// The fetched plugin package a URL falls inside, if any: the nearest directory from its mirrored path up to
+// its host's with a package.json, which in the mirror is a plugin's manifest. A plugin's own files are
+// `file:` modules, so the same file imported by URL would be a second copy of it — separate module state,
+// `instanceof` false across the two — and is refused, naming the import that does reach the one copy.
+function pluginPackageOf(url, dotPlugins) {
+  let file;
+  try { file = mirrorPath(url, dotPlugins); } catch { return undefined; }
+  const hostDir = path.join(dotPlugins, new URL(url).host);
+  for (let dir = path.dirname(file); dir.length >= hostDir.length; dir = path.dirname(dir)) {
+    if (isFile(path.join(dir, 'package.json'))) return dir;
+    if (dir === hostDir) break;
+  }
+  return undefined;
+}
+
+function refuseIfPluginFile(url, specifier, parent, dotPlugins) {
+  const pkgDir = pluginPackageOf(url, dotPlugins);
+  if (pkgDir === undefined) return;
+  let name;
+  try { name = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8')).name; } catch { /* unnamed */ }
+  const which = typeof name === 'string' ? `the fetched plugin "${name}"` : `the fetched plugin in ${pkgDir}`;
+  throw Object.assign(new Error(
+    `Cannot import "${specifier}" by URL from ${parent}: it is a file of ${which}, which loads its own files from ` +
+    `the cache, so importing one by URL would load a second copy beside it. Import it by a relative path from ` +
+    `inside that plugin${typeof name === 'string' ? `, or by its package name ("${name}") from another` : ''}.`),
+    { code: 'ERR_INVALID_MODULE_SPECIFIER' });
+}
+
+async function writeAtomic(p, content) {
+  const tmp = `${p}.${randomUUID()}.tmp`;
+  await writeFile(tmp, content, 'utf8');
+  await rename(tmp, p);
+}
+
+async function storeFetched(dotPlugins, asked, answered, body) {
+  await mkdir(path.join(dotPlugins, URL_STORE), { recursive: true });
+  await writeAtomic(bodyPath(dotPlugins, answered), body);
+  for (const url of new Set([answered, asked])) {
+    await writeAtomic(recordPath(dotPlugins, url), JSON.stringify({ asked: url, answered }));
+  }
+}
+
+// For the load hook, which has nothing but the URL.
+export function loadStored(url) {
+  const home = homeOf.get(url);
+  return home === undefined ? undefined : readFileSync(home.body, 'utf8');
+}
+
+// A module that answered by URL has no directory for Node to walk up from, so its bare imports resolve as
+// though from the cache — reaching the host singletons and fetched plugins linked into
+// `.plugins/node_modules`, then the project's own `node_modules`: what a bare import from a mirrored file reaches.
+export function bareAnchor(parent) {
+  const dotPlugins = typeof parent === 'string' ? homeOf.get(parent)?.dotPlugins : undefined;
+  return dotPlugins === undefined ? undefined : pathToFileURL(path.join(dotPlugins, URL_STORE, 'importer.js')).href;
+}
+
+export function isFetched(url) {
+  return (typeof url === 'string' && homeOf.has(url)) || cacheLocation(url) !== undefined;
 }
 
 /**
@@ -78,7 +168,8 @@ export function cacheLocation(fileUrl) {
   const at = parts.lastIndexOf(CACHE_DIR);
   if (at === -1 || at + 1 >= parts.length) return undefined;
   const host = parts[at + 1];
-  if (!/\.|:\d+$/.test(host)) return undefined;
+  // A dot-directory is matbot's own bookkeeping (`.urls`, `.restore`), never a mirrored host.
+  if (host.startsWith('.') || !/\.|:\d+$/.test(host)) return undefined;
 
   return {
     dotPlugins: parts.slice(0, at + 1).join(path.sep),
@@ -88,80 +179,72 @@ export function cacheLocation(fileUrl) {
   };
 }
 
-/** Where a URL's bytes live once fetched — the same mapping `remote-cache.ts` mirrors with. */
-function urlToCachePath(url, dotPlugins) {
-  const u = new URL(url);
-  return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
-}
+// What a specifier made from inside a fetched module names; undefined when it is not ours to resolve (a bare
+// one, or `node:`/`data:`). Either one URL, for the URL store, or the mirror's candidates, most preferred first.
+function planOf(specifier, parent) {
+  const absolute = /^https?:/i.test(specifier) || specifier.startsWith('//');
+  if (!absolute && /^[a-z][a-z0-9+.-]*:/i.test(specifier)) return undefined;      // node:, data: — not ours
+  if (!absolute && !specifier.startsWith('/') && !specifier.startsWith('.')) return undefined;  // bare
 
-// matbot source imports siblings with an explicit `.js` extension (verbatimModuleSyntax) while the file
-// on disk is `.ts`, so one specifier has several plausible targets. Preference order, as the crawler had it.
-function candidatesFor(url) {
-  const candidates = [url];
-  const bare = (url.split('?')[0]) ?? url;
-  if (bare.endsWith('.js'))                              candidates.push(url.slice(0, -3) + '.ts');
-  else if (bare.endsWith('.mjs'))                        candidates.push(url.slice(0, -4) + '.mts');
-  else if (!/\.(?:ts|mts|cts|js|mjs|cjs)$/.test(bare))   candidates.push(url + '.ts', url.replace(/\/?$/, '/') + 'index.ts');
-  return candidates;
-}
+  // From a module that answered by URL, everything that is not bare is relative to that URL — as a browser
+  // reads it, with no guessing at a `.ts` behind a `.js`.
+  const home = typeof parent === 'string' ? homeOf.get(parent) : undefined;
+  if (home !== undefined) return urlPlan(new URL(specifier, parent).href, specifier, parent, home.dotPlugins);
 
-// Which URLs a specifier made from inside a fetched plugin could name, most preferred first; undefined when it
-// is not ours to resolve (a bare one, or `node:`/`data:`).
-function candidatesOf(specifier, parent) {
   const at = cacheLocation(parent);
   if (at === undefined) return undefined;
+  const target = new URL(specifier, `${schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
+  return absolute ? urlPlan(target, specifier, parent, at.dotPlugins)
+                  : { dotPlugins: at.dotPlugins, candidates: candidatesFor(target) };
+}
 
-  let targetUrl;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(specifier)) {
-    if (!/^https?:/i.test(specifier)) return undefined;      // node:, data: — not ours
-    targetUrl = specifier;                                    // an absolute URL, possibly another host
-  } else if (specifier.startsWith('/')) {
-    targetUrl = `${schemeFor(at.hostDir)}//${at.host}${specifier}`;
-  } else if (specifier.startsWith('.')) {
-    targetUrl = new URL(specifier, `${schemeFor(at.hostDir)}//${at.host}/${at.rel}`).href;
-  } else {
-    return undefined;                                         // bare: host-provided, or a sibling plugin
-  }
-  return { dotPlugins: at.dotPlugins, candidates: candidatesFor(targetUrl) };
+function urlPlan(url, specifier, parent, dotPlugins) {
+  refuseIfPluginFile(url, specifier, parent, dotPlugins);
+  return { dotPlugins, url };
 }
 
 // Every candidate is checked on disk before any is fetched, for the same reason the mirrored tree is consulted
 // before the network at all: the `.js` name is the preferred URL but the `.ts` name is what got written, so a
 // per-candidate disk-then-network order would put a doomed request in front of the file we already have — and
 // fail with no network at all. A warm boot therefore makes no requests, and an offline one works.
-function onDisk({ dotPlugins, candidates }) {
-  for (const candidate of candidates) {
-    const p = urlToCachePath(candidate, dotPlugins);
-    if (existsSync(p)) return pathToFileURL(p).href;
+function onDisk(plan) {
+  if (plan.url !== undefined) {
+    const stored = storedUrl(plan.url, plan.dotPlugins);
+    if (stored === undefined) return undefined;
+    homeOf.set(stored.url, { dotPlugins: plan.dotPlugins, body: stored.body });
+    return stored.url;
+  }
+  for (const candidate of plan.candidates) {
+    const p = mirroredFile(candidate, plan.dotPlugins);
+    if (p !== undefined) return pathToFileURL(p).href;
   }
   return undefined;
 }
 
-/**
- * Resolve one specifier made from inside a fetched plugin, fetching it if we do not have it.
- *
- * Returns a file: URL, or undefined if this specifier is not ours to resolve (a bare one).
- */
-export async function resolveFetched(specifier, parent) {
-  const plan = candidatesOf(specifier, parent);
-  if (plan === undefined) return undefined;
-  const cached = onDisk(plan);
-  if (cached !== undefined) return cached;
-
+async function fetchPlan(plan, specifier, parent) {
+  const asked = plan.url !== undefined ? [plan.url] : plan.candidates;
   let unreachable;
-  for (const candidate of plan.candidates) {
+  for (const candidate of asked) {
     // The signal bounds the body as well as the headers: an origin that stalls mid-response is as stuck as
     // one that never answers, and either freezes the whole process, whose thread is waiting on this.
-    let body;
+    let res, body;
     try {
-      const res = await fetch(candidate, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+      res = await fetch(candidate, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
       if (!res.ok) continue;
       body = await res.text();
     } catch (e) {
       unreachable ??= e?.name === 'TimeoutError' ? new Error(`no answer within ${FETCH_TIMEOUT_MS} ms`) : e;
       continue;
     }
-    const p = urlToCachePath(candidate, plan.dotPlugins);
+    if (plan.url !== undefined) {
+      // The URL that answered is the module: its imports are relative to it, and two URLs redirected to one
+      // module load it once.
+      const answered = res.url || candidate;
+      await storeFetched(plan.dotPlugins, candidate, answered, body);
+      homeOf.set(answered, { dotPlugins: plan.dotPlugins, body: bodyPath(plan.dotPlugins, answered) });
+      return answered;
+    }
+    const p = mirrorPath(candidate, plan.dotPlugins);
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, body, 'utf8');
     await recordOrigin(plan.dotPlugins, candidate);
@@ -170,9 +253,28 @@ export async function resolveFetched(specifier, parent) {
 
   const reason = unreachable !== undefined
     ? `could not be reached (${unreachable.message})`
-    : `was not found at ${plan.candidates.join(' or ')}`;
-  throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.`),
+    : `was not found at ${asked.join(' or ')}`;
+  throw Object.assign(new Error(`Cannot fetch "${specifier}" imported by ${parent}: it ${reason}.${urlHint(plan, unreachable)}`),
                       { code: 'ERR_MODULE_NOT_FOUND' });
+}
+
+// A plugin's own `./x.js` may be served as `x.ts`, so its imports try both. A module imported by URL is
+// fetched at exactly that URL, as a browser fetches it, so a miss says how to name the one that exists.
+function urlHint(plan, unreachable) {
+  if (plan.url === undefined || unreachable !== undefined) return '';
+  const u = new URL(plan.url);
+  if (!u.pathname.endsWith('.js')) return ' A module imported by URL is fetched at exactly that URL, as a browser fetches it.';
+  u.pathname = u.pathname.slice(0, -3) + '.ts';
+  return ` A module imported by URL is fetched at exactly that URL, as a browser fetches it — if its source is ` +
+         `TypeScript, import "${u.href}".`;
+}
+
+// The module's URL — `file:` for a plugin's own file, the URL that answered for one imported by URL — or
+// undefined if this specifier is not ours to resolve (a bare one).
+export async function resolveFetched(specifier, parent) {
+  const plan = planOf(specifier, parent);
+  if (plan === undefined) return undefined;
+  return onDisk(plan) ?? fetchPlan(plan, specifier, parent);
 }
 
 // The module hooks run in-thread and must answer synchronously, and a fetch can only be awaited. So when a
@@ -195,17 +297,19 @@ const PICKUP_MS = 10_000;
 let fetcher;
 
 export function resolveFetchedSync(specifier, parent) {
-  const plan = candidatesOf(specifier, parent);
+  const plan = planOf(specifier, parent);
   if (plan === undefined) return undefined;
   const cached = onDisk(plan);
   if (cached !== undefined) return cached;
 
   const current = fetcher ??= startFetcher();
   const state = new Int32Array(new SharedArrayBuffer(4));
-  current.worker.postMessage({ specifier, parent, state });
+  // The plan goes rather than the specifier, because only this thread knows which cache a module that
+  // answered by URL lives in.
+  current.worker.postMessage({ plan, specifier, parent, state });
   const stuck =
     Atomics.wait(state, 0, QUEUED, PICKUP_MS) === 'timed-out' ? `the fetch worker did not start within ${PICKUP_MS} ms`
-    : Atomics.wait(state, 0, WORKING, plan.candidates.length * FETCH_TIMEOUT_MS + PICKUP_MS) === 'timed-out'
+    : Atomics.wait(state, 0, WORKING, (plan.candidates?.length ?? 1) * FETCH_TIMEOUT_MS + PICKUP_MS) === 'timed-out'
       ? 'the fetch worker did not answer in time'
     : undefined;
   if (stuck !== undefined) {
@@ -216,6 +320,7 @@ export function resolveFetchedSync(specifier, parent) {
   }
   const answer = receiveMessageOnPort(current.answers).message;
   if ('error' in answer) throw Object.assign(new Error(answer.error), { code: answer.code });
+  if (plan.url !== undefined) homeOf.set(answer.url, { dotPlugins: plan.dotPlugins, body: bodyPath(plan.dotPlugins, answer.url) });
   return answer.url;
 }
 
@@ -236,10 +341,10 @@ function startFetcher() {
 
 if (!isMainThread && workerData?.role === FETCHER) {
   const { answers } = workerData;
-  parentPort.on('message', async ({ specifier, parent, state }) => {
+  parentPort.on('message', async ({ plan, specifier, parent, state }) => {
     Atomics.store(state, 0, WORKING);
     Atomics.notify(state, 0);
-    try { answers.postMessage({ url: await resolveFetched(specifier, parent) }); }
+    try { answers.postMessage({ url: await fetchPlan(plan, specifier, parent) }); }
     catch (e) { answers.postMessage({ error: e instanceof Error ? e.message : String(e), code: e?.code }); }
     Atomics.store(state, 0, DONE);
     Atomics.notify(state, 0);

@@ -101,7 +101,7 @@ the specific act.
 ## Gate ids
 
 `tools.overwrite` (subject: tool name) · `plugin.add` / `plugin.provision-deps` / `plugin.remove` /
-`plugin.npm-uninstall` / `plugin.load` · `provider.add` / `provider.add-unverified` /
+`plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load` · `provider.add` / `provider.add-unverified` /
 `provider.update` / `provider.update-unverified` / `provider.remove` · `mcp_action.add` /
 `mcp_action.remove`.
 

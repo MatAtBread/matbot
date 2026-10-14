@@ -185,7 +185,7 @@ matbot writes none of the three resolvers. Which one runs is decided by what the
 | Route | What it is | Resolved by |
 |---|---|---|
 | **local** | a path, or a bare name the disk already answers | the **filesystem** — already an answer |
-| **npm** | a name nothing local claims, a version-suffixed name, an explicit `npm:…`, a `.tgz`/`.tar.gz`, or a git URL | the **package manager** — `^1.2.3` is a *question*: constraint solving, a registry, a lockfile |
+| **npm** | a package name nothing local claims, or an explicit `npm:<name>` | the **package manager** — `^1.2.3` is a *question*: constraint solving, a registry, a lockfile |
 | **http** | an `http(s)://` URL, or `github:owner/repo[/sub][#ref]` | the **URL itself** — nothing to resolve but a fetch |
 
 **A bare name is local if anything here declares it.** Not if a *path* of that shape exists — that is a
@@ -194,8 +194,17 @@ coincidence, and in a checkout it never happens: `@matatbread/matbot-edit-sessio
 itself this?" — over the same two-deep root `discover_local` scans, and only an unclaimed name is a
 registry question. Otherwise `plugin add @matatbread/matbot-edit-session` in a full checkout would install
 a *published copy of code already on disk*: a second package, free to skew in version, shadowing the source
-being worked on. A `@<range>` suffix is always the registry, local package or not — a constraint is exactly
-what a filesystem cannot solve.
+being worked on.
+
+**`plugin add` installs an npm plugin by its name, and nothing else.** A `@<range>` suffix, a tarball and a
+git URL are refused, saying what to do instead: which copy of a package a project carries is the project's
+decision, made with its own package manager — then `plugin add <name>`, or `plugin reload <name>` to run a
+version installed in place of one already loaded. Before anything is installed, `add` reads the manifest the
+name stands for — the copy already installed, else the registry's (`npm view`, so the project's `.npmrc`
+applies) — and refuses one without `matbotRuntime` including `node`, exactly as the http route does: the
+plugin tool installs plugins, and a plugin's own npm dependencies come with it. A package the project
+already has installed is configured as it is, with no package manager run; one it declares but has not
+installed, or a project with no `package.json` for the install to be recorded in, is refused.
 
 The same fact runs the other way when a plugin is **recorded**: `plugin add` writes the canonical package
 name, not the path it was given, whenever that name resolves back to the directory just approved. The name
@@ -217,10 +226,10 @@ deployment happens to work (`.plugins/` sits under a project whose flat `node_mo
 above it); a pnpm workspace keeps its links inside each package, so a source checkout's root has no
 `@matatbread` for the walk to find.
 
-`npm:` is the one override, for when the shape does not give the answer away — a bare name that happens
-to collide with a directory, or a URL serving a tarball without a `.tgz` in its path. A tarball or git URL
-is a URL and still takes the npm route: nothing is importable at the far end until something unpacks or
-clones it.
+`npm:<name>` asks for the registry explicitly. What is recorded is the bare name, which is what a restart
+resolves, so it is refused when something local also answers to that name — the next start would load that
+instead of what was installed. A tarball or git URL still classifies as npm — nothing is importable at the far end until something unpacks or clones it — and
+`plugin add` refuses it, as above.
 
 ### Local plugins and their dependencies
 
@@ -229,7 +238,14 @@ its own package.json declares**, so a plugin may wrap a third-party module. `plu
 first and lists the resolved set — transitives included — in the same approval it asks for the install,
 then installs exactly that with npm (`--ignore-scripts`, and `--omit=peer` so the host's
 `plugin-api`/`core` are *linked* to the host's own copies rather than fetched from a registry as a second
-version). Declining installs nothing and leaves no lockfile.
+version). Declining installs nothing and leaves no lockfile, and an install that fails takes back what it
+wrote.
+
+That is done only on **empty ground** — a plugin directory with no `node_modules` and no lockfile — because
+`npm ci` deletes a `node_modules` before installing and resolving a plan rewrites a lockfile, and neither is
+matbot's to replace in someone's plugin. A directory the author has installed into is theirs: if it has every
+declared dependency it is used as it is, and otherwise `add` refuses, naming what is missing and the command
+to finish the install with.
 
 Only registry ranges are handed to npm. A manifest carrying `workspace:`, `catalog:`, `link:`, `file:` or
 a URL range is left **entirely** alone — those say "something already resolves me", which is what every
@@ -265,10 +281,24 @@ offer `add` does — the fetch used to remove them, which made `reload` impossib
 with a dependency. The evicted source is set aside rather than deleted, so a reload whose load then fails
 restores the copy that was working and loads that instead: a failed reload is a no-op, not an outage.
 
-**This route fetches one package; it installs no dependency graph.** A bare import means host-provided, so:
+**Removing one takes its cache with it.** `plugin remove` deletes the plugin's source, the dependencies
+installed into it, a set-aside copy and its name link — all matbot's own, and derivable from the config
+entry — unless another configured plugin's files, or a provider's `module:`, live in the same directory. So a removed plugin is no
+longer importable by name, and no longer listed by `discover_local`, which lists what is cached. What `add`
+changed in the *project* is a different matter: an npm package it installed, or the `node_modules` and
+lockfile a local plugin's dependency install created. Nothing there says who put it there, so `add` records
+what it created as it creates it (`.plugins/.installs/`), and `remove` offers back exactly that — a package
+the project already declared is never touched.
 
-- a third-party dependency must already be present, or be written as a **URL import** — which is now
-  fetched and cached like anything else;
+**This route fetches one package's own files; its dependencies come one of three ways.** A bare import
+resolves from the plugin's cache directory, then the host, so:
+
+- a third-party dependency its `package.json` declares is **installed into its cache directory** with npm,
+  planned from the manifest before anything is loaded — `add` lists every package (transitives included)
+  in the approval for the plugin itself, and a `reload` whose refreshed copy declares a new one offers it
+  before loading that copy; declined there, the working copy is restored;
+- a third-party dependency can instead be written as a **URL import**, fetched on demand and kept under
+  its URL (below) — the one spelling that also works in the browser, where nothing can be installed;
 - a dependency on **another matbot plugin** is met by adding that plugin to `plugins:` too, and one
   declared in the manifest but present nowhere is reported at boot;
 - an import that resolves nowhere fails naming the specifier *and* the importer, because the resolution
@@ -278,9 +308,25 @@ restores the copy that was working and loads that instead: a failed reload is a 
 
 - **Any source CDN, including the rewriting ones.** jsdelivr and unpkg serve source with bare imports
   intact; esm.sh rewrites them to root-relative paths. Both work — the second used to be silently dropped.
+- **A URL import keeps its URL.** The module it names is not mirrored as a file: Node loads it under its
+  own URL (the one that answered, after any redirect), so its imports resolve as a browser would resolve
+  them and its `import.meta.url` is that URL in both hosts. It is cached under `.plugins/.urls/`, by hash.
+  Its bare imports are looked up from the cache, so they reach the host singletons and other fetched
+  plugins, as a bare import from your own files does. Pinning a version is still wise — an unpinned URL
+  is cached as whatever it first answered with — but it is no longer needed to make one load.
+- **`import.meta.url` is a path only for a Node-only plugin's own files.** In the browser your module is
+  a `blob:` URL, so a cross-runtime plugin must not read anything relative to it; declared `files` are for
+  the Node route.
 - **ESM only.** A CommonJS dependency reached by URL will not load. jsdelivr's default paths serve CJS for
   many packages; `/+esm` and esm.sh are the ESM forms.
-- **A tarball or git URL is not this route** — it takes npm, because something has to unpack it.
+- **A URL import is fetched at exactly that URL**, as a browser fetches it. Your plugin's own `./x.js` may
+  be served as `x.ts` and is found either way; a URL is not guessed at, and a miss names the `.ts` URL to
+  write instead.
+- **A fetched plugin's own file is never imported by its URL.** Its files load as `file:` modules, so the
+  same file under its URL would be a second copy with its own module state. The import is refused, naming
+  the one that reaches the single copy: a relative path from inside that plugin, its package name from
+  another.
+- **A tarball or git URL is not this route** — it is a package manager's, and `plugin add` refuses it.
 - **Hot reload does not cross a hard-dependency edge.** To pick up a dependency's code changes, reload the
   *dependent*, not the dependency. Unchanged by any of this, and documented in CLAUDE.md.
 
@@ -1313,6 +1359,8 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). `tool-background` is deprecated. The README's plugin table carries the same classification.
+
 | Package | Tools / Kind | Description |
 |---|---|---|
 | `@matatbread/matbot-tool-plugin` | `plugin`, `provider` · always loaded | Built-in: manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles |
@@ -1335,6 +1383,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
 | `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
+| `@matatbread/matbot-function-runner-node` | `FunctionRunner` service, `function_runner_config` · Node only · optional | Bounds a `tool_function` body's run time, withholds host globals and routes its `import(...)` through the permission gate; without it a body runs unbounded and ungated |
 | `@matatbread/matbot-tool-router` | `ToolPresenter` (`tool_search`) | Serves a bounded per-turn tool window from a large library — pins + BM25-ranked tools + a `tool_search` entry point |
 | `@matatbread/matbot-tool-store` | `store_action` (+ `defineStore`) | Define and expose named persistent stores with generated CRUD tools |
 | `@matatbread/matbot-rumsfeld` | `contextual_search`, `find_fact` | Resolve unknown terms via the knowledge index (`contextual_search` returns a document; `find_fact` returns a precise answer) |
@@ -1346,6 +1395,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-tool-ts-validation` | `ToolCallValidator` service · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Defers to whatever validator it displaced when it has no opinion, so it composes with `json-validation` in either load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
+| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |

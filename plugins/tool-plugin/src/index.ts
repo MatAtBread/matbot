@@ -13,10 +13,16 @@ export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materi
 // A refresh sets the previous cached copy aside rather than deleting it, so a reload whose load fails can
 // put the working one back. The `plugin` tool drives the pair; the tests drive them directly.
 export { restoreRemote, discardRestore } from './remote-cache.js';
+// What `remove` takes back: a fetched plugin's cache by derivation, the project's files by the record `add`
+// writes as it changes them. Exported for `matbot install`, which installs too, and for the tests.
+export { releaseRemote } from './remote-cache.js';
+export { readInstallRecord, writeInstallRecord, dropInstallRecord, declaredDependencies, isPackageName }
+  from './install-record.js';
+export type { InstallRecord } from './install-record.js';
 export type { Classified, RemoteManifest, MaterializedRemote } from './remote-cache.js';
 // Provisioning a local plugin's dependencies: the `plugin` tool drives it, and its tests drive it directly
 // — the plan/apply split exists so a caller can fold the resolved set into an approval it already asks for.
-export { planProvision, applyProvision, discardProvision, isRegistryRange } from './provision.js';
+export { planProvision, applyProvision, discardProvision, localProvision, isRegistryRange } from './provision.js';
 export type { ProvisionPlan } from './provision.js';
 // A second copy of a host singleton: reported by `plugin list`, and once at boot by a host that has
 // somewhere to print it.

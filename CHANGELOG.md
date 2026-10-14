@@ -258,6 +258,15 @@ churn and less likely to affect a consumer who doesn't use them.
   continuous bottom-chasing was removed, which thinking reached around. The header/composer height
   behind that test is cached and invalidated by a `ResizeObserver` rather than at each site that
   could grow the composer, which is a list a later feature omits with no error and no symptom.
+- **`frontend/web`** — a session waiting on a question for the user shows a **red** dot in the sidebar
+  instead of the amber busy one, and goes back to amber (or idle) when the question is answered,
+  cancelled or the turn is aborted. The `session-busy` status event (and `statusEvents()` in both
+  transports) carries `prompting` beside `busy`, and it is replayed to a stream that connects while the
+  question is outstanding — the point being the conversation nobody is looking at, which is the one a
+  parked prompt was previously invisible from.
+- **`frontend/web`** — stopping a session in the in-process (browser bundle) transport cancels a parked
+  prompt, as the server does, instead of answering it with `''` — which the prompt turned into the
+  field's default, an answer nobody gave (and on `plugin store-key`, whose default is blank, a removal).
 
 - **`tool-types` / `cli`** — a `tool_function` body's imports are type-checked against the modules the
   installation permits. `ToolTypeIndex.check` scopes node's declarations with `paths`, one entry per
@@ -326,13 +335,106 @@ churn and less likely to affect a consumer who doesn't use them.
   so reload was structurally impossible for every http plugin with a dependency, the fetch being the very
   thing that removed them. The subtree has two owners, and only the fetched half is the refresh's to
   drop: `node_modules` and `package-lock.json` are kept. A refreshed manifest declaring something NEW is
-  answered as well — reload now makes the same install offer `add` does when a load fails on an
-  unresolved import (one shared code path, one gate, `provision-deps`).
+  answered as well, and before anything is loaded: `add` plans a fetched plugin's declared dependencies
+  from its manifest and lists them in the approval for the plugin itself, then installs them and loads it
+  once; `reload` fetches the refreshed copy, offers what it newly declares (`provision-deps`), and loads
+  it only if that went through — declined, the working copy is restored. Both used to load first, fail on
+  the first missing import (logged as an error with a stack), and only then ask and retry. The log note for
+  an unmet declared dependency, and the resolve error for a bare import, said this route "installs no
+  dependencies"; both now say how the plugin gets them.
 
   **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
   around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A
   refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and
   re-loaded, and the result says which happened. Its provisioning is not rolled back with it.
+
+- **`cli` / `tool-plugin`** — a fetched plugin can import a bare CDN URL (issue #89). A URL may be a
+  module *and* the parent of others, which is how esm.sh, jsdelivr and unpkg all serve a bare package:
+  `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. The cache mirrored each URL under its
+  own path, so the first became the *file* `.plugins/esm.sh/ms@2.1.3` and the second's `mkdir` failed
+  with `ENOTDIR` — the documented way to bring a third-party dependency on the http route crashed the
+  loader on the commonest shape of one.
+
+  A module imported by absolute URL now keeps that URL as its identity, as it does in the browser, rather
+  than becoming a mirrored file. Its imports resolve against the URL that answered it, so a redirect
+  (unpkg's `lit@3?module` → `lit@3.3.3/index.js?module=`) resolves correctly and two URLs redirected to
+  one module load it once; the query is part of its name (`?bundle` and `?dev` are two modules, where the
+  mirror dropped it); its `import.meta.url` is the URL, matching the browser; and its bare imports are
+  looked up from the cache, reaching what a mirrored file's reach. It is stored under `.plugins/.urls/`,
+  keyed by a hash of the URL, so no URL can be a path that collides with another or decodes outside the
+  cache — `chart.js` beside `chart.js/auto` is two modules. A warm boot still asks the network for
+  nothing, and a module the old mirror already held is served from where it is, writing nothing, so an
+  upgrade needs neither the network nor a writable cache.
+
+  Two consequences of the URL being the identity, each refused with what to write instead rather than
+  resolved behind the importer's back. A URL import is fetched at exactly that URL, as the browser does:
+  the mirror used to try `x.ts` behind an absolute `…/x.js`, and a miss now names the `.ts` URL to import
+  (a plugin's own relative `./x.js` still finds `x.ts`). And a fetched plugin's own file is not imported
+  by its URL: its files load as `file:` modules, so the same file under its URL would be a second copy
+  with its own module state — the import is refused, naming the relative path or package name that
+  reaches the one copy.
+
+  A plugin's own files are mirrored exactly as before: a package was a file tree before it was served, so
+  the mirror is faithful there, and a Node-only plugin still reads its files through `import.meta.url`.
+  The mirror now refuses a URL whose host is a dot segment (`http://../`) or whose path encodes a
+  separator (`%2F`), the two spellings that survive URL parsing and would put a file outside `.plugins/`.
+  Its rules are stated once (`@matatbread/matbot-tool-plugin/cache-layout`) — the path, the `.js` → `.ts`
+  candidates and the per-host scheme record — for the module hook and `materializeRemote` alike, rather
+  than as a copy in each.
+
+  The `plugin` tool's description and `docs/DEVELOPING.md` said an http/github plugin "installs no
+  dependency graph" and that any bare import means the host's copy. Since the dependencies a fetched
+  plugin declares are installed into its cache directory (0.4.20, above), the model was told to work
+  around a dependency it could simply have approved; both now say what happens.
+
+- **`tool-plugin` / `cli`** — `plugin remove` takes back what `plugin add` created, and only that (issue
+  #98). Nothing recorded what an install created, so `remove` and the undo of a failed `add` both inferred
+  it from what they found, and a live add/reload/remove run across all four routes showed `remove` leaving
+  most of it behind: a github/http plugin's source and the full dependency tree installed into it, its
+  set-aside copy as empty directories, and its name link — so a removed plugin was still importable by
+  name. What a thing is decides who removes it:
+
+  - **matbot's own cache** — a fetched plugin's source, its installed dependencies, its set-aside copy and
+    its name link — is derivable from the config entry, so `remove` deletes it, unless another configured
+    plugin's files live in the same directory (two plugins from one repo). A removed plugin is therefore no
+    longer listed by `discover_local`, which lists what is cached.
+  - **the project's files** — a key `npm add` wrote into `package.json`, or the `node_modules` and lockfile
+    installing a local plugin's dependencies created in its directory — carry nothing saying who put them
+    there. So `add` (and `matbot install`) records what it created as it creates it, under
+    `.plugins/.installs/`, and `remove` offers back exactly that, through the existing `npm-uninstall` gate
+    and a new `remove-provisioned` one. It no longer reads `package.json` to decide, which was how it could
+    offer to uninstall a package the project declared itself. "Created" means the plugin's own name arriving
+    in a manifest that declared it in no section beforehand. A package from an install made before this
+    release has no record, so `remove` names the command to uninstall it rather than offering to.
+
+  What `add` cannot carry through, or take back exactly, it now refuses before anything is asked or
+  written, saying what to do instead — rather than installing and then inferring what it had installed:
+
+  - **An npm plugin is installed by its package name only.** A `@<version>`, a tarball and a git URL are
+    refused: which copy a project carries is its own decision, made with its package manager, followed by
+    `plugin add <name>` — or `plugin reload <name>` for a version installed in place of a loaded one.
+    `add foo@2.0.0` used to write `foo@2.0.0` into `matbot.yaml`, which nothing could load.
+  - **An npm package is checked before it is installed**: its manifest — the installed copy's, else the
+    registry's via `npm view`, honouring the project's `.npmrc` — must declare `matbotRuntime` including
+    `node`, as a URL plugin's already had to. A library is refused rather than installed and removed.
+  - **The project's own install is the project's.** A package already installed is configured as it is, with
+    no package manager run (one used to rewrite its declared range); a declared but uninstalled one, or a
+    project with no `package.json` to record the install in, is refused.
+  - **A duplicate plugin name is refused before installing**, on every route.
+  - **A local plugin's dependencies are installed only on empty ground** — no `node_modules`, no lockfile.
+    `npm ci` deletes a `node_modules` first and planning rewrites a lockfile, so a directory the author has
+    installed into is used as it is when complete, and otherwise refused, naming what is missing. An install
+    that fails removes what it wrote.
+
+  So an `add` that disowns the plugin after installing it — an incompatible runtime, not a plugin when
+  loaded — takes back exactly what it created, unasked: the npm package it added, the `node_modules` and
+  lockfile it created, and a fetched plugin's cache. A fetched plugin's cache is also kept on `remove` when a
+  provider's `module:` lives in it. A plugin's name link now follows whichever copy was materialised last;
+  it was first-writer-wins, so a plugin installed from github resolved by name to the copy an earlier http
+  install had left, and a link to a removed directory could never be replaced. And `plugin add npm:<name>`,
+  the documented way to force the npm route, works: the `npm:` was passed to the package manager, which
+  reads it as an alias and refused every one — and is refused when something local also answers to the
+  name, since the entry recorded is the name and a restart would load the local one instead.
 
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
@@ -345,6 +447,13 @@ churn and less likely to affect a consumer who doesn't use them.
   that, the `session` parameter says it is recorded rather than followed, `sessionId` says it wins
   outright when given, and `background_job_action list` points at the `session` it reports in each
   row as the thing to read instead of assuming.
+
+- **`function-tools`** — `tool_function`'s description says that `fetch`, `AbortSignal`, `WebSocket`,
+  `console` and the timers are ordinary globals in a body (issue #99). Composing a body, the model reached
+  for the `http` tool — installing it if it was absent — for a request plain `fetch` would make: `http` has
+  a schema and is visible as a candidate, while the global was mentioned only in passing. The sentence sits
+  beside the one saying a runner *may* withhold globals, which left the model unsure whether `fetch` was
+  among them; it is not withheld by the node runner, and `types` lists any global that a runner does withhold.
 
 ## 0.4.19
 

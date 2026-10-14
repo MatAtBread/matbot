@@ -14,11 +14,12 @@
 // (e.g. mounted read-only into docker-bash) so cached plugin code cannot be tampered with by the
 // model. Do not move this under `.data/`.
 
-import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm } from 'node:fs/promises';
+import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm, rmdir, readlink, lstat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
 import path from 'node:path';
+import { mirrorPath, mirroredFile, candidatesFor, recordOrigin } from './cache-layout.js';
 
 // ── Specifier classification ────────────────────────────────────────────────────
 
@@ -36,9 +37,10 @@ import path from 'node:path';
 //           registry, a lockfile and integrity checking. The PACKAGE MANAGER owns all of that.
 //   http  — an `http(s)://` URL, or the `github:` shorthand for one. Also an answer: nothing to resolve
 //           but a fetch. Versioning, immutability and integrity belong to whoever serves it — `@0.4.4`
-//           in a CDN path, a tag or a SHA in a GitHub ref. It fetches ONE package's files and installs
-//           no dependency graph, so a bare import must already be present (host copies, or a
-//           previously-fetched plugin by canonical name).
+//           in a CDN path, a tag or a SHA in a GitHub ref. It fetches ONE package's files; the
+//           dependencies its manifest declares are installed into its cache directory as a separate,
+//           approved step (`provisionRemoteDependencies`), and any other bare import must already be
+//           present (host copies, or a previously-fetched plugin by canonical name).
 //
 // There used to be five, and two of them were the same route reached by punctuation: a `.tgz` was
 // `pnpm-url` while a directory URL was `remote`, and `github:o/r#path:sub` switched mechanism entirely on
@@ -270,7 +272,9 @@ async function fetchText(url: string): Promise<{ ok: boolean; status: number; te
  * upstream, and it evicts the subtree first, so these reads miss and the network answers.
  */
 async function readMirrored(url: string, dotPlugins: string): Promise<string | undefined> {
-  try { return await readFile(urlToCachePath(url, dotPlugins), 'utf8'); }
+  const cached = mirroredFile(url, dotPlugins);
+  if (cached === undefined) return undefined;
+  try { return await readFile(cached, 'utf8'); }
   catch { return undefined; }
 }
 
@@ -356,20 +360,11 @@ async function findEntryManifest(entryUrl: string, dotPlugins: string, live: boo
 
 // ── Materialisation (fetch the module graph onto disk) ───────────────────────────
 
-function urlToCachePath(url: string, dotPlugins: string): string {
-  const u = new URL(url);
-  return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
-}
-
 // matbot source imports siblings with explicit `.js` extensions (verbatimModuleSyntax); the raw
 // file on disk is `.ts`. Mirror the web bundle: fetch the `.js`, fall back to `.ts`, and write the
 // content at the `.ts` path so the ts-hooks `.js`→`.ts` resolve remap finds it at load time.
 async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl: string; content: string }> {
-  const candidates: string[] = [url];
-  const bare = (url.split('?')[0]) ?? url;
-  if (bare.endsWith('.js'))        candidates.push(url.slice(0, -3) + '.ts');
-  else if (bare.endsWith('.mjs'))  candidates.push(url.slice(0, -4) + '.mts');
-  else if (!CODE_EXT.test(bare))   candidates.push(url + '.ts', url.replace(/\/?$/, '/') + 'index.ts');
+  const candidates = candidatesFor(url);
 
   // Every candidate is tried on disk BEFORE any is tried on the network, because the two orders
   // disagree: the `.js` name is the preferred URL but the `.ts` name is what gets mirrored, so
@@ -443,7 +438,7 @@ async function moveOver(from: string, to: string): Promise<boolean> {
 async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
   manifestCache.delete(spec);
   const manifest = await fetchRemoteManifest(spec, dotPlugins, /* live */ true);
-  const pkgRoot = path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+  const pkgRoot = path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
 
   const aside = setAsidePath(pkgRoot, dotPlugins);
   if (await moveOver(pkgRoot, aside)) {
@@ -462,7 +457,7 @@ async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
 async function cachedPkgRoot(spec: string, dotPlugins: string): Promise<string | undefined> {
   try {
     const manifest = await fetchRemoteManifest(spec, dotPlugins);
-    return path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+    return path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
   } catch { return undefined; }
 }
 
@@ -487,6 +482,7 @@ export async function restoreRemote(spec: string, dotPlugins: string): Promise<b
   await rm(pkgRoot, { recursive: true, force: true });
   await mkdir(path.dirname(pkgRoot), { recursive: true });
   await rename(aside, pkgRoot);
+  await pruneEmpty(path.dirname(aside), dotPlugins);
   manifestCache.delete(spec);
   return true;
 }
@@ -496,8 +492,11 @@ export async function restoreRemote(spec: string, dotPlugins: string): Promise<b
 export async function discardRestore(spec: string, dotPlugins: string): Promise<void> {
   const pkgRoot = await cachedPkgRoot(spec, dotPlugins);
   if (pkgRoot === undefined) return;
-  try { await rm(setAsidePath(pkgRoot, dotPlugins), { recursive: true, force: true }); }
-  catch { /* a reload that worked must not fail over housekeeping */ }
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  try {
+    await rm(aside, { recursive: true, force: true });
+    await pruneEmpty(path.dirname(aside), dotPlugins);
+  } catch { /* a reload that worked must not fail over housekeeping */ }
 }
 
 /**
@@ -526,7 +525,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   if (forceRefresh) await evictRemote(spec, dotPlugins);
   const manifest = await fetchRemoteManifest(spec, dotPlugins);
 
-  const pkgPath = urlToCachePath(manifest.pkgUrl, dotPlugins);
+  const pkgPath = mirrorPath(manifest.pkgUrl, dotPlugins);
   await writeCached(pkgPath, JSON.stringify(manifest.pkg, null, 2));
 
   await recordOrigin(dotPlugins, manifest.pkgUrl);
@@ -544,7 +543,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   await linkHostSingletons(dotPlugins);
 
   const { finalUrl, content } = await fetchModule(manifest.entryUrl, dotPlugins);
-  const entry = urlToCachePath(finalUrl, dotPlugins);
+  const entry = mirrorPath(finalUrl, dotPlugins);
   await writeCached(entry, content);
 
   await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
@@ -590,26 +589,11 @@ export async function remoteDependencyNotes(m: MaterializedRemote): Promise<stri
     if (hostPackageDir(req, name) !== undefined) continue;
     notes.push(LOOKS_LIKE_PLUGIN.test(name)
       ? `declares a dependency on "${name}", which is not present. That looks like a matbot plugin: add it to \`plugins:\` in matbot.yaml so it is fetched alongside this one.`
-      : `declares a dependency on "${name}", which resolves nowhere the host can see. This route fetches one package's own files and bridges ` +
-        `bare imports to packages already present — it installs no dependencies, so install "${name}" alongside matbot.`);
+      : `declares a dependency on "${name}", which is not installed. A fetched plugin's declared dependencies are installed ` +
+        `into its cache directory when it is added, and offered again by \`plugin reload\` (with refresh) — so reload it to ` +
+        `install "${name}", or install it alongside matbot.`);
   }
   return notes;
-}
-
-// The scheme a host was reached over is NOT recoverable from `.plugins/<host>/…` — the tree keys on host so
-// that one origin is one directory — and the module hook needs it to turn a relative import back into a
-// URL. So each host records its own, and an absent record means https, which is what every cache written
-// before this existed came from.
-//
-// The hook reads this file; it cannot import the name from here, because `plugins/` may not depend on
-// `apps/`. Keep the two in sync — same arrangement as the reload stamp shared with ts-hooks.js.
-const ORIGIN_FILE = '.origin';
-
-async function recordOrigin(dotPlugins: string, url: string): Promise<void> {
-  const u = new URL(url);
-  const hostDir = path.join(dotPlugins, u.host);
-  await mkdir(hostDir, { recursive: true });
-  await writeFile(path.join(hostDir, ORIGIN_FILE), u.protocol, 'utf8');
 }
 
 // The host singletons must ALWAYS resolve to the host's own copy (the singleton boundary); a fetched
@@ -619,16 +603,69 @@ const HOST_SINGLETONS = new Set(['@matatbread/matbot-plugin-api', '@matatbread/m
 
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
-/** Symlink `.plugins/node_modules/<pkg.name>` → the fetched plugin's cache dir. Idempotent; a name
- *  already linked (by an earlier self-registration or a host bridge) is left as-is — first writer wins. */
+// Where a link leads, as written — so a link whose target has since been removed still answers.
+async function linkTarget(linkPath: string): Promise<string | undefined> {
+  try { return path.resolve(path.dirname(linkPath), await readlink(linkPath)); }
+  catch { return undefined; }
+}
+
+// Symlink `.plugins/node_modules/<pkg.name>` → the fetched plugin's cache dir, so a sibling plugin can import
+// it by name. The plugin being materialised owns its name — the registry admits one plugin per name — so a
+// link leading anywhere else is replaced. It was first-writer-wins, which left a plugin installed from
+// github resolving, by name, to the copy an earlier http install of it had left, and a link to a removed
+// directory dangling for good: `access` follows the link, so a dangling one read as absent and the
+// re-link then failed on EEXIST. A real directory there is not a link this wrote, and is left alone.
 async function registerByName(pkg: Record<string, unknown>, pkgRoot: string, dotPlugins: string): Promise<void> {
   const name = pkg['name'];
   if (typeof name !== 'string' || HOST_SINGLETONS.has(name)) return;
   const linkPath = path.join(dotPlugins, 'node_modules', name);
-  try { await access(linkPath); return; } catch { /* not linked yet */ }
+  if (await linkTarget(linkPath) === pkgRoot) return;
+  const found = await lstat(linkPath).catch(() => undefined);
+  if (found !== undefined && !found.isSymbolicLink()) return;
   await mkdir(path.dirname(linkPath), { recursive: true });
+  await rm(linkPath, { force: true });
   try { await symlink(pkgRoot, linkPath, LINK_TYPE); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+}
+
+// Remove the directories that held `from` and are now empty, up to (not including) `stop`.
+async function pruneEmpty(from: string, stop: string): Promise<void> {
+  for (let dir = from; dir.startsWith(stop + path.sep); dir = path.dirname(dir)) {
+    try { await rmdir(dir); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return; }
+  }
+}
+
+const within = (inner: string, outer: string): boolean => inner === outer || inner.startsWith(outer + path.sep);
+
+// Remove what a fetched plugin has in the cache: its mirrored source with the dependencies installed into
+// it, the copy a refresh set aside, and its name link if the link is its own. All of it is derivable from
+// the specifier, which is why none of it is in an install record (install-record.ts).
+//
+// Not when another configured specifier's directory contains this one's or lies inside it — two plugins
+// from one repo, or two spellings of one — because deleting either would delete the other's files. Returns
+// whether it removed anything.
+export async function releaseRemote(spec: string, dotPlugins: string, others: readonly string[]): Promise<boolean> {
+  let manifest: RemoteManifest;
+  try { manifest = await fetchRemoteManifest(spec, dotPlugins); } catch { return false; }
+  const pkgRoot = path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
+  for (const other of others) {
+    const theirs = await cachedPkgRoot(other, dotPlugins);
+    if (theirs !== undefined && (within(theirs, pkgRoot) || within(pkgRoot, theirs))) return false;
+  }
+
+  const name = manifest.pkg['name'];
+  if (typeof name === 'string' && !HOST_SINGLETONS.has(name)) {
+    const linkPath = path.join(dotPlugins, 'node_modules', name);
+    if (await linkTarget(linkPath) === pkgRoot) await rm(linkPath, { force: true });
+  }
+  const aside = setAsidePath(pkgRoot, dotPlugins);
+  await rm(pkgRoot, { recursive: true, force: true });
+  await rm(aside, { recursive: true, force: true });
+  await pruneEmpty(path.dirname(pkgRoot), path.join(dotPlugins, new URL(manifest.pkgUrl).host));
+  await pruneEmpty(path.dirname(aside), dotPlugins);
+  manifestCache.delete(spec);
+  return true;
 }
 
 /**
@@ -674,8 +711,14 @@ async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, 
     const rel = raw.replace(/^\.?\//, '');
     const last = rel.split('/').pop() ?? '';
     if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
-    const url = new URL(rel, pkgUrl).href;
-    const cachePath = urlToCachePath(url, dotPlugins);
+    let url: string, cachePath: string;
+    try {
+      url = new URL(rel, pkgUrl).href;
+      cachePath = mirrorPath(url, dotPlugins);
+    } catch (e) {
+      console.warn(`[matbot] declared file "${rel}" not fetched: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
     try { await access(cachePath); continue; } catch { /* not mirrored yet */ }
     // Best-effort includes the network being gone. An asset that never cached (a 404, an interrupted
     // first boot) is retried on every boot, so without this an offline boot dies on the retry — for a
@@ -743,8 +786,11 @@ function hostPackageDir(req: NodeRequire, name: string): string | undefined {
   }
 }
 
+// Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites. "Already
+// there" means a FILE: a directory of that name returned as the entry fails later as a directory import
+// with nothing to say why, where writing over it fails here, naming the path.
 async function writeCached(localPath: string, content: string): Promise<void> {
-  try { await access(localPath); return; } catch { /* not cached yet */ }
+  if ((await stat(localPath).catch(() => undefined))?.isFile()) return;
   await mkdir(path.dirname(localPath), { recursive: true });
   await writeFile(localPath, content, 'utf8');
 }

@@ -154,7 +154,7 @@ test('a lockfile the author already had is not deleted by a decline', async () =
   try {
     await writeFile(join(dir, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}');
     const plan = await planProvision(dir);
-    assert.equal(plan.hadLockfile, true);
+    assert.equal(plan.createdLockfile, false);
     await discardProvision(plan);
     assert.equal(await exists(join(dir, 'package-lock.json')), true, "someone else's lockfile is not ours to remove");
   } finally {

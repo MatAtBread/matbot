@@ -46,13 +46,15 @@ function makeInProcessTransport(services) {
   // Authoritative busy from the runner (running || queued > 0), deduped + broadcast to statusEvents
   // subscribers (mirror server.ts updateBusy / statusListeners / busyState).
   const statusListeners = new Set();
+  // sid → 'busy' | 'prompting'; absent = idle.
   const busyState = new Map();
   const busyTrackers = new Set();
   function updateBusy(sid) {
     const busy = run.status(sid).busy;
-    if ((busyState.get(sid) ?? false) === busy) return;
-    if (busy) busyState.set(sid, true); else busyState.delete(sid);
-    for (const l of statusListeners) l({ sessionId: sid, busy });
+    const state = !busy ? undefined : pendingPrompts.has(sid) ? 'prompting' : 'busy';
+    if (busyState.get(sid) === state) return;
+    if (state !== undefined) busyState.set(sid, state); else busyState.delete(sid);
+    for (const l of statusListeners) l({ sessionId: sid, busy, prompting: state === 'prompting' });
   }
 
   // The single interactive prompt implementation for direct tool calls has no answer channel, so it
@@ -122,6 +124,7 @@ function makeInProcessTransport(services) {
       const settled = () => {
         pendingPrompts.delete(sid);
         for (const inject of hub(sid)) inject({ type: 'prompt-resolved', traceId });
+        updateBusy(sid);
       };
       const ev = {
         type: 'prompt',
@@ -136,6 +139,7 @@ function makeInProcessTransport(services) {
         cancel:  ()     => { settled(); reject(promptCancelledError()); },
       });
       for (const inject of hub(sid)) inject(ev);
+      updateBusy(sid);
     });
   }
 
@@ -300,9 +304,9 @@ function makeInProcessTransport(services) {
     // `pendingPrompts` is keyed by session, so releasing would take the running turn's prompt with it.
     if (traceId !== undefined) { run.abortParallel(sid, traceId); updateBusy(sid); return; }
     // Release any pending prompt first so a turn parked on ctx.prompt() observes the abort rather
-    // than hangs, then drop the queue + abort the running turn (mirror server.ts).
-    const r = pendingPrompts.get(sid);
-    if (r) { pendingPrompts.delete(sid); r.resolve(''); }
+    // than hangs, then drop the queue + abort the running turn (mirror server.ts). Cancel, not
+    // resolve(''): that hands the tool the field's default as though it had been chosen.
+    pendingPrompts.get(sid)?.cancel();
     run.abort(sid);
     updateBusy(sid);
   }
@@ -315,8 +319,8 @@ function makeInProcessTransport(services) {
     const l = ev => { queue.push(ev); pump(); };
     statusListeners.add(l);
     // Send current busy state so the client is up-to-date immediately (mirror server.ts).
-    for (const sid of [...busyState.keys()]) {
-      if (run.status(sid).busy) queue.push({ sessionId: sid, busy: true });
+    for (const [sid, state] of [...busyState]) {
+      if (run.status(sid).busy) queue.push({ sessionId: sid, busy: true, prompting: state === 'prompting' });
       else updateBusy(sid);
     }
     if (signal) signal.addEventListener('abort', () => { closed = true; pump(); });

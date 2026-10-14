@@ -20,6 +20,7 @@ let profileNames = new Set(); // valid profile names, populated by initProfiles 
 let composerReadOnly = false; // true while viewing a session shared IN from another profile (writes rejected by backend)
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
+const promptingSessions = new Set(); // busy sessions parked on a question for the user
 const unreadSessions = new Set();
 const updatedFiles   = new Set();
 // path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
@@ -2087,6 +2088,7 @@ function renderSessions(sessions) {
     el.className = 'session-item' +
       (s.id === currentSessionId ? ' active' : '') +
       (busySessions.has(s.id) ? ' busy' : '') +
+      (promptingSessions.has(s.id) ? ' prompting' : '') +
       (!busySessions.has(s.id) && s.id !== currentSessionId && unreadSessions.has(s.id) ? ' unread' : '');
     el.dataset.sid = s.id;
 
@@ -4339,8 +4341,10 @@ async function init() {
 
   // Subscribe to session busy/idle transitions (the transport owns the wire + reconnect).
   (async function connectStatusStream() {
-    for await (const { sessionId, busy } of T.statusEvents(new AbortController().signal)) {
+    for await (const { sessionId, busy, prompting } of T.statusEvents(new AbortController().signal)) {
       const item = sessionListEl.querySelector('[data-sid="' + sessionId + '"]');
+      if (prompting) promptingSessions.add(sessionId); else promptingSessions.delete(sessionId);
+      item?.classList.toggle('prompting', !!prompting);
       if (busy) {
         busySessions.add(sessionId);
         unreadSessions.delete(sessionId);
