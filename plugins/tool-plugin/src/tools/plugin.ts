@@ -1094,10 +1094,11 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
     'package.json declares (npm, transitives ' +
     'included, listed in the install approval). A manifest using workspace:/catalog:/link:/file: ranges is ' +
     'left alone — those mean something already resolves it, which is true of any plugin inside this repo.\n' +
-    '  • HTTP/github fetches ONE package\'s files and installs no dependency graph. Its relative, ' +
-    'root-relative and absolute-URL imports are all fetched on demand, so a third-party dependency ' +
-    'written as a URL ("https://esm.sh/ms@2.1.3") works — but a BARE import means the host\'s own copy, ' +
-    'so anything else must already be present. A dependency it declares but nothing satisfies is reported ' +
+    '  • HTTP/github fetches ONE package\'s files, then offers to INSTALL the `dependencies` its ' +
+    'package.json declares into its cache directory (npm, transitives included, listed in the approval). ' +
+    'Its relative, root-relative and absolute-URL imports are all fetched on demand, so a third-party ' +
+    'dependency written as a URL ("https://esm.sh/ms@2.1.3") works too. A BARE import it does not declare ' +
+    'means the host\'s own copy, so it must already be present. A dependency it declares but nothing satisfies is reported ' +
     'at boot; an import that resolves nowhere fails naming both the specifier and the file that imported ' +
     'it, and is a genuine unmet dependency — install it, add it to `plugins:` if it is itself a matbot ' +
     'plugin, or express it as a URL. Do not retry name variations. ESM only on this route.\n\n' +

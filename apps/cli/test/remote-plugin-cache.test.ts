@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
          planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
+import { mirrorPath } from '@matatbread/matbot-tool-plugin/cache-layout';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -212,6 +213,18 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
     await srv.stop().catch(() => {});
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// The mirror maps a plugin package's URLs onto paths, and two spellings survive URL parsing that would put
+// one outside `.plugins/<host>/`. Dot segments do not, encoded or not — the parser has already resolved them.
+test('a mirrored path stays inside its host\'s directory', () => {
+  const dotPlugins = join(tmpdir(), '.plugins');
+  assert.equal(mirrorPath('https://h.example/a/%2e%2e/%2E%2e/x.ts', dotPlugins), join(dotPlugins, 'h.example', 'x.ts'));
+  assert.equal(mirrorPath('https://h.example/a/b%40c.ts', dotPlugins), join(dotPlugins, 'h.example', 'a', 'b@c.ts'));
+  assert.throws(() => mirrorPath('https://h.example/a/..%2F..%2F..%2Fx.ts', dotPlugins), /outside the plugin cache/);
+  assert.throws(() => mirrorPath('https://h.example/a/..%5c..%5cx.ts', dotPlugins), /outside the plugin cache/);
+  assert.throws(() => mirrorPath('http://../x.ts', dotPlugins), /outside the plugin cache/, 'a host of `..` parses');
+  assert.throws(() => mirrorPath('http://.restore/x.ts', dotPlugins), /outside the plugin cache/, 'and so does bookkeeping');
 });
 
 test('a declared dependency nothing satisfies is reported, named well enough to act on', async () => {

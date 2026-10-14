@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import process from 'node:process';
 import path from 'node:path';
+import { mirrorPath, mirroredFile, candidatesFor, recordOrigin } from './cache-layout.js';
 
 // ── Specifier classification ────────────────────────────────────────────────────
 
@@ -36,9 +37,10 @@ import path from 'node:path';
 //           registry, a lockfile and integrity checking. The PACKAGE MANAGER owns all of that.
 //   http  — an `http(s)://` URL, or the `github:` shorthand for one. Also an answer: nothing to resolve
 //           but a fetch. Versioning, immutability and integrity belong to whoever serves it — `@0.4.4`
-//           in a CDN path, a tag or a SHA in a GitHub ref. It fetches ONE package's files and installs
-//           no dependency graph, so a bare import must already be present (host copies, or a
-//           previously-fetched plugin by canonical name).
+//           in a CDN path, a tag or a SHA in a GitHub ref. It fetches ONE package's files; the
+//           dependencies its manifest declares are installed into its cache directory as a separate,
+//           approved step (`provisionRemoteDependencies`), and any other bare import must already be
+//           present (host copies, or a previously-fetched plugin by canonical name).
 //
 // There used to be five, and two of them were the same route reached by punctuation: a `.tgz` was
 // `pnpm-url` while a directory URL was `remote`, and `github:o/r#path:sub` switched mechanism entirely on
@@ -270,7 +272,9 @@ async function fetchText(url: string): Promise<{ ok: boolean; status: number; te
  * upstream, and it evicts the subtree first, so these reads miss and the network answers.
  */
 async function readMirrored(url: string, dotPlugins: string): Promise<string | undefined> {
-  try { return await readFile(urlToCachePath(url, dotPlugins), 'utf8'); }
+  const cached = mirroredFile(url, dotPlugins);
+  if (cached === undefined) return undefined;
+  try { return await readFile(cached, 'utf8'); }
   catch { return undefined; }
 }
 
@@ -356,20 +360,11 @@ async function findEntryManifest(entryUrl: string, dotPlugins: string, live: boo
 
 // ── Materialisation (fetch the module graph onto disk) ───────────────────────────
 
-function urlToCachePath(url: string, dotPlugins: string): string {
-  const u = new URL(url);
-  return path.join(dotPlugins, u.host, decodeURIComponent(u.pathname));
-}
-
 // matbot source imports siblings with explicit `.js` extensions (verbatimModuleSyntax); the raw
 // file on disk is `.ts`. Mirror the web bundle: fetch the `.js`, fall back to `.ts`, and write the
 // content at the `.ts` path so the ts-hooks `.js`→`.ts` resolve remap finds it at load time.
 async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl: string; content: string }> {
-  const candidates: string[] = [url];
-  const bare = (url.split('?')[0]) ?? url;
-  if (bare.endsWith('.js'))        candidates.push(url.slice(0, -3) + '.ts');
-  else if (bare.endsWith('.mjs'))  candidates.push(url.slice(0, -4) + '.mts');
-  else if (!CODE_EXT.test(bare))   candidates.push(url + '.ts', url.replace(/\/?$/, '/') + 'index.ts');
+  const candidates = candidatesFor(url);
 
   // Every candidate is tried on disk BEFORE any is tried on the network, because the two orders
   // disagree: the `.js` name is the preferred URL but the `.ts` name is what gets mirrored, so
@@ -443,7 +438,7 @@ async function moveOver(from: string, to: string): Promise<boolean> {
 async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
   manifestCache.delete(spec);
   const manifest = await fetchRemoteManifest(spec, dotPlugins, /* live */ true);
-  const pkgRoot = path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+  const pkgRoot = path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
 
   const aside = setAsidePath(pkgRoot, dotPlugins);
   if (await moveOver(pkgRoot, aside)) {
@@ -462,7 +457,7 @@ async function evictRemote(spec: string, dotPlugins: string): Promise<void> {
 async function cachedPkgRoot(spec: string, dotPlugins: string): Promise<string | undefined> {
   try {
     const manifest = await fetchRemoteManifest(spec, dotPlugins);
-    return path.dirname(urlToCachePath(manifest.pkgUrl, dotPlugins));
+    return path.dirname(mirrorPath(manifest.pkgUrl, dotPlugins));
   } catch { return undefined; }
 }
 
@@ -526,7 +521,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   if (forceRefresh) await evictRemote(spec, dotPlugins);
   const manifest = await fetchRemoteManifest(spec, dotPlugins);
 
-  const pkgPath = urlToCachePath(manifest.pkgUrl, dotPlugins);
+  const pkgPath = mirrorPath(manifest.pkgUrl, dotPlugins);
   await writeCached(pkgPath, JSON.stringify(manifest.pkg, null, 2));
 
   await recordOrigin(dotPlugins, manifest.pkgUrl);
@@ -544,7 +539,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   await linkHostSingletons(dotPlugins);
 
   const { finalUrl, content } = await fetchModule(manifest.entryUrl, dotPlugins);
-  const entry = urlToCachePath(finalUrl, dotPlugins);
+  const entry = mirrorPath(finalUrl, dotPlugins);
   await writeCached(entry, content);
 
   await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
@@ -594,22 +589,6 @@ export async function remoteDependencyNotes(m: MaterializedRemote): Promise<stri
         `bare imports to packages already present — it installs no dependencies, so install "${name}" alongside matbot.`);
   }
   return notes;
-}
-
-// The scheme a host was reached over is NOT recoverable from `.plugins/<host>/…` — the tree keys on host so
-// that one origin is one directory — and the module hook needs it to turn a relative import back into a
-// URL. So each host records its own, and an absent record means https, which is what every cache written
-// before this existed came from.
-//
-// The hook reads this file; it cannot import the name from here, because `plugins/` may not depend on
-// `apps/`. Keep the two in sync — same arrangement as the reload stamp shared with ts-hooks.js.
-const ORIGIN_FILE = '.origin';
-
-async function recordOrigin(dotPlugins: string, url: string): Promise<void> {
-  const u = new URL(url);
-  const hostDir = path.join(dotPlugins, u.host);
-  await mkdir(hostDir, { recursive: true });
-  await writeFile(path.join(hostDir, ORIGIN_FILE), u.protocol, 'utf8');
 }
 
 // The host singletons must ALWAYS resolve to the host's own copy (the singleton boundary); a fetched
@@ -675,7 +654,7 @@ async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, 
     const last = rel.split('/').pop() ?? '';
     if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
     const url = new URL(rel, pkgUrl).href;
-    const cachePath = urlToCachePath(url, dotPlugins);
+    const cachePath = mirrorPath(url, dotPlugins);
     try { await access(cachePath); continue; } catch { /* not mirrored yet */ }
     // Best-effort includes the network being gone. An asset that never cached (a 404, an interrupted
     // first boot) is retried on every boot, so without this an offline boot dies on the retry — for a
@@ -743,6 +722,7 @@ function hostPackageDir(req: NodeRequire, name: string): string | undefined {
   }
 }
 
+// Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites.
 async function writeCached(localPath: string, content: string): Promise<void> {
   try { await access(localPath); return; } catch { /* not cached yet */ }
   await mkdir(path.dirname(localPath), { recursive: true });

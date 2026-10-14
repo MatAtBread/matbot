@@ -265,10 +265,14 @@ offer `add` does — the fetch used to remove them, which made `reload` impossib
 with a dependency. The evicted source is set aside rather than deleted, so a reload whose load then fails
 restores the copy that was working and loads that instead: a failed reload is a no-op, not an outage.
 
-**This route fetches one package; it installs no dependency graph.** A bare import means host-provided, so:
+**This route fetches one package's own files; its dependencies come one of three ways.** A bare import
+resolves from the plugin's cache directory, then the host, so:
 
-- a third-party dependency must already be present, or be written as a **URL import** — which is now
-  fetched and cached like anything else;
+- a third-party dependency its `package.json` declares is **installed into its cache directory** with npm,
+  after an approval listing every package (transitives included) — `add` and a `reload` that finds a new
+  one both offer it. Declined, it is unmet, and the import that needs it fails naming itself;
+- a third-party dependency can instead be written as a **URL import**, fetched on demand and kept under
+  its URL (below) — the one spelling that also works in the browser, where nothing can be installed;
 - a dependency on **another matbot plugin** is met by adding that plugin to `plugins:` too, and one
   declared in the manifest but present nowhere is reported at boot;
 - an import that resolves nowhere fails naming the specifier *and* the importer, because the resolution
@@ -278,6 +282,15 @@ restores the copy that was working and loads that instead: a failed reload is a 
 
 - **Any source CDN, including the rewriting ones.** jsdelivr and unpkg serve source with bare imports
   intact; esm.sh rewrites them to root-relative paths. Both work — the second used to be silently dropped.
+- **A URL import keeps its URL.** The module it names is not mirrored as a file: Node loads it under its
+  own URL (the one that answered, after any redirect), so its imports resolve as a browser would resolve
+  them and its `import.meta.url` is that URL in both hosts. It is cached under `.plugins/.urls/`, by hash.
+  Its bare imports are looked up from the cache, so they reach the host singletons and other fetched
+  plugins, as a bare import from your own files does. Pinning a version is still wise — an unpinned URL
+  is cached as whatever it first answered with — but it is no longer needed to make one load.
+- **`import.meta.url` is a path only for a Node-only plugin's own files.** In the browser your module is
+  a `blob:` URL, so a cross-runtime plugin must not read anything relative to it; declared `files` are for
+  the Node route.
 - **ESM only.** A CommonJS dependency reached by URL will not load. jsdelivr's default paths serve CJS for
   many packages; `/+esm` and esm.sh are the ESM forms.
 - **A tarball or git URL is not this route** — it takes npm, because something has to unpack it.

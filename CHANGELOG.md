@@ -334,6 +334,37 @@ churn and less likely to affect a consumer who doesn't use them.
   refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and
   re-loaded, and the result says which happened. Its provisioning is not rolled back with it.
 
+- **`cli` / `tool-plugin`** — a fetched plugin can import a bare CDN URL (issue #89). A URL may be a
+  module *and* the parent of others, which is how esm.sh, jsdelivr and unpkg all serve a bare package:
+  `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. The cache mirrored each URL under its
+  own path, so the first became the *file* `.plugins/esm.sh/ms@2.1.3` and the second's `mkdir` failed
+  with `ENOTDIR` — the documented way to bring a third-party dependency on the http route crashed the
+  loader on the commonest shape of one.
+
+  A module imported by absolute URL now keeps that URL as its identity, as it does in the browser, rather
+  than becoming a mirrored file. Its imports resolve against the URL that answered it, so a redirect
+  (unpkg's `lit@3?module` → `lit@3.3.3/index.js?module=`) resolves correctly and two URLs redirected to
+  one module load it once; the query is part of its name (`?bundle` and `?dev` are two modules, where the
+  mirror dropped it); its `import.meta.url` is the URL, matching the browser; and its bare imports are
+  looked up from the cache, reaching what a mirrored file's reach. It is stored under `.plugins/.urls/`,
+  keyed by a hash of the URL, so no URL can be a path that collides with another or decodes outside the
+  cache — `chart.js` beside `chart.js/auto` is two modules. A warm boot still asks the network for
+  nothing, and a module the old mirror already held is copied into the store on first use, so an upgrade
+  does not need the network either.
+
+  A plugin's own files are mirrored exactly as before: a package was a file tree before it was served, so
+  the mirror is faithful there, and a Node-only plugin still reads its files through `import.meta.url`.
+  The mirror now refuses a URL whose host is a dot segment (`http://../`) or whose path encodes a
+  separator (`%2F`), the two spellings that survive URL parsing and would put a file outside `.plugins/`.
+  Its rules are stated once (`@matatbread/matbot-tool-plugin/cache-layout`) — the path, the `.js` → `.ts`
+  candidates and the per-host scheme record — for the module hook and `materializeRemote` alike, rather
+  than as a copy in each.
+
+  The `plugin` tool's description and `docs/DEVELOPING.md` said an http/github plugin "installs no
+  dependency graph" and that any bare import means the host's copy. Since the dependencies a fetched
+  plugin declares are installed into its cache directory (0.4.20, above), the model was told to work
+  around a dependency it could simply have approved; both now say what happens.
+
 - **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
   it. Both tools described the append target as "this conversation" or "a default", which a model
   reads as the conversation it is in when it looks: it told the user a job would "report back here"

@@ -28,17 +28,18 @@
 //      directories arrive as `createHooks({ exclude })` from register.js.
 //
 //   4. On-demand fetching for a plugin fetched over http (see remote-loader.js).
-//      A module inside `.plugins/<host>/…` gets its relative, root-relative and
-//      absolute-URL imports resolved against where it CAME from and fetched if
-//      absent, so Node drives that graph instead of a regex predicting it. Its
-//      *bare* imports mean host-provided, so they take the normal chain — and
-//      when that fails, one retry against this host's own module graph, which is
-//      what "bare = the host's copy" means once the symlink farm is gone.
+//      A module inside `.plugins/<host>/…` gets its relative and root-relative
+//      imports resolved against where it CAME from and fetched if absent, so Node
+//      drives that graph instead of a regex predicting it. An absolute-URL import
+//      keeps its URL as its identity, served from the cache by the load hook. Bare
+//      imports mean host-provided, so they take the normal chain — and when that
+//      fails, one retry against this host's own module graph, which is what
+//      "bare = the host's copy" means once the symlink farm is gone.
 
 import { stripTypeScriptTypes } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { resolveFetchedSync, cacheLocation } from './remote-loader.js';
+import { resolveFetchedSync, bareAnchor, isFetched, loadStored } from './remote-loader.js';
 
 // stripTypeScriptTypes is still flagged experimental, so it emits an ExperimentalWarning the
 // first time it runs — on every launch, scary and irrelevant. The hooks run in the process's own
@@ -89,18 +90,23 @@ export function createHooks({ exclude = [] } = {}) {
     const fetched = resolveFetchedSync(specifier, context.parentURL);
     if (fetched !== undefined) return { url: fetched, format: 'module', shortCircuit: true };
 
+    // A module imported by URL has no directory for Node to walk up from, so its bare imports are looked up
+    // from the cache instead.
+    const anchor = bareAnchor(context.parentURL);
+    const from = anchor === undefined ? context : { ...context, parentURL: anchor };
+
     // (1) .js -> .ts remap.
     let result;
     if (specifier.endsWith('.js')) {
       try {
-        result = nextResolve(specifier.slice(0, -3) + '.ts', context);
+        result = nextResolve(specifier.slice(0, -3) + '.ts', from);
       } catch {
-        try { result = nextResolve(specifier, context); }
-        catch (e) { result = resolveAsHost(specifier, context, nextResolve, e); }
+        try { result = nextResolve(specifier, from); }
+        catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
       }
     } else {
-      try { result = nextResolve(specifier, context); }
-      catch (e) { result = resolveAsHost(specifier, context, nextResolve, e); }
+      try { result = nextResolve(specifier, from); }
+      catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
     }
 
     // (2) Freshness propagation. Fast path: the marker only exists during a reload,
@@ -129,6 +135,12 @@ export function createHooks({ exclude = [] } = {}) {
       const code = stripTypeScriptTypes(source, { mode: 'strip', sourceUrl: url });
       return { format: 'module', source: code, shortCircuit: true };
     }
+    // (4) A module imported by URL: its source is in the cache, under the URL it answered at.
+    const stored = /^https?:/.test(url) ? loadStored(url) : undefined;
+    if (stored !== undefined) {
+      const ts = /\.m?ts$/.test(new URL(url).pathname);
+      return { format: 'module', source: ts ? stripTypeScriptTypes(stored, { mode: 'strip', sourceUrl: url }) : stored, shortCircuit: true };
+    }
     return nextLoad(url, context);
   }
 
@@ -143,12 +155,13 @@ export function createHooks({ exclude = [] } = {}) {
 // Deliberately NOT the mechanism for the singletons, which it cannot be: the only anchor available here is
 // this file, and `apps/cli` depends on `core`, not on `plugin-api` — so the retry could never reach the
 // package it would most be needed for. A disk link can, and every resolver honours it.
-function resolveAsHost(specifier, context, nextResolve, original) {
-  // Captured BEFORE the retry: `nextResolve` merges the context it is handed into the shared one, so
-  // reading `context.parentURL` afterwards reports OUR anchor as the importer — measured, and the reason
-  // this error used to name ts-hooks.js as the file that imported the plugin's own dependency.
-  const importer = context.parentURL;
-  if (cacheLocation(importer) === undefined) throw original;
+//
+// `importer` is passed rather than read from `context`, which for a module imported by URL is already the
+// cache anchor it was looked up from — and `nextResolve` merges the context it is handed into the shared one,
+// so reading `context.parentURL` after the retry reports OUR anchor (measured: this error used to name
+// ts-hooks.js as the file that imported the plugin's own dependency).
+function resolveAsHost(specifier, context, nextResolve, original, importer) {
+  if (!isFetched(importer)) throw original;
   try { return nextResolve(specifier, { ...context, parentURL: import.meta.url }); }
   catch {
     // Both attempts failed, which is the whole answer: it is not installed anywhere this plugin can see
