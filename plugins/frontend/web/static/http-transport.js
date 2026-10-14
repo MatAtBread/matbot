@@ -14,7 +14,7 @@
 //   answerPrompt(sid, body)                        -> Promise<void>    body = { answer } | { cancel: true }
 //   answerEnv(sid, body)                           -> Promise<void>    body = { callId, ok, value } | { callId, ok:false, error }
 //   abort(sid, traceId?)                           -> Promise<void>  (traceId: that parallel turn only)
-//   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy }>
+//   statusEvents(signal)                           -> AsyncIterable<{ sessionId, busy, prompting }>
 //   notifications(signal)                          -> AsyncIterable<Notification>
 //   openFile(namespace, path)                      -> void
 

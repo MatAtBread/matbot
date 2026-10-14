@@ -252,3 +252,74 @@ test('the per-session stream heartbeats, so a dead socket is detectable', { time
     tab.ac.abort();
   } finally { await web.close(); }
 });
+
+/** The global stream's `session-busy` payloads, in arrival order. */
+function attachStatus(base: string) {
+  const ac = new AbortController();
+  const statuses: { sessionId: string; busy: boolean; prompting: boolean }[] = [];
+  const ready = (async () => {
+    const res = await fetch(`${base}/events`, { signal: ac.signal });
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    void (async () => {
+      let buf = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          buf += dec.decode(value, { stream: true });
+          let i: number;
+          while ((i = buf.indexOf('\n\n')) !== -1) {
+            const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+            if (!frame.startsWith('event: session-busy')) continue;
+            statuses.push(JSON.parse(/^data: (.*)$/m.exec(frame)![1]!));
+          }
+        }
+      } catch { /* aborted */ }
+    })();
+  })();
+  return { ac, statuses, ready };
+}
+
+test('the sidebar status says a session is waiting on the user, and stops saying so once answered', { timeout: 20000 }, async () => {
+  prompted.length = 0;
+  const { session, base, web } = await serve(confirmTool);
+  try {
+    // Nobody is viewing the conversation — the case the sidebar is for.
+    const sidebar = attachStatus(base);
+    await sidebar.ready;
+    await submit(base, session.id);
+    await settle();
+    assert.deepEqual(sidebar.statuses.at(-1), { sessionId: session.id, busy: true, prompting: true });
+
+    // A sidebar opened after the question was asked is told too.
+    const late = attachStatus(base);
+    await late.ready;
+    await settle(100);
+    assert.deepEqual(late.statuses, [{ sessionId: session.id, busy: true, prompting: true }]);
+
+    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', body: JSON.stringify({ answer: 'yes' }) });
+    await settle();
+    assert.deepEqual(prompted, ['yes']);
+    assert.ok(sidebar.statuses.every(s => s.sessionId === session.id));
+    assert.equal(sidebar.statuses.at(-1)!.prompting, false);
+    assert.equal(sidebar.statuses.at(-1)!.busy, false);
+    sidebar.ac.abort(); late.ac.abort();
+  } finally { await web.close(); }
+});
+
+test('cancelling a parked prompt clears the waiting status', { timeout: 20000 }, async () => {
+  const { session, base, web } = await serve(confirmTool);
+  try {
+    const sidebar = attachStatus(base);
+    await sidebar.ready;
+    await submit(base, session.id);
+    await settle();
+    assert.equal(sidebar.statuses.at(-1)!.prompting, true);
+
+    await fetch(`${base}/sessions/${session.id}/abort`, { method: 'POST' });
+    await settle();
+    assert.deepEqual(sidebar.statuses.at(-1), { sessionId: session.id, busy: false, prompting: false });
+    sidebar.ac.abort();
+  } finally { await web.close(); }
+});

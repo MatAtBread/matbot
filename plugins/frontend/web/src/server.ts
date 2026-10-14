@@ -257,7 +257,9 @@ export function createWebServer(deps: WebServerDeps) {
   // connection per session (not per submission) is what keeps queued submits off the browser's
   // ~6-socket-per-host limit, which otherwise starved both the `queued` signal and POST /prompt.
   const sessionConns = new Map<string, Set<ServerResponse>>();
-  const busyState    = new Map<string, boolean>();                     // last-broadcast busy per session
+  // Last-broadcast status per session; absent = idle. `prompting` is a busy session parked on a question
+  // for the user, so a sidebar can say "waiting on you" for a conversation nobody is looking at.
+  const busyState    = new Map<string, 'busy' | 'prompting'>();
   // Sessions with a live server-owned busy tracker (see the submit handler). One transient tracker
   // per busy period drives the idle broadcast independently of any client events stream.
   const busyTrackers = new Set<string>();
@@ -417,13 +419,14 @@ export function createWebServer(deps: WebServerDeps) {
     } catch { /* no version header; the client simply doesn't check */ }
   })();
 
-  // Broadcast a session's busy/idle transition to the global status listeners (sidebar), deduped
-  // against the last value. Authoritative busy comes from the runner (running || queued > 0).
+  // Broadcast a session's busy/idle/prompting transition to the global status listeners (sidebar),
+  // deduped against the last value. Authoritative busy comes from the runner (running || queued > 0).
   function updateBusy(sessionId: string): void {
     const busy = deps.run.status(sessionId).busy;
-    if ((busyState.get(sessionId) ?? false) === busy) return;
-    if (busy) busyState.set(sessionId, true); else busyState.delete(sessionId);
-    broadcast(sseEvent('session-busy', { sessionId, busy }));
+    const state = !busy ? undefined : pendingPrompts.has(sessionId) ? 'prompting' : 'busy';
+    if (busyState.get(sessionId) === state) return;
+    if (state !== undefined) busyState.set(sessionId, state); else busyState.delete(sessionId);
+    broadcast(sseEvent('session-busy', { sessionId, busy, prompting: state === 'prompting' }));
   }
 
   const server = createServer(async (req, res) => {
@@ -597,9 +600,9 @@ export function createWebServer(deps: WebServerDeps) {
       // authoritative runner status first: a stale true (busyState that never got its idle
       // transition — e.g. a turn that ended with no events consumer attached) self-heals here,
       // broadcasting false to existing listeners instead of replaying a phantom busy.
-      for (const sessionId of [...busyState.keys()]) {
+      for (const [sessionId, state] of [...busyState]) {
         if (!deps.run.status(sessionId).busy) { updateBusy(sessionId); continue; }
-        res.write(sseEvent('session-busy', { sessionId, busy: true }));
+        res.write(sseEvent('session-busy', { sessionId, busy: true, prompting: state === 'prompting' }));
       }
       // Started on first connect, not at construction: a partitioning backend may register
       // WatchVisibility after frontend-web's setup, and the firehose must resolve it live.
@@ -689,6 +692,7 @@ export function createWebServer(deps: WebServerDeps) {
           const settled = (): void => {
             pendingPrompts.delete(targetId);
             sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId }));
+            updateBusy(targetId);
           };
           // Built once and kept, so a stream that connects later is told about it (see pendingPrompts).
           const event = sseEvent('prompt', {
@@ -704,6 +708,7 @@ export function createWebServer(deps: WebServerDeps) {
             cancel:  ()     => { settled(); reject(promptCancelledError()); },
           });
           sendToSession(targetId, event);
+          updateBusy(targetId);
         })) as PromptFn;
 
       // The first submit of a busy period anchors the server-owned busy tracker on its OWN view
