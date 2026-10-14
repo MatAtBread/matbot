@@ -410,6 +410,13 @@ churn and less likely to affect a consumer who doesn't use them.
   outright when given, and `background_job_action list` points at the `session` it reports in each
   row as the thing to read instead of assuming.
 
+- **`function-tools`** — `tool_function`'s description says that `fetch`, `AbortSignal`, `WebSocket`,
+  `console` and the timers are ordinary globals in a body (issue #99). Composing a body, the model reached
+  for the `http` tool — installing it if it was absent — for a request plain `fetch` would make: `http` has
+  a schema and is visible as a candidate, while the global was mentioned only in passing. The sentence sits
+  beside the one saying a runner *may* withhold globals, which left the model unsure whether `fetch` was
+  among them; it is not withheld by the node runner, and `types` lists any global that a runner does withhold.
+
 ## 0.4.19
 
 ### API gaps filled

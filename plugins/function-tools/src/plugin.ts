@@ -702,6 +702,9 @@ body — which may bound its running time, withhold globals, restrict what it ma
 import through a permission prompt. The \`types\` action states which of these are in force HERE, and a
 body is type-checked against exactly that: what is not reachable does not type-check, so do not guess,
 and do not reach for \`noTypeCheck\` to get past it.
+\`fetch\`, \`AbortSignal\`, \`WebSocket\`, \`console\` and the timers are ordinary globals in a body, which no
+runner here withholds (\`types\` lists any that are). An HTTP request inside a body is therefore
+\`await fetch(url, { signal: context.signal })\` — not a tool call, and never a reason to install one.
 
 MODULES (node only). A body may reach the platform through a dynamic import —
 \`const fs = await import('node:fs/promises')\`. Import by NAME only — a node builtin or a package already
