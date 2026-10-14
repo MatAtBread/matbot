@@ -422,3 +422,39 @@ test('a fetched plugin\'s dependencies install into its cache root and make it l
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// A directory standing where the entry goes is not the entry. Returned as one, it failed later as a
+// directory import with nothing to say why; refused here, the failure names the path.
+test('a directory at the entry\'s cache path is not taken for the cached entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/y/package.json': JSON.stringify({ name: '@fixture/matbot-remote-y', matbotRuntime: ['node'], exports: './main.js' }),
+    '/y/main.js': `export const plugin = { apiVersion: '0.4' };\n`,
+  });
+  try {
+    await mkdir(join(dotPlugins, new URL(srv.origin).host, 'y', 'main.js'), { recursive: true });
+    await assert.rejects(materializeRemote(`${srv.origin}/y/`, dotPlugins, dir), /EISDIR|main\.js/);
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A directory standing where the entry goes is not the entry. Returned as one, it failed later as a
+// directory import with nothing to say why; refused here, the failure names the path.
+test('a directory at the entry\'s cache path is not taken for the cached entry', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-cache-'));
+  const dotPlugins = join(dir, '.plugins');
+  const srv = await serve({
+    '/y/package.json': JSON.stringify({ name: '@fixture/matbot-remote-y', matbotRuntime: ['node'], exports: './main.js' }),
+    '/y/main.js': `export const plugin = { apiVersion: '0.4' };\n`,
+  });
+  try {
+    await mkdir(join(dotPlugins, new URL(srv.origin).host, 'y', 'main.js'), { recursive: true });
+    await assert.rejects(materializeRemote(`${srv.origin}/y/`, dotPlugins, dir), /EISDIR.*main\.js/);
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -722,9 +722,11 @@ function hostPackageDir(req: NodeRequire, name: string): string | undefined {
   }
 }
 
-// Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites.
+// Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites. "Already
+// there" means a FILE: a directory of that name returned as the entry fails later as a directory import
+// with nothing to say why, where writing over it fails here, naming the path.
 async function writeCached(localPath: string, content: string): Promise<void> {
-  try { await access(localPath); return; } catch { /* not cached yet */ }
+  if ((await stat(localPath).catch(() => undefined))?.isFile()) return;
   await mkdir(path.dirname(localPath), { recursive: true });
   await writeFile(localPath, content, 'utf8');
 }
