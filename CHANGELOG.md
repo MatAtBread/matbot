@@ -476,6 +476,15 @@ churn and less likely to affect a consumer who doesn't use them.
   refused before anything is asked. The template is the tool's own grammar, parsed into names that are
   read one by one — never handed to `Vault.resolve`.
 
+- **`web-bundle`** — a remote plugin's imports resolve in the browser as they do on node (#94, #95, #96).
+  A module still runs from a `blob:` URL, which resolves no relative reference, so its imports are now
+  found by sucrase's parser rather than a regex — text in a string, template or comment is no longer
+  rewritten — and resolved against the URL that answered the fetch, so a CDN redirect no longer sends a
+  module's relative imports to the wrong path, and two URLs redirecting to one module load it once. A
+  root-relative import (`/lib/x.js`) resolves against the plugin's origin. `import(…)` resolves when it
+  is called, so a computed specifier works and a dependency is fetched only if it is actually imported;
+  `import.meta.url` is the module's real URL.
+
 ## 0.4.19
 
 ### API gaps filled
