@@ -18,7 +18,7 @@ export type {
   MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, ReadOnlyError,
   MediaRejectedError, InvalidSecretNameError, MatbotErrorKind,
 } from '@matatbread/matbot-plugin-api';
-export { applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE_KEY_RULE } from '@matatbread/matbot-plugin-api';
+export { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE_KEY_RULE } from '@matatbread/matbot-plugin-api';
 // The `provider update` patch policy, alongside the vault's: written once in plugin-api so the hosts
 // that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
 // plugin-api dependency to get it.

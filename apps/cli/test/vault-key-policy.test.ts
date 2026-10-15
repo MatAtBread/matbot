@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { VaultImpl, isInvalidSecretNameError, unreferenceableKey } from '@matatbread/matbot-core';
+import { VaultImpl, isInvalidSecretNameError, isMissingSecretError, unreferenceableKey } from '@matatbread/matbot-core';
 import { EnvFileVault } from '../src/env-vault.ts';
 
 // What is storable is the BACKEND's business, and it is the only thing that knows: a .env-backed
@@ -22,6 +22,21 @@ test('the base vault stores any referenceable name', async () => {
   const vault = new VaultImpl();
   await vault.writeSecret('email:acme:password', 'hunter2');
   assert.equal(await vault.resolve('${email:acme:password}'), 'hunter2');
+});
+
+test('resolve expands placeholders over readSecret, naming every miss once', async () => {
+  const vault = new VaultImpl({ A: 'alpha', B: 'beta' });
+  assert.equal(await vault.resolve('${A}:${B}:${A}'), 'alpha:beta:alpha');
+  assert.equal(await vault.resolve('no placeholders'), 'no placeholders');
+  await assert.rejects(() => vault.resolve('${A}${X}${Y}${X}'), e => isMissingSecretError(e) && e.missingKeys.join() === 'X,Y');
+});
+
+test('readSecret takes a name as a name, with no placeholder syntax', async () => {
+  const vault = new VaultImpl({ A: 'alpha', B: 'beta' });
+  assert.equal(await vault.readSecret('A'), 'alpha');
+  // Spliced into `${…}` this would be two lookups; read as a name it is simply absent.
+  assert.equal(await vault.readSecret('A}${B'), undefined);
+  assert.equal(await vault.readSecret('${A}'), undefined);
 });
 
 test('a name no ${...} placeholder could carry is refused', async () => {

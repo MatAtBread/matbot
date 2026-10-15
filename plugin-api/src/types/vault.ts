@@ -1,13 +1,17 @@
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
 /**
- * The primitives a vault backend must implement. Resolution, redaction, and the three
- * low-level store operations the smart `createSecret` policy composes. A backend implements
- * `Vault` (which is `VaultSpec` plus that policy); plugins are handed a `Vault`.
+ * The primitives a vault backend must implement. Redaction, and the low-level store operations the
+ * `resolve` and `createSecret` policies compose. A backend implements `Vault` (which is `VaultSpec`
+ * plus those policies); plugins are handed a `Vault`.
  */
 export interface VaultSpec {
-  /** Resolve ${NAME} placeholders by looking up the named value; throws MissingSecretError for any miss. */
-  resolve(ref: string): Promise<string>;
+  /**
+   * The value stored under exactly `name`, or `undefined`. The literal read, as `writeSecret` is the
+   * literal write: a name is a name, with no placeholder syntax, so a caller holding one never encodes
+   * it into a `${NAME}` for `resolve` to parse back out — `A}${B` is simply absent, not two lookups.
+   */
+  readSecret(name: string): Promise<string | undefined>;
   scrub(text: string): string;
   /**
    * Store `value` under exactly `name`, overwriting. The literal write; no reference/dedup logic.
@@ -37,6 +41,11 @@ export interface VaultSpec {
 }
 
 export interface Vault extends VaultSpec {
+  /**
+   * Expand every `${NAME}` placeholder in `ref` with its stored value; throws `MissingSecretError`
+   * naming every miss. A backend's is `applyResolve(this, ref)`.
+   */
+  resolve(ref: string): Promise<string>;
   /**
    * Store a secret coming (often) from a user via the LLM, where we cannot tell a real value
    * from a key name they typed by mistake. Returns the key name callers MUST reference — not

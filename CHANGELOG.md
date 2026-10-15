@@ -120,6 +120,16 @@ churn and less likely to affect a consumer who doesn't use them.
   `File '<…>/@types/node/index.d.ts' is not a module`, a path inside matbot's own `node_modules` that the
   body never named and its author cannot act on.
 
+- **A vault backend implements `readSecret(name)`, not `resolve`.** `VaultSpec` gains
+  `readSecret(name): Promise<string | undefined>` — the literal read, as `writeSecret` is the literal
+  write — and `resolve` moves to `Vault` as a policy written once over it, `applyResolve(spec, ref)`
+  (exported from plugin-api and core). The `${NAME}` regex and replace loop were copied into every
+  backend; now the placeholder grammar has one home. A caller holding a key NAME reads it as a name,
+  rather than wrapping it in `${…}` for `resolve` to parse back out — through which `A}${B` was two
+  lookups behind one name. `resolve` also reports each missing key once rather than once per occurrence.
+
+  Migrating a backend: add `readSecret`, and make `resolve(ref)` return `applyResolve(this, ref)`.
+
 ### API gaps filled
 
 - **`PermissionRequest.standing`** — the answers one act may be remembered as, narrowest first, each as

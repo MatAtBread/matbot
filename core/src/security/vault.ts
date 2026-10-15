@@ -1,7 +1,6 @@
 import type { Vault } from '@matatbread/matbot-plugin-api';
-import { missingSecretError, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-plugin-api';
+import { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-plugin-api';
 
-const REF_RE = /\$\{([^}]+)\}/g;
 
 /**
  * Default vault implementation: a single flat namespace of secrets keyed by name.
@@ -58,19 +57,12 @@ export class VaultImpl implements Vault {
     return undefined;
   }
 
-  async resolve(ref: string): Promise<string> {
-    const errors: string[] = [];
+  async readSecret(name: string): Promise<string | undefined> {
+    return this.store.get(name);
+  }
 
-    const result = ref.replace(REF_RE, (_, name: string) => {
-      const value = this.store.get(name);
-      if (value === undefined) { errors.push(name); return ''; }
-      return value;
-    });
-
-    if (errors.length > 0) {
-      throw missingSecretError(errors);
-    }
-    return result;
+  resolve(ref: string): Promise<string> {
+    return applyResolve(this, ref);
   }
 
   scrub(text: string): string {

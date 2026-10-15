@@ -1,5 +1,21 @@
 import type { VaultSpec } from './types.js';
-import { invalidSecretNameError } from './errors.js';
+import { invalidSecretNameError, missingSecretError } from './errors.js';
+
+const PLACEHOLDER = /\$\{([^}]+)\}/g;
+
+/**
+ * The `resolve` policy, written once over `readSecret` so the placeholder grammar has one home — it was
+ * a regex and a replace loop copied into every backend, so a backend's idea of `${NAME}` could drift
+ * from the rule below that says which names can be stored. A backend's `resolve` is just
+ * `applyResolve(this, ref)`.
+ */
+export async function applyResolve(spec: VaultSpec, ref: string): Promise<string> {
+  const names  = [...new Set(Array.from(ref.matchAll(PLACEHOLDER), m => m[1] ?? ''))];
+  const values = new Map(await Promise.all(names.map(async n => [n, await spec.readSecret(n)] as const)));
+  const missing = names.filter(n => values.get(n) === undefined);
+  if (missing.length > 0) throw missingSecretError(missing);
+  return ref.replace(PLACEHOLDER, (_, name: string) => values.get(name) ?? '');
+}
 
 /**
  * The rule every vault shares, whatever else it adds: a secret is only reachable through a

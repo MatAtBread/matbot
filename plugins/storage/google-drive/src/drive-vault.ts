@@ -1,7 +1,6 @@
 import type { Store, Vault } from '@matatbread/matbot-core';
-import { missingSecretError, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-core';
+import { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey } from '@matatbread/matbot-core';
 
-const REF_RE  = /\$\{([^}]+)\}/g;
 const DOC_ID  = 'secrets';
 
 interface VaultDoc {
@@ -68,15 +67,12 @@ export class DriveVault implements Vault {
     return undefined;
   }
 
-  async resolve(ref: string): Promise<string> {
-    const errors: string[] = [];
-    const result = ref.replace(REF_RE, (_, name: string) => {
-      const value = this.secrets.get(name);
-      if (value === undefined) { errors.push(name); return ''; }
-      return value;
-    });
-    if (errors.length > 0) throw missingSecretError(errors);
-    return result;
+  async readSecret(name: string): Promise<string | undefined> {
+    return this.secrets.get(name);
+  }
+
+  resolve(ref: string): Promise<string> {
+    return applyResolve(this, ref);
   }
 
   scrub(text: string): string {
