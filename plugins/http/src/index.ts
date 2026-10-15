@@ -19,10 +19,43 @@ interface HttpInput {
 
 type Outcome<T> = { ok: true; value: T } | { ok: false; message: string };
 
+type Part = { literal: string } | { key: string };
+
+const PLACEHOLDER = /\$\{([^}]*)\}/g;
+
 /**
- * Turn `{ Vault: name }` header values into the values they name, asking first. The keys come straight off
- * the params, so the set the gate is asked about IS the set that is sent — and the read is by name, never
- * a `${NAME}` handed to `resolve`, so there is no grammar for a name to smuggle a second lookup through.
+ * A `{ Vault }` string is a bare key name, or a template whose `${NAME}`s are each a key — so
+ * `Bearer ${ACME_KEY}` needs no key holding the prefix. Parsed here rather than by `Vault.resolve`: a
+ * template is this tool's grammar, and each name it yields is gated and read on its own, so the names the
+ * gate is asked about are exactly the names that are read. A `${` left over after the placeholders are
+ * taken out is malformed, never literal text — there is no escape, because a header value needing one is
+ * a plain string.
+ */
+function parseVaultValue(spec: string): Outcome<Part[]> {
+  if (!spec.includes('${')) {
+    return unreferenceableKey(spec) === undefined ? { ok: true, value: [{ key: spec }] }
+      : { ok: false, message: `"${spec}" is not a vault key name: ${REFERENCEABLE_KEY_RULE}.` };
+  }
+  const parts: Part[] = [];
+  let at = 0;
+  for (const m of spec.matchAll(PLACEHOLDER)) {
+    const key = m[1] ?? '';
+    if (unreferenceableKey(key) !== undefined) return { ok: false, message: `"${key}" in "${spec}" is not a vault key name: ${REFERENCEABLE_KEY_RULE}.` };
+    if (m.index > at) parts.push({ literal: spec.slice(at, m.index) });
+    parts.push({ key });
+    at = m.index + m[0].length;
+  }
+  if (at < spec.length) parts.push({ literal: spec.slice(at) });
+  if (parts.some(p => 'literal' in p && p.literal.includes('${'))) {
+    return { ok: false, message: `"${spec}" has an unterminated \${…}: write each vault key as \${KEY_NAME}.` };
+  }
+  return { ok: true, value: parts };
+}
+
+/**
+ * Turn `{ Vault }` header values into the values they name, asking first. The keys come straight off the
+ * params, so the set the gate is asked about IS the set that is sent — and the read is by name, never a
+ * template handed to `resolve`, so there is no grammar for a name to smuggle a second lookup through.
  *
  * One gate call per key, never one per request: the default policy ORs a request's subject with its
  * standing answers, so a batched `A`+`B` would be admitted by an approval only `A` was ever given.
@@ -31,17 +64,21 @@ type Outcome<T> = { ok: true; value: T } | { ok: false; message: string };
 async function resolveHeaders(
   url: string, headers: Record<string, string | { Vault: string }>, ctx: ToolContext,
 ): Promise<Outcome<{ target: string | URL; headers: Record<string, string>; secrets: string[] }>> {
+  // The subject is `<origin> <key>`, which a name with whitespace would make ambiguous; no such name is
+  // storable, so it could only ever miss anyway. Checked in parsing, before anything is asked.
+  const templates = new Map<string, Part[]>();
   const usedAs = new Map<string, string[]>();
   for (const [header, v] of Object.entries(headers)) {
-    if (typeof v !== 'string') usedAs.set(v.Vault, [...usedAs.get(v.Vault) ?? [], header]);
+    if (typeof v === 'string') continue;
+    const parsed = parseVaultValue(v.Vault);
+    if (!parsed.ok) return parsed;
+    templates.set(header, parsed.value);
+    for (const p of parsed.value) {
+      if ('key' in p && !usedAs.get(p.key)?.includes(header)) usedAs.set(p.key, [...usedAs.get(p.key) ?? [], header]);
+    }
   }
   if (usedAs.size === 0) return { ok: true, value: { target: url, headers: headers as Record<string, string>, secrets: [] } };
 
-  // The subject is `<origin> <key>`, which a name with whitespace would make ambiguous; no such name is
-  // storable, so it could only ever miss anyway.
-  for (const key of usedAs.keys()) {
-    if (unreferenceableKey(key) !== undefined) return { ok: false, message: `"${key}" is not a vault key name: ${REFERENCEABLE_KEY_RULE}.` };
-  }
   // Parsed once, and that parse is what is fetched, so the origin the gate approves is the origin that
   // receives the key — never a second reading of the caller's string.
   let target: URL;
@@ -81,7 +118,8 @@ async function resolveHeaders(
     ok: true,
     value: {
       target,
-      headers: Object.fromEntries(Object.entries(headers).map(([h, v]) => [h, typeof v === 'string' ? v : values.get(v.Vault) ?? ''])),
+      headers: Object.fromEntries(Object.entries(headers).map(([h, v]) => [h,
+        typeof v === 'string' ? v : (templates.get(h) ?? []).map(p => 'key' in p ? values.get(p.key) ?? '' : p.literal).join('')])),
       secrets: [...values.values()].filter((v): v is string => v !== undefined && v !== ''),
     },
   };
@@ -157,8 +195,8 @@ export const httpTool: Tool = {
   name:        'http',
   description: 'Make an HTTP request and return the response body. A header can carry a credential without it '
              + 'entering the conversation: give its value as { "Vault": "KEY_NAME" } and the stored value is sent, e.g. '
-             + '{ "X-API-Key": { "Vault": "ACME_API_KEY" } }. It replaces the whole header value, so for '
-             + '"Authorization: Bearer …" the key must hold the full "Bearer …" string. The user is asked before a key is '
+             + '{ "X-API-Key": { "Vault": "ACME_API_KEY" } }. To send a key inside other text, write it as ${KEY_NAME}: '
+             + '{ "Authorization": { "Vault": "Bearer ${ACME_API_KEY}" } }. The user is asked before a key is '
              + 'sent to an origin it has not been approved for, and a redirect is not followed while a key is attached.',
   inputSchema: {
     type:       'object',
@@ -174,11 +212,12 @@ export const httpTool: Tool = {
       // because the likeliest guess, `{ Vault, prefix: 'Bearer ' }`, must fail rather than drop the prefix.
       headers:      {
         type: 'object',
-        description: 'Header name → value. A value is a literal string, or { "Vault": "KEY_NAME" } to send a stored secret.',
+        description: 'Header name → value. A value is a literal string, or { "Vault": "KEY_NAME" } to send a stored secret, '
+                   + 'or { "Vault": "Bearer ${KEY_NAME}" } to send it inside other text.',
         additionalProperties: {
           type: ['string', 'object'],
           required: ['Vault'],
-          properties: { Vault: { type: 'string', description: 'The name of a vault key whose value is sent as this header.' } },
+          properties: { Vault: { type: 'string', description: 'A vault key name whose value is sent as this header, or text with each key written as ${KEY_NAME}.' } },
           additionalProperties: false,
         },
       },

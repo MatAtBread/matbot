@@ -92,11 +92,44 @@ test('one gate call per distinct key, and a refusal reads nothing and sends noth
   } finally { await api.close(); }
 });
 
-test('a name that is not a key name is refused before anything is asked', async () => {
-  // Through `resolve` this was `${A}${B}` — two lookups behind one approved name.
-  const { events, asked, reads } = await run({ url: 'https://example.invalid', headers: { X: { Vault: 'A}${B' } } });
-  assert.match(errorOf(events), /not a vault key name/);
-  assert.deepEqual([asked.length, reads.length], [0, 0]);
+test('a ${NAME} inside the value is interpolated, each key gated on its own', async () => {
+  const api = await serve(() => ({}));
+  try {
+    const { events, asked, reads } = await run({ url: api.origin, headers: {
+      Authorization: { Vault: 'Bearer ${ACME_KEY}' },
+      'X-Pair':      { Vault: '${ACME_KEY}:${OTHER_KEY}' },
+      'X-Bare':      { Vault: 'OTHER_KEY' },
+    } });
+    assert.equal(only(events).type, 'result');
+    assert.equal(api.seen[0]?.headers.authorization, `Bearer ${SECRET}`);
+    assert.equal(api.seen[0]?.headers['x-pair'], `${SECRET}:other-secret-value`);
+    assert.equal(api.seen[0]?.headers['x-bare'], 'other-secret-value');
+    assert.deepEqual(asked.map(r => r.subject), [`${api.origin} ACME_KEY`, `${api.origin} OTHER_KEY`]);
+    assert.match(asked[0]?.label ?? '', /`Authorization`, `X-Pair`/);
+    assert.deepEqual(reads.sort(), ['ACME_KEY', 'OTHER_KEY']);
+  } finally { await api.close(); }
+});
+
+test('the interpolated key is redacted, not the text around it', async () => {
+  const api = await serve((_u, h) => ({ status: 401, body: `rejected: ${String(h.authorization)}` }));
+  try {
+    const failed = errorOf((await run({ url: api.origin, headers: { Authorization: { Vault: 'Bearer ${ACME_KEY}' } } })).events);
+    assert.equal(failed, 'HTTP 401: rejected: Bearer [REDACTED]');
+  } finally { await api.close(); }
+});
+
+test('a malformed reference is refused before anything is asked', async () => {
+  for (const [spec, why] of [
+    ['A}${B', /unterminated/],
+    ['Bearer ${ACME_KEY', /unterminated/],
+    ['Bearer ${}', /"" in .* is not a vault key name/],
+    ['${A ${B}', /is not a vault key name/],
+    ['Bearer ACME_KEY', /is not a vault key name/],
+  ] as const) {
+    const { events, asked, reads } = await run({ url: 'https://example.invalid', headers: { X: { Vault: spec } } });
+    assert.match(errorOf(events), why, spec);
+    assert.deepEqual([asked.length, reads.length], [0, 0], spec);
+  }
 });
 
 test('a missing key points at store-key and does not prompt for the value', async () => {
@@ -161,6 +194,7 @@ test('the schema admits both arms and refuses the guesses a model makes', async 
 
   assert.deepEqual(await check('Bearer abc'), []);
   assert.deepEqual(await check({ Vault: 'ACME_KEY' }), []);
+  assert.deepEqual(await check({ Vault: 'Bearer ${ACME_KEY}' }), []);
   assert.deepEqual(await check({ Vault: 'K', prefix: 'Bearer ' }), ['.headers.H.prefix: unexpected property']);
   assert.deepEqual(await check({}), ['.headers.H.Vault: required property missing']);
   assert.deepEqual(await check({ Vault: 1 }), ['.headers.H.Vault: expected string, got number']);

@@ -470,8 +470,11 @@ churn and less likely to affect a consumer who doesn't use them.
   `<origin> <key>` before the vault is read — one call per key, `fallback: false`, standing answers for
   the pair or the whole origin and never for the key alone. While a key is attached a redirect is not
   followed (fetch strips only `Authorization` and `Cookie` across origins), the URL must be absolute
-  http(s), and the resolved values are redacted from the result and from every error. The value
-  replaces the whole header, so a `Bearer …` header needs the key to hold the full string.
+  http(s), and the resolved values are redacted from the result and from every error. The string may
+  also be a template, each key written `${NAME}` — `{ "Authorization": { "Vault": "Bearer ${ACME_KEY}" } }`
+  — so the key holds only the token; every key in it is gated on its own, and a malformed reference is
+  refused before anything is asked. The template is the tool's own grammar, parsed into names that are
+  read one by one — never handed to `Vault.resolve`.
 
 ## 0.4.19
 
