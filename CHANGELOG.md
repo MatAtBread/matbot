@@ -465,6 +465,14 @@ churn and less likely to affect a consumer who doesn't use them.
   beside the one saying a runner *may* withhold globals, which left the model unsure whether `fetch` was
   among them; it is not withheld by the node runner, and `types` lists any global that a runner does withhold.
 
+- **`http`** — a header value can come from the Vault (#104). `{ "Vault": "KEY_NAME" }` sends the stored
+  value, so a keyed REST API needs no secret in the conversation. Each key is gated as `http.secret` on
+  `<origin> <key>` before the vault is read — one call per key, `fallback: false`, standing answers for
+  the pair or the whole origin and never for the key alone. While a key is attached a redirect is not
+  followed (fetch strips only `Authorization` and `Cookie` across origins), the URL must be absolute
+  http(s), and the resolved values are redacted from the result and from every error. The value
+  replaces the whole header, so a `Bearer …` header needs the key to hold the full string.
+
 ## 0.4.19
 
 ### API gaps filled
