@@ -9,6 +9,23 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`frontend/web`** — a link to a conversation in a profile opens that conversation in that profile.
+  The fragment named the session alone, so the receiver resolved it under whatever profile *their*
+  browser had active and silently opened their most recent conversation instead. The profile is now
+  written into every session fragment — `#<profile>:<session>~<params>` — by the address bar, a
+  message's **Copy link** and a fork/split marker's **Open →**, and kept there rather than stripped on
+  load, so sharing the page's URL (the usual way on mobile) carries it. A fragment with no prefix means
+  Global, and adopting it now switches to Global; `#new` still follows the tab. The prefix is split
+  syntactically, so it no longer depends on the profile list having loaded, and a message link pasted
+  into an open tab keeps its `msg` (the fragment was not decoded on that path).
+- **`frontend/web`** — a fork/split marker in a conversation shared in from another profile links to
+  its peer only if that peer was shared too, and says "not shared with you" otherwise. Sharing one half
+  of a split shares that half alone, so the link used to open nothing.
+
 ## 0.4.20
 
 ### Breaking changes

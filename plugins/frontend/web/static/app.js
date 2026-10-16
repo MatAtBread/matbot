@@ -15,8 +15,9 @@ const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
+let currentSessionSharedIn = false; // the open session was shared IN from another profile (set before it renders)
 let profilesActive = false;   // set once initProfiles confirms a profile-aware storage backend (gates sharing UI)
-let profileNames = new Set(); // valid profile names, populated by initProfiles — lets hashchange split a deep-link profile like load does
+let profileNames = new Set(); // valid profile names, populated by initProfiles — lets hashchange recognise a lone `#<profile>` and refuse a stale one
 let composerReadOnly = false; // true while viewing a session shared IN from another profile (writes rejected by backend)
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
@@ -2559,7 +2560,7 @@ async function handleDividerAction(divider, action) {
   const msgIdx = divider.dataset.msgIdx !== undefined ? parseInt(divider.dataset.msgIdx) : undefined;
 
   if (action === 'copy-link') {
-    const hash = currentSessionId + (msgIdx !== undefined ? '~' + JSON.stringify({ msg: msgIdx }) : '');
+    const hash = sessionHash(currentSessionId, msgIdx !== undefined ? { msg: msgIdx } : undefined);
     const url = location.origin + location.pathname + '#' + hash;
     if (await copyText(url)) {
       const line = divider.querySelector('.msg-divider-line');
@@ -2825,10 +2826,22 @@ function renderMarker(part) {
     note.appendChild(text);
     const link = document.createElement('a');
     const hasTarget = typeof data.targetMsg === 'number';
-    link.href = '#' + data.peerSessionId + (hasTarget ? '~' + JSON.stringify({ msg: data.targetMsg }) : '');
+    link.href = '#' + sessionHash(data.peerSessionId, hasTarget ? { msg: data.targetMsg } : undefined);
     link.textContent = 'Open →';
     link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId, hasTarget ? data.targetMsg : undefined); });
     note.appendChild(link);
+    // A session shared in appears in the viewer's profile, but its fork or split is a separate session that
+    // was made in the owner's, and is visible here only if it was shared too. Offer the link only if it is:
+    // pointing at the owner's profile instead would send the viewer somewhere that need not be theirs.
+    if (currentSessionSharedIn) {
+      link.hidden = true;
+      void apiGetSession(data.peerSessionId).then(peer => {
+        if (peer) { link.hidden = false; return; }
+        const unshared = document.createElement('span');
+        unshared.textContent = '(not shared with you)';
+        link.replaceWith(unshared);
+      });
+    }
     return note;
   }
 
@@ -3075,12 +3088,16 @@ function renderSession(session, startIdx, scrollTarget) {
 async function openSession(id, scrollTarget) {
   closeSidebar();
   currentSessionId = id;
-  void refreshShareState(id);
+  const ownerOf = sessionOwner(id);
+  void refreshShareState(id, ownerOf);
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
-  location.hash = id;
+  location.hash = sessionHash(id);
   void refreshSessions();
-  const [session, busy] = await Promise.all([apiGetSession(id), apiSessionBusy(id)]);
+  // The owner is needed before rendering, not just for the badge: a shared-in session's markers link to
+  // its forks and splits, which were not necessarily shared with it.
+  const [session, busy, owner] = await Promise.all([apiGetSession(id), apiSessionBusy(id), ownerOf]);
+  currentSessionSharedIn = owner !== null;
   if (session) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
@@ -3099,8 +3116,9 @@ async function handleNewSession() {
   try {
     const { id } = await apiNewSession();
     currentSessionId = id;
+    currentSessionSharedIn = false;
     void refreshShareState(id);
-    location.hash = id;
+    location.hash = sessionHash(id);
     showEmpty();
     setBusyState(false); // a brand-new session is idle; clear any Stop carried over from the last view
     if (chatHeaderEl) chatTitleEl.textContent = '';
@@ -4462,7 +4480,7 @@ async function init() {
     document.querySelectorAll('.msg-divider.open').forEach(d => d.classList.remove('open'));
   });
 
-  const rawFragment = decodeURIComponent(location.hash.slice(1));
+  const rawFragment = splitHashProfile(hashFragment(), profileNames).rest;
   const tildeIdx    = rawFragment.indexOf('~');
   const fragmentSid = tildeIdx >= 0 ? rawFragment.slice(0, tildeIdx) : rawFragment;
   const fragmentNav = tildeIdx >= 0 ? (() => { try { return JSON.parse(rawFragment.slice(tildeIdx + 1)); } catch { return null; } })() : null;
@@ -4508,13 +4526,12 @@ document.getElementById('upload-input')?.addEventListener('change', function() {
 });
 
 window.addEventListener('hashchange', async () => {
-  // Mirror the load-time parse in initProfiles: a deep-link may carry a leading `#<profile>:` prefix.
-  // A profile that differs from the active one is a switch — adopt it and reload (like selectProfile),
-  // and the post-reload initProfiles strips it before the session parse. A matching profile is stripped
-  // in place; only the `<session>~<params>` remainder drives the session logic below.
-  const { profile: hashProfile, rest } = splitHashProfile(location.hash.slice(1), profileNames);
-  if (hashProfile !== null && hashProfile !== currentProfileName()) { selectProfile(hashProfile); return; }
-  if (hashProfile !== null) history.replaceState(null, '', location.pathname + (rest ? '#' + rest : ''));
+  // Mirror the load-time parse in initProfiles. A profile that differs from the active one is a switch —
+  // adopt it and reload, keeping the fragment so the reloaded page opens what the link names. One that
+  // matches stays in the fragment: the address bar is what gets shared.
+  const { profile: hashProfile, rest } = splitHashProfile(hashFragment(), profileNames);
+  if (profilesActive && hashProfile !== undefined && hashProfile !== currentProfileName()
+      && (hashProfile === null || profileNames.has(hashProfile))) { adoptProfile(hashProfile); return; }
   const raw      = rest;
   const ti       = raw.indexOf('~');
   const id       = ti >= 0 ? raw.slice(0, ti) : raw;
@@ -4524,7 +4541,7 @@ window.addEventListener('hashchange', async () => {
   } else if (id && id !== currentSessionId) {
     await openSession(id, nav?.msg).catch(console.error);
   } else if (id === currentSessionId && nav?.msg !== undefined) {
-    history.replaceState(null, '', location.pathname + '#' + id);
+    history.replaceState(null, '', location.pathname + '#' + sessionHash(id));
     scrollToMsgIdx(nav.msg);
   }
 });
@@ -4539,25 +4556,42 @@ const PROFILE_LS = 'matbot.profile';
 
 function currentProfileName() { try { return localStorage.getItem(PROFILE_LS) || null; } catch { return null; } }
 
+// Switching rewrites the fragment for the new profile before reloading: it is read on load, and would
+// otherwise switch straight back to the profile it names.
 function selectProfile(name) {
+  history.replaceState(null, '', location.pathname + '#' + sessionHash(currentSessionId ?? '', undefined, name));
+  adoptProfile(name);
+}
+
+function adoptProfile(name) {
   try { if (name) localStorage.setItem(PROFILE_LS, name); else localStorage.removeItem(PROFILE_LS); } catch { /* ignore */ }
   location.reload();
 }
 
-// A deep-link may name a profile ahead of the session: `#<profile>:<session>~<params>`, with every part
-// optional so pre-profile links (`#<session>`, `#<session>~<params>`) are untouched. Split off a leading
-// profile token, keeping the rest for the existing session-fragment parser. The profile is judged
-// heuristically — a colon-prefixed token, or a lone token that names an existing profile (session ids,
-// being UUIDs, never do). `validNames` is the current profile set; `raw` is the un-decoded fragment
-// (profile names are [\w-]+, so encoding is irrelevant to the split).
+// The fragment that addresses a session (and optionally a message in it): `[<profile>:]<session>~<params>`.
+// The profile is always written, because the receiver of a link resolves it under whatever profile THEIR
+// browser has active — and Global is written as no prefix, so Global links are unchanged.
+function sessionHash(id, nav, profile = currentProfileName()) {
+  return (profile ? profile + ':' : '') + id + (nav ? '~' + JSON.stringify(nav) : '');
+}
+
+function hashFragment() {
+  const raw = location.hash.slice(1);
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
+// Split the profile off a fragment. `profile` is a name, `null` for Global — a session with no prefix,
+// which is what such a link has always meant — or `undefined` when the fragment names no session to
+// place (empty, or `new`, which is a command to this tab rather than a link). The colon split is
+// syntactic: session ids never contain one, and `<params>`' colons come after the `~`. Only a lone
+// `<profile>` (the profile menu's link) needs `validNames`, being otherwise indistinguishable from a
+// session id.
 function splitHashProfile(raw, validNames) {
-  const colon = raw.indexOf(':');
-  if (colon >= 0) {
-    const cand = raw.slice(0, colon);
-    return validNames.has(cand) ? { profile: cand, rest: raw.slice(colon + 1) } : { profile: null, rest: raw };
-  }
-  if (raw && raw.indexOf('~') < 0 && validNames.has(raw)) return { profile: raw, rest: '' };
-  return { profile: null, rest: raw };
+  const ti    = raw.indexOf('~');
+  const colon = (ti >= 0 ? raw.slice(0, ti) : raw).indexOf(':');
+  if (colon >= 0) return { profile: raw.slice(0, colon) || null, rest: raw.slice(colon + 1) };
+  if (raw && ti < 0 && validNames.has(raw)) return { profile: raw, rest: '' };
+  return { profile: raw && raw !== 'new' ? null : undefined, rest: raw };
 }
 
 // Copy `text` to the clipboard, falling back to a hidden textarea + execCommand on plain-HTTP contexts
@@ -4650,16 +4684,17 @@ async function initProfiles() {
   const label = document.getElementById('profile-btn-label');
   if (!btn || !menu || !label) return;
 
-  // Honour a `#<profile>:…` deep-link BEFORE any session/tool call reads the active profile (the transport
-  // sends it from localStorage per request). Adopt the named profile, then strip it from the hash so the
-  // downstream session-fragment parser in init() sees only `<session>~<params>`. Done here at load — no
-  // reload, since nothing has opened under the old identity yet (unlike selectProfile's live switch).
+  // Honour the fragment's profile BEFORE any session/tool call reads the active profile (the transport
+  // sends it from localStorage per request). Done here at load — no reload, since nothing has opened under
+  // the old identity yet (unlike a live switch). A name that is no longer a profile is ignored. The fragment
+  // keeps its prefix: init() splits it again, and the address bar is what gets shared.
   const validNames = new Set(profiles.map(p => p.name));
   profileNames = validNames;                            // share with the hashchange handler
-  const { profile: hashProfile, rest } = splitHashProfile(location.hash.slice(1), validNames);
-  if (hashProfile !== null) {
+  const { profile: hashProfile } = splitHashProfile(hashFragment(), validNames);
+  if (hashProfile === null) {
+    try { localStorage.removeItem(PROFILE_LS); } catch { /* ignore */ }
+  } else if (hashProfile !== undefined && validNames.has(hashProfile)) {
     try { localStorage.setItem(PROFILE_LS, hashProfile); } catch { /* ignore */ }
-    history.replaceState(null, '', location.pathname + (rest ? '#' + rest : ''));
   }
 
   const active = currentProfileName();
@@ -4834,23 +4869,28 @@ function updateShareBtn() {
 // re-shared (hide the button) and is read-only (show a badge — writes to it are rejected by the backend
 // and surface as a turn error). Owned/new sessions clear the badge and show the button. Guarded against a
 // late resolve after the user navigated away.
-async function refreshShareState(sessionId) {
+async function refreshShareState(sessionId, ownerOf = sessionOwner(sessionId)) {
   const badge = document.getElementById('readonly-badge');
   if (badge) badge.hidden = true;
   setComposerReadOnly(false);                          // optimistic: owned/new until the owner call says otherwise
   updateShareBtn();
-  if (!profilesActive || !sessionId) return;
-  let owner = null;
-  try {
-    const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId });
-    owner = 'owner' in r ? r.owner : null;
-  } catch { return; }
+  const owner = await ownerOf;
   if (sessionId !== currentSessionId) return;
   if (owner != null) {                                 // '' = owned by global/base; null = owned by me
     if (shareBtn) shareBtn.hidden = true;
     if (badge) { badge.textContent = 'read-only · ' + (owner || 'global'); badge.hidden = false; }
     setComposerReadOnly(true, owner);
   }
+}
+
+// The owner of a session, from the viewer's side: null = the viewer, '' = Global (the base storage), else
+// the owning profile. Only a session shared IN is owned by anyone else.
+async function sessionOwner(sessionId) {
+  if (!profilesActive || !sessionId) return null;
+  try {
+    const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId });
+    return 'owner' in r ? r.owner : null;
+  } catch { return null; }
 }
 
 // Disable the composer for a shared-in (read-only) session: the textarea is disabled and the send button
