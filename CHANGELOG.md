@@ -22,6 +22,9 @@ churn and less likely to affect a consumer who doesn't use them.
   Global, and adopting it now switches to Global; `#new` still follows the tab. The prefix is split
   syntactically, so it no longer depends on the profile list having loaded, and a message link pasted
   into an open tab keeps its `msg` (the fragment was not decoded on that path).
+- **`frontend/web`** — a fork/split marker in a conversation shared in from another profile links to
+  its peer only if that peer was shared too, and says "not shared with you" otherwise. Sharing one half
+  of a split shares that half alone, so the link used to open nothing.
 
 ## 0.4.20
 

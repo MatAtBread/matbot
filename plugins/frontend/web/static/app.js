@@ -15,6 +15,7 @@ const LS_SIDEBAR        = 'sidebarSections';
 const LS_SIDEBAR_WIDTH  = 'sidebarWidth';
 
 let currentSessionId = null;
+let currentSessionSharedIn = false; // the open session was shared IN from another profile (set before it renders)
 let profilesActive = false;   // set once initProfiles confirms a profile-aware storage backend (gates sharing UI)
 let profileNames = new Set(); // valid profile names, populated by initProfiles — lets hashchange recognise a lone `#<profile>` and refuse a stale one
 let composerReadOnly = false; // true while viewing a session shared IN from another profile (writes rejected by backend)
@@ -2829,6 +2830,18 @@ function renderMarker(part) {
     link.textContent = 'Open →';
     link.addEventListener('click', (e) => { e.preventDefault(); openSession(data.peerSessionId, hasTarget ? data.targetMsg : undefined); });
     note.appendChild(link);
+    // A session shared in appears in the viewer's profile, but its fork or split is a separate session that
+    // was made in the owner's, and is visible here only if it was shared too. Offer the link only if it is:
+    // pointing at the owner's profile instead would send the viewer somewhere that need not be theirs.
+    if (currentSessionSharedIn) {
+      link.hidden = true;
+      void apiGetSession(data.peerSessionId).then(peer => {
+        if (peer) { link.hidden = false; return; }
+        const unshared = document.createElement('span');
+        unshared.textContent = '(not shared with you)';
+        link.replaceWith(unshared);
+      });
+    }
     return note;
   }
 
@@ -3075,12 +3088,16 @@ function renderSession(session, startIdx, scrollTarget) {
 async function openSession(id, scrollTarget) {
   closeSidebar();
   currentSessionId = id;
-  void refreshShareState(id);
+  const ownerOf = sessionOwner(id);
+  void refreshShareState(id, ownerOf);
   unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = sessionHash(id);
   void refreshSessions();
-  const [session, busy] = await Promise.all([apiGetSession(id), apiSessionBusy(id)]);
+  // The owner is needed before rendering, not just for the badge: a shared-in session's markers link to
+  // its forks and splits, which were not necessarily shared with it.
+  const [session, busy, owner] = await Promise.all([apiGetSession(id), apiSessionBusy(id), ownerOf]);
+  currentSessionSharedIn = owner !== null;
   if (session) {
     renderSession(session, undefined, scrollTarget);
     if (chatHeaderEl) chatTitleEl.textContent = session.title ?? '';
@@ -3099,6 +3116,7 @@ async function handleNewSession() {
   try {
     const { id } = await apiNewSession();
     currentSessionId = id;
+    currentSessionSharedIn = false;
     void refreshShareState(id);
     location.hash = sessionHash(id);
     showEmpty();
@@ -4851,23 +4869,28 @@ function updateShareBtn() {
 // re-shared (hide the button) and is read-only (show a badge — writes to it are rejected by the backend
 // and surface as a turn error). Owned/new sessions clear the badge and show the button. Guarded against a
 // late resolve after the user navigated away.
-async function refreshShareState(sessionId) {
+async function refreshShareState(sessionId, ownerOf = sessionOwner(sessionId)) {
   const badge = document.getElementById('readonly-badge');
   if (badge) badge.hidden = true;
   setComposerReadOnly(false);                          // optimistic: owned/new until the owner call says otherwise
   updateShareBtn();
-  if (!profilesActive || !sessionId) return;
-  let owner = null;
-  try {
-    const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId });
-    owner = 'owner' in r ? r.owner : null;
-  } catch { return; }
+  const owner = await ownerOf;
   if (sessionId !== currentSessionId) return;
   if (owner != null) {                                 // '' = owned by global/base; null = owned by me
     if (shareBtn) shareBtn.hidden = true;
     if (badge) { badge.textContent = 'read-only · ' + (owner || 'global'); badge.hidden = false; }
     setComposerReadOnly(true, owner);
   }
+}
+
+// The owner of a session, from the viewer's side: null = the viewer, '' = Global (the base storage), else
+// the owning profile. Only a session shared IN is owned by anyone else.
+async function sessionOwner(sessionId) {
+  if (!profilesActive || !sessionId) return null;
+  try {
+    const r = await callTool('share', { action: 'owner', namespace: 'sessions', id: sessionId });
+    return 'owner' in r ? r.owner : null;
+  } catch { return null; }
 }
 
 // Disable the composer for a shared-in (read-only) session: the textarea is disabled and the send button
