@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isReadOnlyError, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
 import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
@@ -12,13 +12,13 @@ const PLUGIN_NAME       = 'function-tools';
 const NAMESPACE         = 'functions';
 const PACKAGE_NAMESPACE = 'function-packages';
 
-interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true; checkedElsewhere?: true }
+interface FunctionRecord { name: string; definition: string; description?: string; definedUnchecked?: true; checkedElsewhere?: true; shadowedBy?: string }
 
 /** One function's row in a `check` sweep: the service's report, plus who it is about. `diagnostics`
  *  carries each finding's own `rendered` text, so a reader displays that and counts on `total`. */
 interface CheckResult extends Omit<ToolCheckReport, 'environment'> { name: string; package?: true; session?: true; definedUnchecked?: true }
 
-interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true; checkedElsewhere?: true }
+interface PackageRecord { name: string; tools: string[]; definition: string; definedUnchecked?: true; checkedElsewhere?: true; shadowed?: { tool: string; by: string }[] }
 
 /** A stored package, keyed by package name: the unit of declaration AND of removal, so an internal helper
  *  can never outlive the exports calling it, nor an export the helper it calls. */
@@ -74,6 +74,46 @@ const verdict = (report: ToolCheckReport): Omit<ToolCheckReport, 'environment'> 
 const restampWith = (report: ToolCheckReport, against: string | undefined): string | undefined =>
   report.ok && report.checked && report.environment !== undefined && report.environment !== against
     ? report.environment : undefined;
+
+/**
+ * Whether the tool registered as `name` is one this plugin put there. `held` (what it registered) is not
+ * enough alone: the host's `tools.overwrite` gate lets a later plugin take the name — at boot, without
+ * asking — and replacing or removing "our" tool then deletes theirs. The live tool's stamp says who holds
+ * it now; the host stamps the loader-derived name, which is `self.name`, not {@link PLUGIN_NAME}.
+ */
+function ownTool(machine: MatbotMachine, held: ReadonlySet<string> | undefined, name: string): boolean {
+  return held?.has(name) === true && machine.tools.resolve(name)?.pluginName === (machine.self?.name ?? PLUGIN_NAME);
+}
+
+/**
+ * The plugin holding `name` when the tool there is not one this plugin registered (`built-in` for a host
+ * tool, which carries no plugin name); undefined when the name is free or ours. A tool function-tools did
+ * not register always wins over a defined function — at `define`, and at `reload`, where a stored document
+ * can name a tool `define` would have refused here: shared in from a runner whose plugin set differs, or
+ * defined while the plugin now holding the name was off.
+ */
+function foreignHolder(machine: MatbotMachine, held: ReadonlySet<string> | undefined, name: string): string | undefined {
+  const tool = machine.tools.resolve(name);
+  return tool === null || ownTool(machine, held, name) ? undefined : tool.pluginName ?? 'built-in';
+}
+
+const shadowedMessage = (name: string, holder: string, kind: string): string =>
+  `"${name}" is not callable here: the name is held by a tool from "${holder}", which takes precedence over ${kind}. Define it again under another name.`;
+
+/** A refused write keeps the store's reason. A read-only one also says what to do next: the item is
+ *  someone else's, and a name IS the identity, so retrying under it is refused again. */
+function refusedWrite(e: unknown, what: string, remove: string): unknown {
+  if (!isReadOnlyError(e)) return e;
+  return new Error(`${e.message} Nothing was defined: the name belongs to ${what} someone else owns, so choose another name for yours — or \`remove\` theirs first (${remove}), if you no longer want it.`);
+}
+
+/** Record a re-check's pass. Best-effort: a definition shared in from someone else is theirs to re-stamp,
+ *  and a refusal must not cost the sweep its remaining rows. A lost CAS is a redefinition that landed
+ *  meanwhile, whose own fingerprint is the one to keep. */
+async function restamp<T extends { id: string; version: string; checkedAgainst?: string }>(store: Store<T>, doc: T, stamp: string): Promise<void> {
+  try { await store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp }); }
+  catch (e) { if (!isReadOnlyError(e)) throw e; }
+}
 
 const recordOf = (doc: FunctionDoc, env?: string): FunctionRecord => ({
   name: doc.id, definition: doc.definition,
@@ -248,17 +288,25 @@ class FunctionStore {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
-      try { await this.registerTool(recordOf(doc)); seen.add(doc.id); }
+      const holder = this.holderOf(doc.id);
+      if (holder !== undefined) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": the name is held by a tool from "${holder}"`); continue; }
+      try { this.commit(await this.build(recordOf(doc))); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
-    for (const name of this.registered) if (!seen.has(name)) this.machine.tools.remove(name);
+    for (const name of this.registered) if (!seen.has(name) && this.owns(name)) this.machine.tools.remove(name);
     this.registered.clear();
     for (const name of seen) this.registered.add(name);
   }
 
+  /** `shadowedBy` is worked out here, never recorded at reload: the tool holding the name can go away, and
+   *  a recorded skip would then explain nothing. A function whose name is freed is registered at the next
+   *  reload (or by defining it again). */
   async list(env: string | undefined): Promise<FunctionRecord[]> {
     const { items } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true });
-    return items.map(doc => recordOf(doc, env));
+    return items.map(doc => {
+      const holder = this.holderOf(doc.id);
+      return { ...recordOf(doc, env), ...(holder !== undefined ? { shadowedBy: holder } : {}) };
+    });
   }
 
   async has(name: string): Promise<boolean> {
@@ -268,10 +316,7 @@ class FunctionStore {
   /** `sessionNames`: the calling session's own functions, named in the hint if the check trips on one. */
   async define(definition: string, description?: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<{ name: string; parameters: ParsedParam[] }> {
     const sig = parseDefinition(definition);
-    const clash = this.machine.tools.resolve(sig.name);
-    if (clash !== null && !this.registered.has(sig.name)) {
-      throw new Error(`A tool named "${sig.name}" already exists and wasn't defined here — choose another name.`);
-    }
+    this.assertFree(sig.name);
     // Type-check the body against the live tool types before registering — a strong signal the composition
     // is sound before it becomes a callable tool. Skipped when the ToolTypeIndex service is absent (e.g. the
     // browser — the function still compiles and runs), or when the caller opts out with noTypeCheck.
@@ -301,12 +346,18 @@ class FunctionStore {
       // only when there is a verdict to qualify.
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
-    await this.registerTool(recordOf(doc));   // compiles; throws on bad source before anything is persisted
+    // Compiled before anything is written, so bad source fails with nothing changed; registered only once
+    // written, so a refused write changes nothing either. The registry never holds a definition the store
+    // refused — which, with a store that refuses writes to an item shared in, ran someone else's name as
+    // the caller's unsaved code.
+    const tool = await this.build(recordOf(doc));
+    this.assertFree(sig.name);   // the check and the compile awaited: a plugin may have taken the name meanwhile
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
     // and the name is the whole identity. Only this one document is touched, so two concurrent defines
     // of different names can no longer lose each other.
-    await this.store.set(doc.id, doc);
-    this.registered.add(doc.id);
+    try { await this.store.set(doc.id, doc); }
+    catch (e) { throw refusedWrite(e, 'a function', 'by `name`'); }
+    this.commit(tool);
     return { name: sig.name, parameters: sig.params };
   }
 
@@ -331,21 +382,21 @@ class FunctionStore {
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
+      const holder = this.holderOf(doc.id);
       // An unparseable head is this function's own failure, not the run's — reported as its row so a
       // sweep over every function still reports on the rest. It is not a tsc finding, so it gets the
       // same treatment as one rather than a shape of its own: one row type, countable the same way.
-      try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
-      catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
+      if (holder !== undefined) report = findingRow('SHADOWED', shadowedMessage(doc.id, holder, 'a defined function'));
+      else {
+        try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
+        catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
       results.push({
         name: doc.id, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
-      // A lost CAS is a redefinition that landed meanwhile, whose own fingerprint is the one to keep.
       const stamp = restampWith(report, doc.checkedAgainst);
-      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
+      if (stamp !== undefined) await restamp(this.store, doc, stamp);
     }
     return results;
   }
@@ -354,22 +405,34 @@ class FunctionStore {
     const doc = await this.store.get(name);
     if (doc === null) return false;
     await this.store.delete(name, doc.version);
-    this.machine.tools.remove(name);
+    if (this.owns(name)) this.machine.tools.remove(name);
     this.registered.delete(name);
     return true;
   }
 
   removeAll(): void {
-    for (const name of this.registered) this.machine.tools.remove(name);
+    for (const name of this.registered) if (this.owns(name)) this.machine.tools.remove(name);
     this.registered.clear();
   }
 
-  private async registerTool(rec: FunctionRecord): Promise<void> {
+  private owns(name: string): boolean { return ownTool(this.machine, this.registered, name); }
+
+  private holderOf(name: string): string | undefined { return foreignHolder(this.machine, this.registered, name); }
+
+  private assertFree(name: string): void {
+    if (this.holderOf(name) !== undefined) throw new Error(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
+  }
+
+  private async build(rec: FunctionRecord): Promise<Tool> {
     const sig = parseSignature(rec.definition);
     const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
-    const tool = definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
-    this.machine.tools.remove(rec.name);   // replace on re-define; no-op when absent
+    return definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
+  }
+
+  private commit(tool: Tool): void {
+    if (this.owns(tool.name)) this.machine.tools.remove(tool.name);   // a re-define replaces only our own
     this.machine.tools.register(tool);
+    this.registered.add(tool.name);
   }
 }
 
@@ -392,7 +455,7 @@ class PackageStore {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
-      try { await this.install(doc.id, parsePackage(doc.id, doc.definition), doc.definition); seen.add(doc.id); }
+      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping package "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
@@ -403,11 +466,22 @@ class PackageStore {
     return items.map(doc => {
       let tools: string[] = [];
       try { tools = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName); } catch { /* reported by check */ }
+      const shadowed = this.shadowed(doc.id, tools);
       return {
         name: doc.id, tools, definition: doc.definition,
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
         ...elsewhere(doc.checkedAgainst, env),
+        ...(shadowed.length > 0 ? { shadowed } : {}),
       };
+    });
+  }
+
+  /** The exports whose names a tool this package did not register holds — any one keeps the whole group
+   *  out, since a package is installed all or nothing. Worked out live, like a function's `shadowedBy`. */
+  private shadowed(name: string, tools: readonly string[]): { tool: string; by: string }[] {
+    return tools.flatMap(tool => {
+      const by = foreignHolder(this.machine, this.owned.get(name), tool);
+      return by === undefined ? [] : [{ tool, by }];
     });
   }
 
@@ -429,13 +503,16 @@ class PackageStore {
       checked = report.checked;
       checkedAgainst = report.environment;
     }
-    await this.install(name, parsed, definition);
+    // Compiled and clash-checked before the write, registered after it: see FunctionStore.define.
+    const tools = await this.prepare(name, parsed, definition);
     const doc: PackageDoc = {
       id: name, version: crypto.randomUUID(), definition,
       ...(checked ? {} : { definedUnchecked: true as const }),
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
-    await this.store.set(doc.id, doc);
+    try { await this.store.set(doc.id, doc); }
+    catch (e) { throw refusedWrite(e, 'a package', 'by `package`'); }
+    this.commit(name, tools);
     return parsed.exports.map(e => e.toolName);
   }
 
@@ -453,17 +530,18 @@ class PackageStore {
     const results: CheckResult[] = [];
     for (const doc of docs) {
       let report: ToolCheckReport;
-      try { parsePackage(doc.id, doc.definition); report = await index.check(doc.definition); }
-      catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        report = { ok: false, checked: false, total: 1, diagnostics: [{ label: 'PARSE', code: 0, message, rendered: message }] };
-      }
+      try {
+        const shadowed = this.shadowed(doc.id, parsePackage(doc.id, doc.definition).exports.map(e => e.toolName));
+        report = shadowed.length > 0
+          ? findingRow('SHADOWED', shadowed.map(s => shadowedMessage(s.tool, s.by, `package "${doc.id}"`)).join('\n'))
+          : await index.check(doc.definition);
+      } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       results.push({
         name: doc.id, package: true, ...verdict(report),
         ...(doc.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
       });
       const stamp = restampWith(report, doc.checkedAgainst);
-      if (stamp !== undefined) await this.store.cas(doc.id, doc.version, { ...doc, checkedAgainst: stamp });
+      if (stamp !== undefined) await restamp(this.store, doc, stamp);
     }
     return results;
   }
@@ -480,27 +558,27 @@ class PackageStore {
     for (const name of [...this.owned.keys()]) this.unregister(name);
   }
 
+  private owns(name: string, tool: string): boolean { return ownTool(this.machine, this.owned.get(name), tool); }
+
   private unregister(name: string): void {
-    for (const tool of this.owned.get(name) ?? []) this.machine.tools.remove(tool);
+    for (const tool of this.owned.get(name) ?? []) if (this.owns(name, tool)) this.machine.tools.remove(tool);
     this.owned.delete(name);
   }
 
-  /** Compile, then check every exported name, then swap the group in — so a failure at any step leaves
-   *  the previous definition (or nothing) registered, never half of the new one. */
-  private async install(name: string, parsed: ParsedPackage, definition: string): Promise<void> {
+  /** Compile, then check every exported name, registering nothing — so a failure at either step, or a
+   *  refused write after it, leaves the previous definition (or nothing) registered. */
+  private async prepare(name: string, parsed: ParsedPackage, definition: string): Promise<Tool[]> {
     const pkg  = await buildPackageFn(this.machine, definition, parsed);
-    const mine = this.owned.get(name) ?? new Set<string>();
+    const mine = this.owned.get(name);
     for (const e of parsed.exports) {
-      if (this.machine.tools.resolve(e.toolName) !== null && !mine.has(e.toolName)) {
+      if (foreignHolder(this.machine, mine, e.toolName) !== undefined) {
         throw new Error(`A tool named "${e.toolName}" already exists and wasn't defined by package "${name}" — rename the package or the function. Nothing was registered.`);
       }
     }
     const machine = this.machine;
-    const next = new Set(parsed.exports.map(e => e.toolName));
-    for (const old of mine) if (!next.has(old)) machine.tools.remove(old);
-    for (const e of parsed.exports) {
+    return parsed.exports.map(e => {
       const fn = exportFn(pkg, e.name);
-      const tool: Tool = {
+      return {
         name:         e.toolName,
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
         inputSchema:  e.inputSchema,
@@ -511,9 +589,17 @@ class PackageStore {
             return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source });
           },
         },
-      };
-      machine.tools.remove(e.toolName);
-      machine.tools.register(tool);
+      } satisfies Tool;
+    });
+  }
+
+  /** Swap a prepared group in: synchronous, so nothing can fail half way through it. */
+  private commit(name: string, tools: readonly Tool[]): void {
+    const next = new Set(tools.map(t => t.name));
+    for (const old of this.owned.get(name) ?? []) if (!next.has(old) && this.owns(name, old)) this.machine.tools.remove(old);
+    for (const tool of tools) {
+      if (this.owns(name, tool.name)) this.machine.tools.remove(tool.name);
+      this.machine.tools.register(tool);
     }
     this.owned.set(name, next);
   }
@@ -756,6 +842,9 @@ In \`list\`, a row carrying \`checkedElsewhere: true\` DID pass, but in a differ
 one — what a body may import, or whether an import is gated at all, has changed since. Nothing is
 re-checked on load, so \`check\` it: a \`check\` row is always the verdict reached here and now, and a
 pass records this environment, which clears the flag. There is no need to redefine a function to clear it.
+A \`list\` row carrying \`shadowedBy\` (on a package, \`shadowed\`) is stored but NOT callable here: a tool from
+that plugin holds the name, and a tool this plugin did not register always wins over a defined one. Define
+it again under another name; its \`check\` row is \`SHADOWED\`.
 
 TWO DEFINITION SHAPES — and neither is an arrow function
   execute — the BODY alone, between braces. There is no function head, so there is nothing to declare and

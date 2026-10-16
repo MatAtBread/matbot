@@ -499,6 +499,24 @@ churn and less likely to affect a consumer who doesn't use them.
   its peer only if that peer was shared too, and says "not shared with you" otherwise. Sharing one half
   of a split shares that half alone, so the link used to open nothing.
 
+- **`function-tools`** — a `define` (or `package`) the store refuses changes nothing in the tool registry
+  (#106). Both registered the new definition before writing it, so a refused write left the caller's
+  unsaved code running under the name. With a store that refuses writes to items shared in, that meant
+  someone else's function. A refused NEW name was left registered but untracked, so it could be neither
+  removed nor defined again. Source is still compiled before the write, so bad source fails first. A
+  read-only refusal keeps the store's reason and adds the next step (choose another name, or `remove`
+  theirs). A `check` sweep no longer stops at a shared definition whose fingerprint it cannot re-stamp.
+
+- **`function-tools`** — a stored function never replaces a tool `function-tools` did not register
+  (#107). `reload` removed whatever held a stored function's name before registering it. That bypassed
+  the host's `tools.overwrite` gate and let a shared-in or stale definition displace another plugin's
+  tool, including on a `StorageBackend` swap after later plugins had loaded. Such a function is now
+  skipped with a warning, and `list` reports it as `shadowedBy` (a package as `shadowed`) and `check` as
+  `SHADOWED`, both worked out at the time of the call. Ownership is the live tool's plugin stamp, not
+  only the record of what was registered, so a name another plugin has since taken over is not taken
+  back by a reload, a `define` or a `remove`. A function whose name is freed is registered at the next
+  reload.
+
 ## 0.4.19
 
 ### API gaps filled
