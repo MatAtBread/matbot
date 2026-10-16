@@ -277,3 +277,23 @@ test('compact_sessions defers every session a turn is running in, not only the c
   await endTurn();
   assert.equal(docs.get('busy')!.messages[1]!.content.length, 1, 'compacted once the turn ended');
 });
+
+test('session_edit takes the message by id as well as by index', { timeout: 15000 }, async () => {
+  const target: Session = { ...createSession(), id: 'target', messages: [msg('m1', 'user'), msg('m2', 'assistant'), msg('m3', 'user'), msg('m4', 'assistant')] };
+  const { store, docs } = casStore(target);
+  const { run, endTurn } = heldRunner('target');
+  const tool = (await editTools(store, run)).get('session_edit')!;
+
+  const events = await drain(tool, { action: 'cut', sessionId: 'target', msgId: 'm4' }, caller);
+  assert.equal((events.find(e => e.type === 'result')?.value as { deferred?: boolean }).deferred, true, JSON.stringify(events));
+  // Deferred by id behaves as by index: a pair placed ahead of the turn does not move where it lands.
+  await endTurn(() => {
+    const cur = docs.get('target')!;
+    docs.set('target', { ...cur, version: crypto.randomUUID(), messages: [msg('m1', 'user'), msg('m2', 'assistant'), msg('q', 'user'), msg('a', 'assistant'), msg('m3', 'user'), msg('m4', 'assistant')] });
+  });
+  assert.deepEqual(docs.get('target')!.messages.map(m => m.id), ['m1', 'm2', 'q', 'a', 'm3']);
+
+  const fork = await drain(tool, { action: 'fork', sessionId: 'target', msgId: 'q' }, caller);
+  const forked = docs.get((fork.find(e => e.type === 'result')?.value as { newSessionId: string }).newSessionId)!;
+  assert.deepEqual(forked.messages.filter(m => m.role !== 'marker').map(m => m.id), ['m1', 'm2'], JSON.stringify(fork));
+});

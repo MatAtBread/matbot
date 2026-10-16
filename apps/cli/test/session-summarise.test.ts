@@ -358,3 +358,23 @@ test('the positional actions still demand an index, and say who may omit it', as
     assert.match(events.find(e => e.type === 'error')?.message ?? '', /Only "summarise" may omit it/, action);
   }
 });
+
+test('summarise takes the message by id as well as by index', async () => {
+  const { run, docs } = await harness(HANDOFF);
+  const events = await run({ action: 'summarise', sessionId: 'target', msgId: 'm5' });
+  assert.equal((events.find(e => e.type === 'result')?.value as { messagesSummarised: number }).messagesSummarised, 4, JSON.stringify(events));
+  assert.deepEqual(markerMessages(docs.get('target')!).map(m => m.id), ['m1', 'm2', 'm3', 'm4']);
+});
+
+test('a message named both ways, or by an id the session does not hold, is refused and changes nothing', async () => {
+  const { run, docs } = await harness(HANDOFF);
+  const before = structuredClone(docs.get('target'));
+  for (const action of ['cut', 'fork', 'split', 'compact', 'summarise']) {
+    const both = await run({ action, sessionId: 'target', msgIndex: 2, msgId: 'm3' });
+    assert.match(both.find(e => e.type === 'error')?.message ?? '', /"msgIndex" or "msgId", not both/, action);
+    const missing = await run({ action, sessionId: 'target', msgId: 'nope' });
+    assert.match(missing.find(e => e.type === 'error')?.message ?? '', /Message "nope" not found in session "target"/, action);
+  }
+  assert.deepEqual(docs.get('target'), before);
+  assert.equal(docs.size, 1, 'fork and split wrote no new session');
+});

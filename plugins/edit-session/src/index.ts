@@ -17,17 +17,19 @@ declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     // One arm per action: a caller of `invokeTool(machine, 'session_edit', { action: '…' })` gets the
     // matching result narrowed by the `action` it passed (see ToolContract / the multi-action note on ToolContracts).
+    // The pivot is `msgIndex` OR `msgId`, so both are optional here and the executor demands exactly one: a
+    // union in an arm would make the arm a union, which costs the validator its dispatch on `action`.
     session_edit:
-      | ToolContract<{ sessionId: string; messagesRemaining: number } | DeferredEdit,                                                     { action: 'cut';     sessionId: string; msgIndex: number }>
-      | ToolContract<{ newSessionId: string; messagesCopied: number },                                                                    { action: 'fork';    sessionId: string; msgIndex: number }>
-      | ToolContract<{ newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number } | DeferredEdit, { action: 'split';   sessionId: string; msgIndex: number }>
-      | ToolContract<{ sessionId: string; messagesStripped: number } | DeferredEdit,                                                      { action: 'compact'; sessionId: string; msgIndex: number }>
+      | ToolContract<{ sessionId: string; messagesRemaining: number } | DeferredEdit,                                                     { action: 'cut';     sessionId: string; msgIndex?: number; msgId?: string }>
+      | ToolContract<{ newSessionId: string; messagesCopied: number },                                                                    { action: 'fork';    sessionId: string; msgIndex?: number; msgId?: string }>
+      | ToolContract<{ newSessionId: string; messagesSplit: number; currentSessionId: string; messagesRemaining: number } | DeferredEdit, { action: 'split';   sessionId: string; msgIndex?: number; msgId?: string }>
+      | ToolContract<{ sessionId: string; messagesStripped: number } | DeferredEdit,                                                      { action: 'compact'; sessionId: string; msgIndex?: number; msgId?: string }>
       // Both spellings are one arm, not two: the action is a word a model types from memory, and being
       // told "unknown action" for the American spelling of the only destructive-looking action here is a
       // failure that teaches nothing. `charsAfter` counts the hand-off pair ALONE — the marker holding
       // the originals is elided from every submission, so it is not context the saving has to pay for.
       | ToolContract<{ sessionId: string; messagesSummarised: number; charsBefore: number; charsAfter: number } | DeferredEdit,
-                     { action: 'summarise' | 'summarize'; sessionId: string; msgIndex?: number; provider?: string }>;
+                     { action: 'summarise' | 'summarize'; sessionId: string; msgIndex?: number; msgId?: string; provider?: string }>;
   }
 }
 
@@ -38,7 +40,7 @@ function bumpVersion<T extends { version: string }>(doc: T): T {
 }
 
 /**
- * The range a `summarise` covers when the caller named no `msgIndex`: the whole session.
+ * The range a `summarise` covers when the caller named no message: the whole session.
  *
  * Which, in the session the calling turn is running in, stops at that turn's own user message — because
  * the request to summarise is not part of the history being summarised. Left unclamped it is: a turn's
@@ -96,6 +98,31 @@ function resolveIndex(session: Session, msgIndex: number): number | null {
   return msgIndex;
 }
 
+/** The message an edit pivots on, named by its position or by its id. */
+type MsgRef = { msgIndex: number } | { msgId: string };
+
+// `undefined` when the call named neither, which only `summarise` accepts; a string when it is malformed.
+function readRef(action: string, input: { msgIndex?: unknown; msgId?: unknown }): MsgRef | undefined | string {
+  const { msgIndex, msgId } = input;
+  if (msgIndex !== undefined && msgId !== undefined) return `session_edit "${action}" takes "msgIndex" or "msgId", not both.`;
+  if (typeof msgIndex === 'number') return { msgIndex };
+  if (typeof msgId === 'string') return { msgId };
+  if (msgIndex === undefined && msgId === undefined) return undefined;
+  return `session_edit "${action}": "msgIndex" must be a number and "msgId" a string.`;
+}
+
+const requiresRef = (action: string): string =>
+  `session_edit "${action}" requires "msgIndex" (number) or "msgId" (string). Only "summarise" may omit it.`;
+
+// The index `ref` names in `session`, or why it names none.
+function locate(session: Session, ref: MsgRef): number | string {
+  if ('msgId' in ref) {
+    const i = session.messages.findIndex(m => m.id === ref.msgId);
+    return i < 0 ? `Message "${ref.msgId}" not found in session "${session.id}".` : i;
+  }
+  return resolveIndex(session, ref.msgIndex) ?? `msgIndex ${ref.msgIndex} out of range.`;
+}
+
 function generateSplitTitle(title: string): string {
   // If title ends with " pt N", bump the number
   const match = title.match(/^(.*?)\s*pt\s+(\d+)$/);
@@ -108,10 +135,10 @@ function generateSplitTitle(title: string): string {
 
 // ── tool ──────────────────────────────────────────────────────────────────────
 
-// All four actions share the same parameter shape ({ sessionId, msgIndex }); only the behaviour
+// All four actions share the same parameter shape ({ sessionId, msgIndex | msgId }); only the behaviour
 // differs. The schema stays loose (action enum + the shared fields) and the description carries
 // this TypeScript signature, which the executor enforces.
-interface SessionEditInput { action: IndexAction | 'summarise' | 'summarize'; sessionId: string; msgIndex: number; provider?: string }
+interface SessionEditInput { action: IndexAction | 'summarise' | 'summarize'; sessionId: string; msgIndex?: number; msgId?: string; provider?: string }
 
 /** The actions whose whole input is the index they pivot on. `summarise` is the one that needs more
  *  (a provider to summarise with), and the one whose work happens before the edit rather than in it. */
@@ -125,12 +152,15 @@ type EditOutcome =
 
 // Reads the document itself, so it is equally correct called at once or once a turn holding the session
 // has ended (the deferred self-edit) — the deferred path must NOT close over a session read before the
-// turn committed, which is exactly the state the turn is about to overwrite.
-async function applyEdit(store: Store<Session>, action: IndexAction | undefined, sessionId: string, msgIndex: number): Promise<EditOutcome> {
+// turn committed, which is exactly the state the turn is about to overwrite. `at` finds the pivot in that
+// same read, so the index it yields is never applied to a different version of the document.
+async function applyEdit(
+  store: Store<Session>, action: IndexAction | undefined, sessionId: string, at: (session: Session) => number | string,
+): Promise<EditOutcome> {
   const session = await store.get(sessionId);
   if (!session) return { ok: false, message: `Session "${sessionId}" not found.` };
-  const idx = resolveIndex(session, msgIndex);
-  if (idx === null) return { ok: false, message: `msgIndex ${msgIndex} out of range.` };
+  const idx = at(session);
+  if (typeof idx === 'string') return { ok: false, message: idx };
 
   switch (action) {
     case 'cut': {
@@ -211,7 +241,7 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
     }
 
     case 'compact': {
-      if (idx === 0) return { ok: false, message: `msgIndex ${msgIndex} out of range or nothing to compact.` };
+      if (idx === 0) return { ok: false, message: 'Nothing to compact before the first message.' };
       const { messages, stripped } = compactBefore(session.messages, idx);
       // Compaction never touches the tail (it stops at idx), so updatedAt holds and the session keeps
       // its place in a recency-sorted list — even though the messages it does touch may disappear.
@@ -232,13 +262,8 @@ async function applyEdit(store: Store<Session>, action: IndexAction | undefined,
 // One attempt at an index edit, at the message the caller named (see `Anchor`), in the session as it is
 // when the edit is made. A lost compare-and-swap comes back as a `conflict`, to be read again and retried.
 function anchoredEdit(store: Store<Session>, action: IndexAction, sessionId: string, anchor: Anchor): () => Promise<EditOutcome> {
-  return async () => {
-    const session = await store.get(sessionId);
-    if (session === null) return { ok: false, message: `Session "${sessionId}" not found.` };
-    const idx = anchoredIndex(session, anchor);
-    if (idx === null) return { ok: false, message: 'the message it named is no longer in the session.' };
-    return applyEdit(store, action, sessionId, idx);
-  };
+  return () => applyEdit(store, action, sessionId, session =>
+    anchoredIndex(session, anchor) ?? 'the message it named is no longer in the session.');
 }
 
 /**
@@ -314,9 +339,11 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
     name: 'session_edit',
     description:
       'Edit the message history of a session (see `session_action` for what a session is). Every ' +
-      'action takes a session ID and a message index (`msgIndex`, an index into session.messages) ' +
-      'and uses it to manage the conversation\'s length and structure — except `summarise`, for which ' +
-      'omitting `msgIndex` means the whole session:\n' +
+      'action takes a session ID and the message it pivots on, named EITHER by position (`msgIndex`, an ' +
+      'index into session.messages; negative counts from the end) OR by id (`msgId`, the `id` of a message ' +
+      'in session.messages, as `session_action get` returns them) — not both. Below, msgIndex stands for ' +
+      'whichever you give. It is used to manage the conversation\'s length and structure — except ' +
+      '`summarise`, for which omitting both means the whole session:\n' +
       '  cut     — Truncate: remove all messages from msgIndex onward.\n' +
       '  fork    — Branch: create a NEW session with messages[0..msgIndex-1]; the original is unchanged.\n' +
       '  split   — Move: messages before msgIndex move to a new session; the current session keeps\n' +
@@ -324,7 +351,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       '  compact — Shrink: strip thinking blocks, tool calls, and tool results from messages before\n' +
       '            msgIndex, keeping user/assistant text — fewer tokens, same thread. A message left\n' +
       '            with no content is removed, so earlier indices shift; re-read the session before\n' +
-      '            using a msgIndex you read from it beforehand.\n' +
+      '            using a msgIndex you read from it beforehand (the msgId of a message that survived\n' +
+      '            still names it).\n' +
       '  summarise — Shrink by MEANING rather than by shape: an LLM rewrites messages[0..msgIndex-1]\n' +
       '            as a two-part hand-off document — a user message carrying what was wanted (an\n' +
       '            objective and its standing constraints, or, for a conversation that ranged over\n' +
@@ -336,7 +364,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
       '            this turn\'s). The replaced messages are NOT destroyed: they move into a marker you\n' +
       '            never see, which a later summarise re-reads — so history is never summarised twice,\n' +
       '            and the session document does not shrink on disk (use cut to actually discard).\n' +
-      '            OMIT msgIndex to summarise the whole session — which is what you usually want, and\n' +
+      '            OMIT msgIndex/msgId to summarise the whole session — which is what you usually want, and\n' +
       '            what to do when asked to summarise or compact "this session". In the session you\n' +
       '            are running in, the whole session ends where THIS turn began: the request you are\n' +
       '            answering is not part of the history it is about, so it is never summarised.\n' +
@@ -359,13 +387,16 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
         action:    { type: 'string', enum: ['cut', 'fork', 'split', 'compact', 'summarise', 'summarize'], description: 'The edit to perform.' },
         sessionId: { type: 'string', description: 'ID of the session to edit.' },
         provider:  { type: 'string', description: 'summarise only (optional): provider key to write the summary with. Defaults to the provider of the current turn.' },
-        msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description). Like slice index, negative is an offset from the end of the session. Required by cut/fork/split/compact; OMIT it for summarise to mean the whole session.' },
+        msgIndex:  { type: 'number', description: 'Index into session.messages the action pivots on (see per-action meaning in the description). Like slice index, negative is an offset from the end of the session. cut/fork/split/compact require this or msgId; OMIT both for summarise to mean the whole session.' },
+        msgId:     { type: 'string', description: 'ID of the message in the session the action pivots on — the alternative to msgIndex, with the same meaning; give one, not both.' },
       },
     },
     executor: {
       async *execute(input: unknown, ctx: ToolContext) {
-        const { action, sessionId, msgIndex } = input as Partial<SessionEditInput>;
+        const { action, sessionId } = input as Partial<SessionEditInput>;
         if (!sessionId) { yield { type: 'error', message: 'session_edit requires "sessionId".' }; return; }
+        const ref = readRef(String(action), input as Partial<SessionEditInput>);
+        if (typeof ref === 'string') { yield { type: 'error', message: ref }; return; }
         // A background job's store is its parent's medium, written by none of the parent's turns: an edit
         // from here would land under one of them unseen and be undone by its write-back. `fork` is the
         // exception — it writes a session no turn can yet be running in.
@@ -389,12 +420,13 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           const isCurrentTurn = sessionId === ctx.session.id;
           const source = isCurrentTurn ? ctx.session : await store.get(sessionId);
           if (!source) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-          // No msgIndex means the whole session — see wholeSessionIndex. A named one is resolved as it is
-          // everywhere else (negative counts from the end), except that `messages.length` is allowed:
+          // No message named means the whole session — see wholeSessionIndex. A msgIndex is resolved as it
+          // is everywhere else (negative counts from the end), except that `messages.length` is allowed:
           // the range is `[0, idx)`, so the end of the array is "all of it" rather than out of bounds.
-          const idx = msgIndex === undefined
-            ? wholeSessionIndex(source, isCurrentTurn)
-            : (msgIndex < 0 ? source.messages.length + msgIndex : msgIndex);
+          const idx = ref === undefined ? wholeSessionIndex(source, isCurrentTurn)
+            : 'msgId' in ref            ? locate(source, ref)
+            : (ref.msgIndex < 0 ? source.messages.length + ref.msgIndex : ref.msgIndex);
+          if (typeof idx === 'string') { yield { type: 'error', message: idx }; return; }
           if (idx <= 0 || idx > source.messages.length) {
             yield { type: 'error', message: `Nothing to summarise in range [0, ${idx}) of ${source.messages.length} message(s).` };
             return;
@@ -447,7 +479,7 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
         // says "queued" and nothing more. `fork` is exempt — it only writes a new document.
         const isCurrentTurn = sessionId === ctx.session.id;
         if (action === 'cut' || action === 'split' || action === 'compact') {
-          if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${action}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
+          if (ref === undefined) { yield { type: 'error', message: requiresRef(action) }; return; }
           // Resolve the index NOW, against the history the caller can see, to the message it names (see
           // `Anchor`). That is this turn's own copy, or for another session its committed document. If a
           // turn holds the session, its document has grown by that turn's tail by the time the edit is made,
@@ -455,8 +487,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           // ahead of the turn shifts even a positive index.
           const visible = isCurrentTurn ? ctx.session : await store.get(sessionId);
           if (!visible) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
-          const index = resolveIndex(visible, msgIndex);
-          if (index === null) { yield { type: 'error', message: `msgIndex ${msgIndex} out of range.` }; return; }
+          const index = locate(visible, ref);
+          if (typeof index === 'string') { yield { type: 'error', message: index }; return; }
           const outcome = await writeEdit(services.run, sessionId, action, anchoredEdit(store, action, sessionId, anchorAt(visible.messages, index, anchorSide(action))));
           if (outcome !== 'deferred') {
             if (!outcome.ok) { yield { type: 'error', message: outcome.message }; return; }
@@ -473,8 +505,8 @@ function makeSessionEditTool(store: Store<Session>, services: MatbotMachine): To
           return;
         }
 
-        if (typeof msgIndex !== 'number') { yield { type: 'error', message: `session_edit "${String(action)}" requires "msgIndex" (number). Only "summarise" may omit it.` }; return; }
-        const outcome = await applyEdit(store, action, sessionId, msgIndex);
+        if (ref === undefined) { yield { type: 'error', message: requiresRef(String(action)) }; return; }
+        const outcome = await applyEdit(store, action, sessionId, session => locate(session, ref));
         if (!outcome.ok) { yield { type: 'error', message: outcome.message }; return; }
         yield { type: 'result', value: outcome.value };
       },
