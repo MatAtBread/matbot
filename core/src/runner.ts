@@ -192,6 +192,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     async createSecret() { throw new Error('No vault configured'); },
     async writeSecret()  { throw new Error('No vault configured'); },
     hasKey() { return false; },
+    async readSecret() { return undefined; },
     async resolve(ref: string) { return ref; },
     scrub(text: string) { return text; },
   };

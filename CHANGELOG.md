@@ -120,6 +120,16 @@ churn and less likely to affect a consumer who doesn't use them.
   `File '<…>/@types/node/index.d.ts' is not a module`, a path inside matbot's own `node_modules` that the
   body never named and its author cannot act on.
 
+- **A vault backend implements `readSecret(name)`, not `resolve`.** `VaultSpec` gains
+  `readSecret(name): Promise<string | undefined>` — the literal read, as `writeSecret` is the literal
+  write — and `resolve` moves to `Vault` as a policy written once over it, `applyResolve(spec, ref)`
+  (exported from plugin-api and core). The `${NAME}` regex and replace loop were copied into every
+  backend; now the placeholder grammar has one home. A caller holding a key NAME reads it as a name,
+  rather than wrapping it in `${…}` for `resolve` to parse back out — through which `A}${B` was two
+  lookups behind one name. `resolve` also reports each missing key once rather than once per occurrence.
+
+  Migrating a backend: add `readSecret`, and make `resolve(ref)` return `applyResolve(this, ref)`.
+
 ### API gaps filled
 
 - **`PermissionRequest.standing`** — the answers one act may be remembered as, narrowest first, each as
@@ -454,6 +464,26 @@ churn and less likely to affect a consumer who doesn't use them.
   a schema and is visible as a candidate, while the global was mentioned only in passing. The sentence sits
   beside the one saying a runner *may* withhold globals, which left the model unsure whether `fetch` was
   among them; it is not withheld by the node runner, and `types` lists any global that a runner does withhold.
+
+- **`http`** — a header value can come from the Vault (#104). `{ "Vault": "KEY_NAME" }` sends the stored
+  value, so a keyed REST API needs no secret in the conversation. Each key is gated as `http.secret` on
+  `<origin> <key>` before the vault is read — one call per key, `fallback: false`, standing answers for
+  the pair or the whole origin and never for the key alone. While a key is attached a redirect is not
+  followed (fetch strips only `Authorization` and `Cookie` across origins), the URL must be absolute
+  http(s), and the resolved values are redacted from the result and from every error. The string may
+  also be a template, each key written `${NAME}` — `{ "Authorization": { "Vault": "Bearer ${ACME_KEY}" } }`
+  — so the key holds only the token; every key in it is gated on its own, and a malformed reference is
+  refused before anything is asked. The template is the tool's own grammar, parsed into names that are
+  read one by one — never handed to `Vault.resolve`.
+
+- **`web-bundle`** — a remote plugin's imports resolve in the browser as they do on node (#94, #95, #96).
+  A module still runs from a `blob:` URL, which resolves no relative reference, so its imports are now
+  found by sucrase's parser rather than a regex — text in a string, template or comment is no longer
+  rewritten — and resolved against the URL that answered the fetch, so a CDN redirect no longer sends a
+  module's relative imports to the wrong path, and two URLs redirecting to one module load it once. A
+  root-relative import (`/lib/x.js`) resolves against the plugin's origin. `import(…)` resolves when it
+  is called, so a computed specifier works and a dependency is fetched only if it is actually imported;
+  `import.meta.url` is the module's real URL.
 
 ## 0.4.19
 

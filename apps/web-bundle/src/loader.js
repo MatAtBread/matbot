@@ -106,6 +106,18 @@
     _transform = mod.transform;
     return _transform;
   };
+  // Sucrase's own parser, for finding a remote module's imports (see findRemoteImports). Same version as
+  // the stripper, same lazy load.
+  let _parser;
+  const getParser = async () => {
+    if (_parser) return _parser;
+    const [{ parse }, { TokenType }] = await Promise.all([
+      import(/* @vite-ignore */ 'https://esm.sh/sucrase@3.35.1/dist/esm/parser/index.js'),
+      import(/* @vite-ignore */ 'https://esm.sh/sucrase@3.35.1/dist/esm/parser/tokenizer/types.js'),
+    ]);
+    _parser = { parse, tt: TokenType };
+    return _parser;
+  };
 
   // Normalise a relative specifier against its importer's module id, with .js -> .ts remap (the same
   // remap ts-hooks.js does in node, for source that ships no compiled output).
@@ -126,6 +138,8 @@
   };
 
   // Matches the specifier string in: `… from '…'`, side-effect `import '…'`, and dynamic `import('…')`.
+  // Used only for the inlined graph, which is our own build output and must boot without the CDN parser;
+  // a remote module is parsed instead (findRemoteImports).
   const SPEC_RE = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\2/g;
 
   // Rewrite relative specifiers via mapFn (returning a replacement specifier, or null to leave as-is).
@@ -171,38 +185,136 @@
   document.head.appendChild(map);
 
   // ── Runtime remote plugin loading (best-effort; needs http, not file://) ──────────────────────
-  // Fetch a remote .ts module graph, type-strip it, and rewrite its *relative* imports straight to
-  // the blob URLs of their (recursively loaded) dependencies — so no second import map is needed.
-  // Bare imports still flow through the baseline import map, preserving the singleton boundary.
-  const remoteCache = new Map();
+  // Fetch a remote .ts module graph, type-strip it, and run each module from a `blob:` URL — which can
+  // resolve no relative reference at all — so every way the module names its own location is rewritten to
+  // what it would resolve to at its real URL:
+  //   - a static relative or root-relative import → the blob URL of that (recursively loaded) dependency,
+  //     so no second import map is needed;
+  //   - `import(…)` → IMPORT_HELPER, which resolves the specifier when it is called, as Node's resolve hook
+  //     does: a computed specifier works, and a dependency is fetched only if it is actually imported;
+  //   - `import.meta.url` → the real URL.
+  // Bare imports still flow through the baseline import map (the singleton boundary), and an absolute URL is
+  // left to the browser, which gives a CDN module its real URL as identity.
+  //
+  // "Real URL" is the one that ANSWERED (`res.url`), not the one requested: a CDN redirect (unpkg `lit@3` →
+  // `lit@3.3.3/index.js`) moves where `./x.js` lives, and keying the cache on it makes a redirect and its
+  // target one module instance.
+
+  // A real parse, never a scan: telling `import(` in code from the same text in a string, template, comment
+  // or regex literal needs the tokenizer, and a scan that guesses wrong loses its place and misses imports
+  // further on. Returns the spans to replace, in source order.
+  const findRemoteImports = (code, url, { parse, tt }) => {
+    let tokens;
+    try { ({ tokens } = parse(code, false, false, false)); }
+    catch (err) { throw new Error(`matbot: cannot parse remote module "${url}": ${err?.message ?? err}`); }
+    const isName = (t, s) => t?.type === tt.name && code.slice(t.start, t.end) === s;
+    const isSpec = (t) => t?.type === tt.string;
+    const spans  = [];
+    const specAt = (t) => spans.push({ kind: 'static', start: t.start, end: t.end, spec: code.slice(t.start + 1, t.end - 1) });
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i], next = tokens[i + 1];
+      if (t.type === tt._import) {
+        if (next?.type === tt.parenL) spans.push({ kind: 'dynamic', start: t.start, end: next.end });
+        else if (isSpec(next)) specAt(next);                                         // import './x.js'
+        else {
+          let j = i + 1;
+          while (j < tokens.length && !(isName(tokens[j], 'from') && isSpec(tokens[j + 1]))) j++;
+          if (j < tokens.length) specAt(tokens[j + 1]);
+        }
+      } else if (t.type === tt._export) {                                            // export * [as ns] from, export { … } from
+        let j = i + 1;
+        if (tokens[j]?.type === tt.star) { j++; if (tokens[j]?.type === tt._as) j += 2; }
+        else if (tokens[j]?.type === tt.braceL) { while (j < tokens.length && tokens[j].type !== tt.braceR) j++; j++; }
+        else continue;
+        if (isName(tokens[j], 'from') && isSpec(tokens[j + 1])) specAt(tokens[j + 1]);
+      } else if (isName(t, 'import') && next?.type === tt.dot                       // the parser renames `import` in import.meta
+                 && tokens[i - 1]?.type !== tt.dot && tokens[i - 1]?.type !== tt.questionDot
+                 && isName(tokens[i + 2], 'meta') && tokens[i + 3]?.type === tt.dot && isName(tokens[i + 4], 'url')) {
+        spans.push({ kind: 'meta', start: t.start, end: tokens[i + 4].end });
+      }
+    }
+    return spans.sort((a, b) => a.start - b.start);
+  };
+
+  // Where a specifier written in the module at `base` lives, or null to leave it to the import map / the browser.
+  const remoteTarget = (spec, base) => {
+    if (spec.startsWith('node:')) {
+      throw new Error(`remote plugin "${base}" imports the Node-only module "${spec}" and cannot run in the browser`);
+    }
+    if (isRelative(spec) || (spec.startsWith('/') && !spec.startsWith('//'))) return new URL(spec, base).href;
+    return null;
+  };
+
+  // Promises, not results: a dynamic import can now start a load while another is in flight, and two loads
+  // of one module must not make two instances. A failure is dropped so a retry fetches again.
+  const remoteByRequest = new Map();   // requested URL → Promise<blob URL>
+  const remoteByUrl     = new Map();   // answering URL → Promise<blob URL>
+  const cached = (map, key, make) => {
+    let p = map.get(key);
+    if (!p) { p = make(); map.set(key, p); p.catch(() => map.delete(key)); }
+    return p;
+  };
+  const cycle = (url) => new Error(`matbot: import cycle in remote plugin at ${url}`);
+
   // rawSink (optional) collects each fetched .ts's RAW (pre-strip) source, so the caller can scan it for
   // `ToolContracts` augmentations (type-only — gone after stripping) and give a remote plugin's tools real
   // TS contracts, the same as the baked built-ins. Only newly-fetched modules are collected (a cache hit
-  // means the module was already scanned on its first load).
-  const loadRemoteModule = async (absUrl, stack, rawSink) => {
-    if (remoteCache.has(absUrl)) return remoteCache.get(absUrl);
-    if (stack.includes(absUrl)) throw new Error(`matbot: import cycle in remote plugin at ${absUrl}`);
-
-    let res = await fetch(absUrl);
-    let url = absUrl;
-    if (!res.ok && absUrl.endsWith('.js')) { url = absUrl.slice(0, -3) + '.ts'; res = await fetch(url); }
-    if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
-
-    const raw      = await res.text();
-    if (url.endsWith('.ts') && rawSink) rawSink.push(raw);
-    // Strip types ONLY (disableESTransforms + keepUnusedImports): keep `??`/`?.` native and imports verbatim.
-    const stripped = url.endsWith('.ts') ? (await getTransform())(raw, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true, filePath: url, preserveDynamicImport: true }).code : raw;
-    const rewritten = await rewrite(stripped, async (spec) => {
-      if (spec.startsWith('node:')) {
-        throw new Error(`remote plugin "${absUrl}" imports the Node-only module "${spec}" and cannot run in the browser`);
-      }
-      if (!isRelative(spec)) return null;   // bare → baseline import map (host singletons)
-      const childAbs = new URL(spec, url).href;
-      return await loadRemoteModule(childAbs, [...stack, url], rawSink);
+  // means the module was already scanned on its first load), and a module loaded later by a dynamic
+  // import is not collected at all.
+  //
+  // `stack` holds both the requested and the answering URL of every module above this one. The cycle check
+  // must come before the cache: an ancestor's entry is still in flight, and awaiting it would never settle.
+  const loadRemoteModule = (absUrl, stack, rawSink) => {
+    if (stack.includes(absUrl)) return Promise.reject(cycle(absUrl));
+    return cached(remoteByRequest, absUrl, async () => {
+      let fetched = absUrl;
+      let res = await fetch(fetched);
+      if (!res.ok && absUrl.endsWith('.js')) { fetched = absUrl.slice(0, -3) + '.ts'; res = await fetch(fetched); }
+      if (!res.ok) throw new Error(`matbot: failed to fetch "${absUrl}" (${res.status})`);
+      const url = res.url || fetched;
+      if (stack.includes(url)) throw cycle(url);
+      return cached(remoteByUrl, url, async () => buildRemoteModule(url, await res.text(), [...stack, absUrl, url], rawSink));
     });
-    const blob = URL.createObjectURL(new Blob([rewritten], { type: 'text/javascript' }));
-    remoteCache.set(absUrl, blob);
-    return blob;
+  };
+
+  const buildRemoteModule = async (url, raw, stack, rawSink) => {
+    const isTs = new URL(url).pathname.endsWith('.ts');
+    if (isTs && rawSink) rawSink.push(raw);
+    // Strip types ONLY (disableESTransforms + keepUnusedImports): keep `??`/`?.` native and imports verbatim.
+    const code = isTs ? (await getTransform())(raw, { transforms: ['typescript'], disableESTransforms: true, keepUnusedImports: true, filePath: url, preserveDynamicImport: true }).code : raw;
+    let out = '', last = 0;
+    for (const span of findRemoteImports(code, url, await getParser())) {
+      let replacement;
+      switch (span.kind) {
+        case 'static': {
+          const target = remoteTarget(span.spec, url);
+          if (target !== null) replacement = JSON.stringify(await loadRemoteModule(target, stack, rawSink));
+          break;
+        }
+        case 'dynamic': replacement = `${IMPORT_HELPER}(${JSON.stringify(url)}, `; break;
+        case 'meta':    replacement = JSON.stringify(url); break;
+      }
+      if (replacement === undefined) continue;
+      out += code.slice(last, span.start) + replacement;
+      last = span.end;
+    }
+    out += code.slice(last);
+    return URL.createObjectURL(new Blob([out], { type: 'text/javascript' }));
+  };
+
+  // What a remote module's `import(spec[, options])` becomes. A global because a blob module has no other way
+  // to reach the loader; it is no grant, a loaded plugin having the page already. The two-argument form is
+  // built only when a module uses it: written here, it is a syntax error that would stop this whole script
+  // in a browser without import attributes, where a plugin using it could not have run anyway.
+  const IMPORT_HELPER = '__matbot_import__';
+  let importWith;
+  globalThis[IMPORT_HELPER] = async (base, specifier, ...options) => {
+    const spec   = String(specifier);
+    const target = remoteTarget(spec, base);
+    const real   = target === null ? spec : await loadRemoteModule(target, [], undefined);
+    if (options.length === 0) return import(/* @vite-ignore */ real);
+    importWith ??= new Function('s', 'o', 'return import(s, o)');
+    return importWith(real, options[0]);
   };
 
   // exports["."] may be a string or a condition/subpath map — prefer import > default > first.
