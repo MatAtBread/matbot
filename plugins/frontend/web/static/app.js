@@ -3576,6 +3576,8 @@ async function renderTurn(sid, traceId) {
   let hasText         = false;
   let thinkingContent = null;
   let thinkingAccum   = '';
+  /** @type {{ el: Element, label: Element, bar: HTMLElement }} */
+  let progress        = null;
   let currentTool     = null;
   let providerToolPending = false;
 
@@ -3613,7 +3615,31 @@ async function renderTurn(sid, traceId) {
 
   try {
     for await (const ev of turnEvents(traceId)) {
+      // Provider progress describes the wait before anything else happens, so whatever comes next ends it.
+      if (progress && ev.type !== 'progress') { progress.el.remove(); progress = null; }
       switch (ev.type) {
+        case 'progress': {
+          // Above the loading dots, not instead of them: a full bar still has an answer to wait for.
+          markStarted();
+          if (!progress) {
+            const el    = document.createElement('div');
+            const label = document.createElement('div');
+            const track = document.createElement('div');
+            const bar   = document.createElement('div');
+            el.className = 'msg-progress';
+            track.className = 'msg-progress-track';
+            bar.className = 'msg-progress-bar';
+            track.appendChild(bar);
+            el.append(label, track);
+            turnWrap.insertBefore(el, loadingEl);
+            progress = { el, label, bar };
+          }
+          const pct = Math.max(0, Math.min(100, ev.pct));
+          progress.label.textContent = (ev.message ?? 'Preparing') + ' — ' + pct + '%';
+          progress.bar.style.width = pct + '%';
+          break;
+        }
+
         case 'queued': {
           // The submission itself, delivered on the stream. Render its user bubble here (in delta
           // order). queued > 0 ⇒ it's waiting behind a running turn → float the egg-timer; queued
@@ -4097,6 +4123,7 @@ async function renderTurn(sid, traceId) {
     // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
     // assistant wrap. Just clear any loading dots that are still showing.
     if (loadingEl) { loadingEl.remove(); loadingEl = null; }
+    if (progress) { progress.el.remove(); progress = null; }
     refreshSessions();
     loadFiles();
     // If the output extends below the viewport fold, morph the send button

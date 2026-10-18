@@ -240,6 +240,12 @@ churn and less likely to affect a consumer who doesn't use them.
   the dts note — each walking every builtin with a stat apiece. Cached against the permit list it was
   computed from, by reference, so a runner swap invalidates it.
 
+- A provider can report progress on work it must finish before answering, such as an on-device model
+  downloading or loading. The new `progress` `CompletionEvent` (`pct` 0–100, optional `message`) is
+  forwarded as a `progress` `TurnEvent`. It is live-only and never persisted. Previously the only live
+  channel was `thinking`, which made a status line read as the model's own thought. The web UI draws it
+  as a bar on the pending reply, and the CLI as a one-line indicator.
+
 ### Optional
 
 - **`frontend/web`** — double-click a user bubble to edit what you sent and send it again. The bubble

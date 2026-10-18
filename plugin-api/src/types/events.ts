@@ -17,6 +17,9 @@ export type TurnEvent =
   | { type: 'thinking';       delta: string;          traceId: string }
   | { type: 'system-context'; text: string;           traceId: string }
   | ({ type: 'usage';         traceId: string } & Usage)
+  // The provider's own pre-answer work (a local model downloading or loading) — its `progress`
+  // CompletionEvent, forwarded. Live-only; superseded by whatever the turn does next.
+  | { type: 'progress';       pct: number; message?: string; traceId: string }
 
   // ── tool execution ──
   | { type: 'tool:start';     callId: string; name: string; input: unknown; traceId: string }

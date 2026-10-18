@@ -1352,6 +1352,11 @@
       50%       { opacity: 1; }
     }
 
+    /* Provider progress (a local model downloading or loading), above the dots until the turn moves on. */
+    .msg-progress { max-width: 320px; margin: 2px 0 8px; font-size: 0.82em; color: #6b7280; }
+    .msg-progress-track { height: 4px; margin-top: 4px; border-radius: 2px; background: #e5e7eb; overflow: hidden; }
+    .msg-progress-bar { height: 100%; width: 0; background: #7c3aed; transition: width 0.2s ease; }
+
     /* ── Markdown body ─────────────────────────────────────────── */
 
     .md-body { line-height: 1.7; color: #111; }
