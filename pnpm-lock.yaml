@@ -514,6 +514,22 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  plugins/providers/prompt-api:
+    dependencies:
+      '@matatbread/matbot-provider-openai-compat':
+        specifier: workspace:^
+        version: link:../openai-compat
+    devDependencies:
+      '@matatbread/matbot-core':
+        specifier: workspace:^
+        version: link:../../../core
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   plugins/rumsfeld:
     devDependencies:
       '@matatbread/matbot-plugin-api':

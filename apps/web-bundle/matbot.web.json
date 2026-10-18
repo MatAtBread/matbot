@@ -62,6 +62,12 @@
       "module": "plugins/providers/customer-services",
       "modelHint": "customer-services",
       "selfContained": true
+    },
+    {
+      "label": "On-device model (Chrome Prompt API / Gemini Nano — no endpoint or API key)",
+      "module": "plugins/providers/prompt-api",
+      "modelHint": "on-device",
+      "selfContained": true
     }
   ],
 

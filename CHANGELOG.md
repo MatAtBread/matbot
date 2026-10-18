@@ -522,6 +522,10 @@ churn and less likely to affect a consumer who doesn't use them.
   only the record of what was registered, so a name another plugin has since taken over is not taken
   back by a reload, a `define` or a `remove`. A function whose name is freed is registered at the next
   reload.
+- **`prompt-api`** (new, prototype) — a browser-only provider for the browser's on-device model through
+  the Prompt API (`LanguageModel`; Gemini Nano in Chrome). Streams text, round-trips open-loop tool calls,
+  degrades to text-only where the browser lacks tool use, and reports first-run download progress. Offered by
+  the web bundle's setup wizard as a self-contained adapter.
 
 ## 0.4.19
 

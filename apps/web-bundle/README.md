@@ -81,7 +81,9 @@ import map but not auto-loaded, offered via the `plugin` tool's `discover_local`
 by package name (which persists across reloads). The provider adapters (anthropic / openai-compat /
 google Gemini — pure `fetch`) are inlined as wizard-selectable *types* rather than pre-configured
 providers — including **customer-services**, a free self-contained demo LLM the wizard offers with no
-endpoint or API key required (zero-config first run). Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
+endpoint or API key required (zero-config first run). **prompt-api** is the other self-contained one: the browser's
+own on-device model through Chrome's Prompt API (`LanguageModel`), offered whatever the browser, and
+reporting itself down in health where the API is absent. Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
 plugin, `skills-node`, the node web frontend's server entry) are omitted — they need Node primitives.
 Note the MCP split: the stdio `@matatbread/matbot-tool-mcp` is Node-only, but the cross-runtime
 `@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `skills` plugin is

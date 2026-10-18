@@ -1,0 +1,55 @@
+{
+  "name": "@matatbread/matbot-provider-prompt-api",
+  "matbotRuntime": [
+    "browser"
+  ],
+  "version": "0.4.20",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Provider adapter for the browser's built-in on-device model via the Prompt API (`LanguageModel`) — Gemini Nano in Chrome. No endpoint, no key, no network after the model download. Prototype.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "matbot-provider",
+    "prompt-api",
+    "gemini-nano",
+    "on-device",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/providers/prompt-api"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@matatbread/matbot-provider-openai-compat": "workspace:^"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-provider-openai-compat": "workspace:^"
+  }
+}

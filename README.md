@@ -165,6 +165,7 @@ And a **Status**:
 | | `google` | Functional | Google Gemini (native `generateContent`) |
 | | `chatjimmy` | Example | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
 | | `customer-services` | Example | Mock LLM: always helpful, never useful. No API key needed |
+| | `prompt-api` | Example | The browser's on-device model via the Prompt API (`LanguageModel`, Gemini Nano in Chrome) — browser only, keyless; experimental API, untested against a real model |
 | | `provider-store-test` | Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
 | **storage** | `storage/filesystem` | Functional | Filesystem backend (Node; the CLI's default store) |
 | | `storage/sqlite` | Functional | SQLite backend (Node) |
