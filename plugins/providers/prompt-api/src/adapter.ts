@@ -1,3 +1,37 @@
+// OPEN ISSUES — this adapter is a prototype, and two problems are understood but not yet addressed.
+//
+// 1. Every call re-reads the whole conversation. matbot hands an adapter the full history each time,
+//    and the Prompt API is session-based, so `stream` clones the base session (system prompt + tool
+//    declarations, the one part reused) and appends every message again before prompting. On-device,
+//    that prefill is most of the latency, and it grows with every turn and every tool round.
+//
+//    Approach: keep the session after a call with a fingerprint of what it holds (each message as
+//    converted, plus the reply the model actually produced), and when the next call's converted history
+//    starts with that fingerprint, append only the new tail; otherwise rebuild as now. Behind a
+//    `parameters` switch so the two can be compared. Pitfalls, all of which the check must survive:
+//    - Compare converted CONTENT, never message ids. The runner folds ephemeral context onto the last
+//      message, so it moves from the user message (round 1) to the tool result (round 2) under the same id.
+//    - Fingerprint the reply as produced, not as stored: a retract, `session_edit`, compaction or an
+//      aborted stream all make the stored transcript diverge from what the session saw.
+//    - One adapter serves several callers (a trigger classifier, `single_turn`) with different histories;
+//      a single kept session would be evicted on every call, so it wants a small LRU pool.
+//    - A kept session is checked out while prompted; a concurrent call gets its own clone.
+//    - Context overflow evicts inside the session, but the fingerprint describes the logical
+//      conversation, which is what the comparison needs — no special case.
+//
+// 2. The context window is small (a few thousand tokens for Gemini Nano). The system context and the tool
+//    declarations alone can fill it before any conversation does.
+//
+//    Approaches, in the order worth trying:
+//    - Offer fewer tools per turn: `tool-router` bounds the window, or `parameters.tools: false`.
+//    - A cumulative summary of older turns, but NOT here. Summarised inside the adapter, the model would
+//      answer from text that is in no session — matbot's record — and `determine_provenance` would find
+//      claims with nothing behind them. The place is a `contribute` hook (it transforms the outgoing copy
+//      per provider call), enabled for small-window providers, storing its summary as a marker so it is
+//      durable and visible. Costs: the summary is written by the same small model, out of the same
+//      window, and summaries of summaries drift; and every change to it rewrites the history's prefix,
+//      defeating (1) — so summarise in fixed chunks, keeping the prefix stable between updates.
+
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
 import { mediaIn, systemText, toPromptMessages, toToolDecls, type Modes } from './convert.js';
 import {
