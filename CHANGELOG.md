@@ -187,6 +187,10 @@ churn and less likely to affect a consumer who doesn't use them.
     most recent conversation. No prefix means Global.
   - In a conversation shared in from another profile, a fork/split marker links to its peer only if that
     peer was shared too, and otherwise says so.
+  - The turn just answered can be edited (double-click) and cut/forked from its divider without a
+    refresh. A live divider and bubble now take their message index by traceId rather than by position,
+    which drifted once a fired `contextual` trigger drew a divider a reload does not — so each later
+    divider carried the previous turn's index, and a cut from it hit the wrong turn.
 - **`edit-session`** — every `session_edit` action accepts `msgId` as an alternative to `msgIndex`
   (give one, not both). An id the session does not hold is an error that changes nothing, and an edit
   now locates its message in the same read it edits.
