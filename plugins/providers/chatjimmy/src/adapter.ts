@@ -49,9 +49,19 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
     const model    = config.model    ?? DEFAULT_MODEL;
 
+    // System text has nowhere to go in the message array: the endpoint takes it out of band, in
+    // chatOptions.systemPrompt (verified honoured — a systemPrompt demanding a specific first word
+    // is obeyed). It used to be dropped entirely, which is the worst of both: a caller that sent
+    // one got a silently different model back, answering the user's words as a plain assistant.
+    // That matters most for the inner voice, whose whole framing IS a system prompt — stripped, it
+    // stops critiquing and starts paraphrasing, with no error anywhere.
+    const systemText: string[] = [];
     const chatMessages: Array<{ role: string; content: string }> = [];
     for (const m of messages) {
-      if (m.role === 'user') {
+      if (m.role === 'system') {
+        const text = extractText(m.content);
+        if (text) systemText.push(text);
+      } else if (m.role === 'user') {
         const text = extractText(m.content);
         if (text) chatMessages.push({ role: 'user', content: text });
       } else if (m.role === 'assistant') {
@@ -59,6 +69,9 @@ export class ChatJimmyAdapter implements ProviderAdapter {
         if (text) chatMessages.push({ role: 'assistant', content: text });
       }
     }
+    // Several system messages are possible (a caller's own plus one the harness prepends), and the
+    // endpoint takes a single string, so join in arrival order rather than silently keeping one.
+    const systemPrompt = systemText.join('\n\n');
 
     if (chatMessages.length === 0) {
       throw new Error('ChatJimmy requires at least one user message');
@@ -68,7 +81,7 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       messages: chatMessages,
       chatOptions: {
         selectedModel: model,
-        systemPrompt: '',
+        systemPrompt,
         topK: config.parameters?.topK ?? 8,
       },
       attachment: null,
