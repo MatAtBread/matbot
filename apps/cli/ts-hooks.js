@@ -87,8 +87,10 @@ export function createHooks({ exclude = [] } = {}) {
     // (4) A module fetched over http: resolve its non-bare imports against its origin, fetching on demand.
     // Checked before the .js->.ts remap below because that remap asks the FILESYSTEM which of the two
     // exists, and for a module we have not fetched yet the answer is neither.
+    // Stamped like any other result: a refresh re-fetches a changed import to disk, and unstamped it would come
+    // back as the copy Node already evaluated under the same URL.
     const fetched = resolveFetchedSync(specifier, context.parentURL);
-    if (fetched !== undefined) return { url: fetched, format: 'module', shortCircuit: true };
+    if (fetched !== undefined) return fresh({ url: fetched, format: 'module', shortCircuit: true }, context.parentURL);
 
     // A module imported by URL has no directory for Node to walk up from, so its bare imports are looked up
     // from the cache instead.
@@ -109,10 +111,13 @@ export function createHooks({ exclude = [] } = {}) {
       catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
     }
 
-    // (2) Freshness propagation. Fast path: the marker only exists during a reload,
-    // so 99% of resolutions (startup, normal runs) bail on this cheap string test
-    // before any URL parsing.
-    const parent = context.parentURL;
+    return fresh(result, context.parentURL);
+  }
+
+  // (2) Freshness propagation. Fast path: the marker only exists during a reload,
+  // so 99% of resolutions (startup, normal runs) bail on this cheap string test
+  // before any URL parsing.
+  function fresh(result, parent) {
     if (parent === undefined || !parent.includes(FRESH)) return result;
 
     const parentFresh = freshOf(parent);

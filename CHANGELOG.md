@@ -200,6 +200,13 @@ churn and less likely to affect a consumer who doesn't use them.
   degrades to text-only where the browser lacks tool use, and reports first-run download progress. Offered by
   the web bundle's setup wizard as a self-contained adapter.
 
+- **`cli`** — reloading a plugin fetched over http re-evaluates its own imports, not only its entry. The
+  module hook answered a fetched plugin's imports from the remote loader and returned before passing the
+  reload's `?mbfresh` stamp on, so a refresh re-fetched a changed import to disk and Node handed back the
+  copy it had already evaluated under the same URL: an owner's edit to anything but the entry never
+  reached a reload. The stamp now reaches a fetched plugin's mirrored files as it reaches a local one's.
+  A module imported by absolute URL keeps its URL unstamped, as before.
+
 ## 0.4.19
 
 ### API gaps filled

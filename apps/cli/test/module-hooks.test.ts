@@ -74,6 +74,30 @@ test('a reload stamp reaches a plugin\'s own imports and stops at the host singl
   }
 });
 
+// A fetched plugin's imports are answered by the remote loader before the stamp is propagated, and returning
+// there unstamped meant a reload re-evaluated only the entry: a refresh re-fetched a changed import to disk,
+// but Node handed back the copy it had already evaluated under the same URL. The mirrored tree is written by
+// hand, as a materialise leaves it, so nothing here touches the network.
+test('a reload stamp reaches a fetched plugin\'s own imports, so a refreshed import re-evaluates', async () => {
+  const dir = fixture({
+    '.plugins/127.0.0.1:9/.origin': 'http:',
+    '.plugins/127.0.0.1:9/p/index.ts': `export { version, leafUrl } from './leaf.js';\n`,
+    '.plugins/127.0.0.1:9/p/leaf.ts': `export const version = 1;\nexport const leafUrl: string = import.meta.url;\n`,
+  });
+  const entry = pathToFileURL(join(dir, '.plugins', '127.0.0.1:9', 'p', 'index.ts')).href;
+  try {
+    assert.equal((await import(entry)).version, 1);
+
+    writeFileSync(join(dir, '.plugins', '127.0.0.1:9', 'p', 'leaf.ts'),
+      `export const version = 2;\nexport const leafUrl: string = import.meta.url;\n`);
+    const reloaded = await import(`${entry}?mbfresh=8`);
+    assert.match(reloaded.leafUrl, /[?&]mbfresh=8(&|$)/, 'the fetched import is stamped like a local one');
+    assert.equal(reloaded.version, 2, 'and so re-evaluates from what the refresh wrote');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // `module.register()` runs hooks on a thread of their own, and since Node 24.12 the main thread blocks on a
 // round trip to it for every resolve and load. Made to throw here, it proves the CLI no longer calls it.
 test('the CLI boots with its hooks in-thread: module.register() is never called', () => {
