@@ -217,6 +217,14 @@ export type CompletionEvent =
    * a larger budget) is a `followup` hook's business, not the harness's.
    */
   | { type: 'truncated';           reason: 'max-tokens' | 'stream-end'; raw?: string }
+  /**
+   * Progress on work the provider must finish before it can answer at all — an on-device model
+   * downloading or loading. `pct` is 0–100, as a tool's `progress` event. Live-only: forwarded as the
+   * turn's `progress` event and never persisted, being a fact about the moment rather than the reply.
+   * Not a substitute for `thinking`, which is the model's own output; putting a status line there made
+   * it read as something the model thought.
+   */
+  | { type: 'progress';            pct: number; message?: string }
   | ({ type: 'usage' } & Usage)
   | { type: 'done' };
 

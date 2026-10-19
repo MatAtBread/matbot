@@ -12,510 +12,200 @@ churn and less likely to affect a consumer who doesn't use them.
 ## 0.4.20
 
 ### Breaking changes
-- **A permission decision says which test produced it.** `PermissionGate.decide` and `ctx.gate` now
-  resolve `{ allowed, source }` rather than a bare boolean, where `source` names the layer of the
-  cascade that answered — `user` (a human was asked), `configuration` (a standing answer in force),
-  `fallback` (nobody reachable, so the call site's own default stood), or a name a replacement policy
-  invented; the type is deliberately open. Call sites render `refusalMessage(decision)` instead of
-  `Cancelled.`, which names the layer and, where it is true, says there is nothing here to work around:
-  a bare cancellation reads to a model as a malfunction, so it retried under another spelling, hunted
-  for the bug, or looked for a route around the gate. Nothing branches on `source`, and a delegating
-  gate passes the displaced gate's source back out unrewritten.
 
-  Migrating a call site or a gate of your own: test `.allowed` — the decision is an object, so
-  `if (!await ctx.gate(…))` is always false, which the compiler cannot tell you. A gate returns
-  `permitted(source)` / `refused(source)` (both exported from plugin-api and core).
+- **A permission decision says which test produced it.** `PermissionGate.decide` and `ctx.gate` resolve
+  `{ allowed, source }` instead of a boolean. `source` is the layer that answered: `user`,
+  `configuration`, `fallback`, or a name a replacement policy chooses (the type is open). Call sites
+  render `refusalMessage(decision)` instead of `Cancelled.`, so a model is told whether there is anything
+  to work around rather than retrying or hunting for a bug. Nothing branches on `source`, and a
+  delegating gate passes the displaced gate's source through unchanged.
 
-- **The node `FunctionRunner` is a plugin, and not in a default install.** Bounding a `tool_function`
-  body's synchronous stretches, withholding the host globals that reach a capability without an import,
-  and routing its `import(…)` through the gate all move out of `apps/cli` into
-  `@matatbread/matbot-function-runner-node`. **Without it a body is compiled with `new AsyncFunction` and
-  runs unbounded, unshadowed and ungated** — add the package to `plugins:` to get the previous behaviour.
-  An upgrading install is not warned: one that set neither retired key below has nothing to be told
-  about, so its bodies simply lose the 10s bound, the withheld globals and the inert `import()` at the
-  next start.
-  Nothing in matbot requires any of it, which is the point: every feature the node runner has is reachable
-  through the `FunctionRunner` seam alone, so an installation wanting a worker, a subprocess or another
-  language replaces one package and touches no core.
+  Migrating: test `.allowed`. The decision is an object, so `if (!await ctx.gate(…))` is always false and
+  the compiler will not tell you. A gate returns `permitted(source)` / `refused(source)` (exported from
+  plugin-api and core).
 
-  Its two options are its own settings — `timeout_ms` and `permit_imports`, authored under
-  `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`, and read and changed at run
-  time with its own `function_runner_config` tool (`get`/`set`/`clear`). They are read once per
-  invocation — at the start of each run or check, never at boot — so narrowing what a body may import no
-  longer waits for a restart, a change made by another process or in a hand-edited document is seen too,
-  and an installation that partitions settings by principal gets each principal's own. Each key is gated
-  separately. Being
-  an ordinary settings override it beats the configured floor, so `permit_imports` is what no answer at
-  the import prompt can lift rather than something out of a running actor's reach — an installation
-  needing that ships a runner with the list compiled in, which is a package swap and no core change. The old top-level
-  `function_timeout_ms` and `function_imports` keys are still parsed and validated, and an install
-  carrying them is now WARNED, naming where they went, rather than having them silently ignored. One
-  consequence worth stating: `permit_imports` is a plugin setting, so it no longer has the property its
-  yaml predecessor had of being unoverridable by anything at run time.
+- **The node `FunctionRunner` is a plugin, `@matatbread/matbot-function-runner-node`, and not in a
+  default install.** Bounding a `tool_function` body, withholding host globals and gating its imports all
+  move out of `apps/cli`. **Without the plugin a body runs unbounded, unshadowed and ungated** — add it to
+  `plugins:` for the previous behaviour. An install that set neither retired key is not warned.
+  - Its settings are `timeout_ms` and `permit_imports`, under
+    `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`, read and changed at run time
+    with its `function_runner_config` tool (`get`/`set`/`clear`, each key gated separately). They are read
+    once per invocation, never at boot, so a change takes effect without a restart and a settings store
+    partitioned by principal gives each principal their own. A malformed value from any source falls back
+    (a bad bound to the default, a bad restriction to `[]`), is warned at boot and is reported by `get` as
+    `problems`.
+  - The retired top-level `function_timeout_ms` and `function_imports` keys are warned about, naming
+    where they went. Being an ordinary setting, `permit_imports` can now be overridden at run time; an
+    install needing a floor nothing in-process can raise ships a runner with the list compiled in.
+  - `apps/cli` no longer depends on `typescript`; the plugin does.
 
-  **A body imports by name only**: a node builtin (`node:fs`) or a package already installed where
-  matbot runs. A path or a URL is refused before anyone is asked, by the gate, the runner and IMPORT-GATE
-  alike (`importableByName`). Downloading or placing code is what a plugin install is for, and a body is
-  too lightweight a thing to recommend it from. Paths also defeated `permit_imports`, which matches
-  strings: `./lib/../../x` "starts with" `./lib/` and resolves outside it, so a `.`/`..` segment is refused
-  in a package subpath too. A `permit_imports` entry naming a path or a URL is rejected, since it could
-  never admit anything. `apps/cli` also loses its `typescript` dependency, which moves to the plugin.
-
-  `ToolTypeIndex` subscribes to nothing of the runner's, deliberately: everything derived from it — the
-  note in the dts, the two lists a check enforces — is derived at the point of use, and the one cache over
-  them keys on the permit list's content, so a different list is a different key. What IS cached is
-  the source scan, which the runner has no part in.
-
-  What a stored VERDICT needed instead is the environment it was reached in — see
-  `ToolTypeIndex.environment()` below.
-
-- **A `tool_function` body's imports are asked about.** The dynamic `import()` added earlier in this
-  release was unconditional and advertised in the generated tool dts; the first time a body imports
-  something, the user is now asked, naming the function and the module. The `tool_function.import` gate is
-  keyed on the pair `"<function> <specifier>"` rather than the specifier alone, because *why is this
-  function asking for `node:fs`* is the question being put, and a specifier-only key would let a brand-new
-  function inherit every grant a reviewed one had earned. `function_imports: { permit: […] }` in
-  `matbot.yaml` is an optional restriction on what may even be asked for; **absent means no restriction**,
-  because a gate that is never reached is not a gate, and `permit: []` switches imports off — the only way
-  to say "never", since a standing answer is always a yes. A body
-  still writes `import(…)`: `function-tools` rewrites it onto an injected gated loader, so a computed
-  specifier works too — the argument passes through and the gate sees the string the body built. The vm
-  runner also withholds `process`, `globalThis`, `global`, `Buffer`, `eval`, `Function` and the phantom
-  `require`/`module`/`exports`/`__dirname`/`__filename`, because `process.getBuiltinModule` otherwise
-  reaches every builtin with no import at all and the gate would be decorative. It is not a sandbox and
-  is not described as one — `(()=>{}).constructor('return process')()` recovers the real `process`, and a
-  non-builtin module loads as host code that is not shadowed, which its gate label says. A `FunctionRunner` is now handed the
-  TypeScript and is the environment it runs in: `compile(source)` takes a self-contained async-function
-  expression and returns something that calls it, and what the runner does to get there — strip and
-  compile, transform, interpret — is its own business. The consumer's gated loader is the compiled
-  callable's first argument, since it closes over that invocation; how it reaches the body is internal, and
-  because the type-check runs at definition on the source as written, the rewrite needs no typing and
-  declares nothing. Finding the calls **parses**: node's runner erases with `stripTypeScriptTypes`, which
-  blanks types in place so every line number in what runs is the one the author wrote, then walks
-  TypeScript's AST for call expressions whose callee is the `import` keyword. It was a hand-written
-  scanner, which could not be made correct — telling an `import(` in code from one in a string, template,
-  comment or regex literal needs the previous significant token, and a wrong answer desyncs the reader
-  rather than misreading one token, so a quote further along swallows an `import(` that neither reading
-  mentions and that import is never gated, silently. Two cases are undecidable without a parser (a `/`
-  after `)` may follow `if (…)` or `(a + b)`; after `}` it may end a block or an object literal), and
-  bodies that divide after `i++` or use a regex after `if (…)` lost their imports to exactly that. A parser
-  also removes two refusals the scanner needed, for a method shorthand named `import` and a type-position
-  `import('x').Foo`. A runner also now publishes **`withheldGlobals`**, the identifiers it does not bind,
-  which the checker's `ENV-GATE` rejects instead of keeping its own copy that could not be kept in step;
-  the dts's prose about the environment is composed from that and `permittedImports`, so it cannot drift
-  from what `ENV-GATE` and `IMPORT-GATE` enforce. **No runner ⇒ none of it**, which is the browser:
-  nothing bounds a body, nothing is withheld from it, and its `import(…)` reaches whatever the platform
-  resolves. The gate could not be a boundary there regardless — with nothing withheld,
-  `new Function('s', 'return import(s)')` reaches the platform loader whatever a transform concludes, and
-  `permittedImports` has no carrier — so the browser's own sandbox is the boundary, and its tool dts says
-  only that there are no node builtins. An install wanting the gate there registers a `FunctionRunner`. `function_timeout_ms:
-  0` also now removes the time bound and **nothing else** — it seeded no runner at all, which silently
-  discarded `function_imports.permit` (`permit: []` included), unshadowed every withheld global and made
-  a raw `import()` work, because a line of yaml about how long a body may compute was answering what a
-  body may reach. A bare `node` is the one
-  specifier that is not merely untypeable but unimportable — the boundary rule reads it as a *package* of
-  that name, so `permit: ['node']` is a missing colon that permits nothing a body can use — and both
-  surfaces now say so: the dts lists it as a package rather than as "untyped, import it with
-  `noTypeCheck`", and `import('node')` is answered with the `node:` spelling instead of tsc's
-  `File '<…>/@types/node/index.d.ts' is not a module`, a path inside matbot's own `node_modules` that the
-  body never named and its author cannot act on.
+- **A `tool_function` body's imports are gated, and a `FunctionRunner` is handed TypeScript.**
+  - The first time a body imports something the user is asked, on gate `tool_function.import` with
+    subject `"<function> <specifier>"` — the pair, so a new function does not inherit a reviewed one's
+    grants. `permit_imports` is an optional restriction on what may be asked for: absent means none, and
+    `[]` switches imports off (the only way to say "never").
+  - A body imports **by name only** — a node builtin or an installed package, never a path or URL — which
+    the gate, the runner and the type-check all refuse first (`importableByName`). Paths had defeated the
+    string-matched restriction (`./lib/../../x`). A missing package is reported with where to install it.
+  - Bodies still write `import(…)`, so a computed specifier works; node's runner strips types in place
+    (line numbers are the author's) and finds the calls by parsing, replacing a hand-written scanner that
+    silently missed imports after a regex or a division.
+  - The runner withholds `process`, `globalThis`, `global`, `Buffer`, `eval`, `Function` and the phantom
+    `require`/`module`/`exports`/`__dirname`/`__filename`, and publishes them as `withheldGlobals`. This
+    is not a sandbox, and every import label says the grant carries matbot's full access, builtins
+    included.
+  - `FunctionRunner.compile(source)` now takes a self-contained async-function expression; the consumer's
+    gated loader is the compiled callable's first argument.
+  - With no runner (any install without the plugin, and the browser) nothing is bounded, withheld or
+    gated, and the tool dts says so, deriving its environment note from the registered runner.
 
 - **A vault backend implements `readSecret(name)`, not `resolve`.** `VaultSpec` gains
-  `readSecret(name): Promise<string | undefined>` — the literal read, as `writeSecret` is the literal
-  write — and `resolve` moves to `Vault` as a policy written once over it, `applyResolve(spec, ref)`
-  (exported from plugin-api and core). The `${NAME}` regex and replace loop were copied into every
-  backend; now the placeholder grammar has one home. A caller holding a key NAME reads it as a name,
-  rather than wrapping it in `${…}` for `resolve` to parse back out — through which `A}${B` was two
-  lookups behind one name. `resolve` also reports each missing key once rather than once per occurrence.
+  `readSecret(name): Promise<string | undefined>`, and `resolve` is written once over it as
+  `applyResolve(spec, ref)` (exported from plugin-api and core), so the `${NAME}` grammar has one home
+  instead of a copy per backend. A caller holding a key name reads it directly rather than wrapping it in
+  `${…}`, and `resolve` reports each missing key once.
 
   Migrating a backend: add `readSecret`, and make `resolve(ref)` return `applyResolve(this, ref)`.
 
 ### API gaps filled
 
-- **`PermissionRequest.standing`** — the answers one act may be remembered as, narrowest first, each as
-  the subject a policy would store and the prose a human reads. The call site supplies the subjects
-  because only it knows how its own generalise, so a policy matches by set membership over strings it
-  never parses and no gate id is hardcoded in it. It supplies the labels for the same reason it supplies
-  `label`: a subject is a key chosen to be stable and unambiguous, and keys make terrible prose —
-  `#execute node:fs/` is a correct key and an unusable question. A policy stores only a subject that was
-  actually offered, so no other gate's memory semantics change, and with none offered it falls back to
-  naming the subject — right for a gate whose subject is already prose (`@x/foo` for `plugin.add`).
-- **`ToolTypeIndex.environment()`**, carried on `ToolCheckReport.environment` — a fingerprint of what a
-  type-check depends on besides the snippet and the live tool types: whether a `FunctionRunner` is loaded,
-  what it permits a body to import, and which globals it does not bind. Opaque; a consumer compares it for
-  equality and never parses it. It exists because a stored verdict is a claim about an environment, and
-  the environment is a plugin: `function-tools` stores it beside each definition and `list` reports
-  `checkedElsewhere: true` where it no longer matches. A `check` row is the verdict reached here and now,
-  so it carries neither that flag nor the fingerprint, and a pass records the new fingerprint, clearing
-  the flag without a redefinition. Nothing re-checks on load — that is a worker program
-  per stored function at boot, and would turn a report into a boot failure — so what changes is that a
-  reader is told, and `check` remains the way to re-verify. The tool types are deliberately not in it:
-  those are live, and `check` is how a caller re-verifies against them. Optional, so an index written
-  before it existed degrades to storing and comparing nothing instead of throwing.
-- **`ctx.gate({ namespace })`** — a tool whose NAME is built at run time asks under a fixed namespace,
-  since `ctx.gate`'s suffix is otherwise qualified with the tool's registered name. A `function-tools`
-  function asks under `tool_function`, so every body's import decision lands on `tool_function.import`:
-  qualified by the function's own name, each definition would get its own gate id, and a standing answer
-  for "any function" stored under one would never be read by another. The namespace must name a tool
-  registered by the same plugin as the caller, checked against the host's own `pluginName` stamps — a
-  turn tool now takes its plugin from the `screen` hook that offered it — so a plugin still cannot
-  address another's gate. `bindGate` takes the resolved tool and the registry to check against.
-- **`importPermitted`** — the `permittedImports` boundary rule as a function, beside the interface that
-  documents it, because two packages read the same list and must agree: `function-tools` decides whether
-  to ask about an import, `tool-types` decides which modules to type.
-- **`importableByName`** — whether a specifier names a builtin or a package rather than a path or a URL:
-  the one rule the gate, the runner and the type-check apply before anything else. `importPermitted`
-  admits nothing it refuses. Its characters are an allowlist, because the resolver is a URL parser with
-  its own idea of a dot segment: `%2e%2e`, `.%2E` and `.<tab>.` are each `..` to it, and each escaped a
-  package to an arbitrary file on disk.
-- **`FunctionRunner.canonicalImport()`** — the spelling a specifier loads as, where the platform has two
-  for one module: node loads `os` as `node:os`. The gate, the restriction and the type-check all judge the
-  canonical form, so `os` and `node:os` are one question and one grant, and a builtin is no longer
-  described as a package that "runs with everything it imports".
-- **`FunctionRunner.settings()` (`FunctionRunSettings.permittedImports`) and `FunctionRunner.import()`**
-  — the optional restriction (absent ⇒ unrestricted; `[]` ⇒ none), read once per invocation and handed
-  back to the compiled callable on `FunctionCall`, and how a granted specifier becomes a module. The restriction is on the
-  runner because the runner is the execution environment and two consumers need one answer: the capability
-  that imports, and the type index that declares the reachable set. `import()` is the runner's because
-  where a package resolves FROM is; it takes the import's second argument too, so an import attribute
-  (`{ with: { type: 'json' } }`) reaches the loader.
+- **`PermissionRequest.standing`** — the answers an act may be remembered as, narrowest first, each a
+  subject to store and a label to show. The call site supplies both because only it knows how its
+  subjects generalise and how to phrase them; a policy stores only a subject it offered, and with none
+  offered falls back to the request's subject.
+- **`ctx.gate({ namespace })`** — a tool whose name is built at run time asks under a fixed namespace,
+  so every `function-tools` function shares `tool_function.import` and one standing answer covers them
+  all. The namespace must name a tool registered by the caller's own plugin (checked against the host's
+  stamps), so no plugin can address another's gate.
+- **`ToolTypeIndex.environment()`** (on `ToolCheckReport.environment`) — an opaque fingerprint of what a
+  type-check depended on besides the snippet and tool types: runner presence, permitted imports and
+  withheld globals. `function-tools` stores it with each definition, `list` reports `checkedElsewhere`
+  when it no longer matches, and a passing `check` re-stamps it. Nothing re-checks at boot.
+- **`importableByName` / `importPermitted`** (plugin-api) — the name-only rule and the
+  `permittedImports` boundary rule as shared functions, so the gate, the runner and the type index agree.
+  `importableByName` allowlists characters, since `%2e%2e` and similar are `..` to the URL resolver.
+- **`FunctionRunner` members** — `settings()` (the restriction, read per invocation and passed back on
+  `FunctionCall`), `import()` (resolves a granted specifier, attributes included), and
+  `canonicalImport()` (so `os` and `node:os` are one question and one grant).
 
-### Bug fixes
-
-- **tsc told a `tool_function` body to install type definitions.** With no `FunctionRunner` loaded nothing
-  is withheld, so ENV-GATE has no list to fire from and a withheld global fell through to tsc's TS2591:
-  "Do you need to install type definitions for node? Try `npm i --save-dev @types/node`" — a package
-  manager, for an author with no package.json and no say in what the runner declares. The finding stands
-  and only the repair is rewritten, keyed on tsc's own diagnostic code rather than on a second list of
-  names, so it cannot drift out of step with what the runner withholds.
-
-- **The type gate and the runtime gate agreed in neither direction, in three places.** A constant hint on
-  TS2307 said "only '@matatbread/matbot-plugin-api' is importable here; there are no other modules", which
-  is false for any install that permits a builtin and fired even for a mistyped `node:` specifier, where
-  the reason is simply that the module does not exist. `@matatbread/matbot-plugin-api` was typed for a
-  function body and cannot be imported by one — the runner resolves from the CLI's own module, where under
-  pnpm the package is not present — so it compiled clean and died at the first call. And a bare builtin
-  (`os` rather than `node:os`) was refused by the types while the runtime resolved it happily.
-
-  The first two share a cause: the hint table and that `paths` entry were written for `checkProjectDir` —
-  a compiled plugin, which IS a module, has a top of file to add an import to, and really does import only
-  plugin-api — and applied unconditionally in `checkSnippetAgainst`, where a body is
-  `async function __fn(…) { … }` with no top of file, no static imports and a different permitted set. The
-  entry mode is now a property of a hint, and snippet mode gets one derived from what the checker knows.
-  The `paths` entry STAYS in both modes, because the declarations refer to their own types through it and
-  withholding it would collapse every one of them to `any` and pass bad snippets silently; a body is
-  refused the package structurally instead, naming the reason. The bare spelling is now typed wherever the
-  gate would permit it, so `import('os')` and `import('node:os')` are graded as they run — and under a
-  `['node:']` restriction neither the types nor the gate admit the bare form, which already agreed.
-- **A package a body asks for that is not installed is reported with where to install it** — the
-  directory holding `matbot.yaml` — instead of node's own message, which named a file inside matbot that
-  the body never mentioned. Resolution is ordinary resolution from the runner, which reaches the project's
-  `node_modules` whenever matbot is installed inside it (a flat npm or yarn install). Under pnpm the runner
-  sits outside the project tree and a package installed beside the config is not reachable; nothing here
-  compensates for that (a CJS resolve rooted at the project refuses a package whose `exports` offers only
-  an `import` condition — most of them now — and `import.meta.resolve`'s second argument is silently
-  ignored).
-- **An import attribute reached the gate and was dropped.** `import('./x.json', { with: … })` kept its
-  second argument through the rewrite, but the loader took a specifier alone, so a JSON module failed
-  with `ERR_IMPORT_ATTRIBUTE_MISSING` after the user had already granted it.
-- **The runner's settings are checked wherever they come from.** `function_runner_config set` validated
-  them, but `default_settings:` and a hand-edited document reached the runner unchecked: a negative
-  `timeout_ms` ran bodies unbounded without the `timeout_ms: 0` warning, and a scalar `permit_imports`
-  made every import throw `permits.some is not a function`. A bad bound now falls back to the default and
-  a bad restriction to `[]` (imports off, never "no restriction"), each warned at boot and reported by
-  `get` as `problems`.
-- **An import label no longer implies a builtin is a narrow grant.** `node:child_process` runs programs,
-  `node:module` hands back `require` and `node:process` is the global the runner withholds, so a builtin's
-  label now says it carries matbot's full access, as a package's always did.
-- **A string-literal type no longer breaks a tool's contract text.** `function-tools`' type-text walkers
-  counted brackets inside string literals, so `Promise<'a>b'>` kept its `Promise<…>` wrapper (the defect
-  this release fixed elsewhere) and `'a|b'` was split into two union arms. Both are spliced verbatim into
-  the generated dts arm and the wire text a model reads, where nothing downstream could recognise them as
-  broken.
-- **The browser's tool dts says what a body may import.** It said nothing at all, so a body was as likely
-  to reach for `node:fs` as anything else; it now states that there are no node builtins, and whether
-  imports are gated, derived from the registered `FunctionRunner` rather than written as prose about "the
-  browser".
-- `tool-types` computed the permitted-import `paths` twice per type-check — once for the program, once for
-  the dts note — each walking every builtin with a stat apiece. Cached against the permit list it was
-  computed from, by reference, so a runner swap invalidates it.
+- A provider can report progress on work it must finish before answering, such as an on-device model
+  downloading or loading. The new `progress` `CompletionEvent` (`pct` 0–100, optional `message`) is
+  forwarded as a `progress` `TurnEvent`. It is live-only and never persisted. Previously the only live
+  channel was `thinking`, which made a status line read as the model's own thought. The web UI draws it
+  as a bar on the pending reply, and the CLI as a one-line indicator.
 
 ### Optional
 
-- **`frontend/web`** — double-click a user bubble to edit what you sent and send it again. The bubble
-  swaps its rendered markdown for a textarea over the *stored* text (Ctrl/Cmd+Enter sends, Escape
-  cancels, as in the composer), then cuts the session at that message and submits the edited content as
-  a fresh turn — so everything after it goes, as the note in the editor says. Robo blocks are not
-  offered for editing and are not carried: a `contextual` trigger injects them afresh on the new turn,
-  and resending them would double them. Attachments go back by reference (`file-ref` survives the cut,
-  session media being scoped to the session rather than the message). The divider's **Resend** icon is
-  gone, that being the same operation without the edit.
-- **`frontend/web`** — a streaming turn writes the DOM once per animation frame instead of once per
-  delta. Each delta used to write and then measure — a full `marked.parse` of the whole message plus
-  `innerHTML`, then `offsetHeight`, `scrollIntoView` and `scrollTop` — which is a forced synchronous
-  reflow apiece, and `turnEvents` drains its queue through microtasks, so a whole SSE chunk's worth
-  ran in one task with no paint between them. A profile of a real conversation showed hundreds of
-  long frames, most of them from thinking deltas. Writes are now coalesced by a keyed,
-  last-write-wins frame scheduler (the DOM analogue of `scheduleAtEdge`): the element is created
-  synchronously, so it keeps its place in the stream ahead of any tool block that follows, and only
-  the render and the measurement wait for the frame. The key is the *element*, not the turn — two
-  text blocks either side of a tool call that lands inside one frame share a turn, and keying on the
-  turn let the second block's write evict the first's and leave it permanently empty. The text is
-  captured at schedule time rather than read at fire time, since `tool:end` resets the accumulator.
-  Latency is unchanged: a single delta still renders on the very next frame, which a debounce timer
-  could not say. The one visible change is that a **thinking** block no longer chases its own bottom
-  past the viewport — it is bounded by the same fits-the-viewport test the text path has had since
-  continuous bottom-chasing was removed, which thinking reached around. The header/composer height
-  behind that test is cached and invalidated by a `ResizeObserver` rather than at each site that
-  could grow the composer, which is a list a later feature omits with no error and no symptom.
-- **`frontend/web`** — a session waiting on a question for the user shows a **red** dot in the sidebar
-  instead of the amber busy one, and goes back to amber (or idle) when the question is answered,
-  cancelled or the turn is aborted. The `session-busy` status event (and `statusEvents()` in both
-  transports) carries `prompting` beside `busy`, and it is replayed to a stream that connects while the
-  question is outstanding — the point being the conversation nobody is looking at, which is the one a
-  parked prompt was previously invisible from.
-- **`frontend/web`** — stopping a session in the in-process (browser bundle) transport cancels a parked
-  prompt, as the server does, instead of answering it with `''` — which the prompt turned into the
-  field's default, an answer nobody gave (and on `plugin store-key`, whose default is blank, a removal).
-
-- **`tool-types` / `cli`** — a `tool_function` body's imports are type-checked against the modules the
-  installation permits. `ToolTypeIndex.check` scopes node's declarations with `paths`, one entry per
-  reachable module, rather than `types: ['node']` — which is all-or-nothing, so every builtin resolves
-  unconditionally and a module the install forbids typechecks clean and is refused only at run time, the
-  exact failure the check gate exists to prevent. It also pulls 65 files where `types` pulled 168. This required
-  `@types/node` as a dependency of `tool-types`: the check program is rooted at the `matbot.yaml`
-  directory, where neither a pnpm workspace nor a published install has `node_modules/@types` in the
-  lookup chain. Loading node's types also declares `require`, `module`, `exports`, `__dirname` and
-  `__filename`, none of which a body has, so a new structural rule (**ENV-GATE**, beside the cast gate)
-  rejects those and `import.meta` with the working form named, rather than letting `require('node:fs')`
-  typecheck and fail at the first call. `ToolCheckDiagnostic.label` now carries a per-rule name for a
-  structural finding instead of always `CAST-GATE`. A path or a URL gets no types, being
-  unimportable; IMPORT-GATE refuses it at the check. `paths` cannot *enforce* the restriction, so a second structural
-  rule (**IMPORT-GATE**) does: loading one builtin's declaration file drags in the ambient
-  `declare module 'node:…'` blocks of everything its own declarations reference, and whether a forbidden
-  specifier then resolves depends on what `@types/node` is reachable from the program root — so `paths`
-  decides what is typed and the rule decides what is allowed, replacing tsc's "Do you need to install
-  type definitions for node?" about a module the installation forbids. The permitted set is expanded by
-  the same boundary rule the gate uses, since `node:fs` admits `node:fs/promises` at the call and a
-  permitted import that fails the check is reachable only with `noTypeCheck`. And the check program's
-  root is now absolute: a relative one made `ts.createProgram` normalise the virtual file to a name the
-  host never matched, so nothing was checked and every snippet came back clean. **ENV-GATE** covers every
-  global the runner withholds rather than only the ones a module wrapper would have supplied — `process`,
-  `Buffer`, `globalThis`, `global`, `eval` and `Function` join the five phantoms. That half is the worse
-  half to omit: `eval` and `Function` are `lib.es` globals, so they typecheck in every configuration and
-  fail at the first call. One named in a TYPE is exempt, types being erased before a body is compiled, and
-  so is the source half of a renamed destructuring (`const { Buffer: B } = await import('node:buffer')` is
-  a property of the module, not the global, and rejecting it recommended almost the same code). A builtin
-  whose name already carries the prefix is typed too: `module.builtinModules` lists `node:sea`,
-  `node:sqlite`, `node:test` and `node:test/reporters` with it, so prefixing unconditionally wrote
-  `node:node:sqlite` and left those four with no `paths` entry.
-
-- **`function-tools`** — `unwrapPromise` matches angle brackets instead of pattern-matching them, and
-  unwraps each arm of a top-level union. The greedy form read `Promise<A> | Promise<B>` as one
-  `Promise<…>` and produced `A> | Promise<B` — not a type at all, spliced verbatim into both the
-  generated dts's `ToolContracts` arm and the wire text a model reads, where nothing downstream could
-  recognise it as broken.
-
-- **`cli`** — the terminal numbers a `select` once its options no longer fit the prompt line, and
-  resolves an exact value or label, then a position (only where numbers were actually shown, since the
-  inline form displays none and `ask_user` may offer `['2', '4', '8']`), then a *unique* prefix of either.
-  It resolved a label prefix only, falling back silently to the field's default, which was adequate while
-  every select was two or three short words: the import gate offers four standing answers whose labels
-  share ~50 characters, so the middle ones could not be typed at all and a near-miss read as a denial. An
-  unmatched answer now says so and re-asks once, an empty line is still the default, and one matching
-  nothing is returned verbatim where the field allows free text (`allowOther`), as the web frontend does.
-
-- **`tool-plugin` / repo** — `plugin add` and `plugin reload` all three fixed from a live install
-  (issue #90).
-
-  **A workspace-provided peer no longer fails the install.** `plugin add <npm name>` of a plugin
-  peer-depending on `@matatbread/matbot-plugin-api` died with `ERR_PNPM_NO_MATCHING_VERSION` for a
-  version nothing pins and no registry carries — the one this workspace provides. pnpm >= 10 reads its
-  own settings from `pnpm-workspace.yaml`, not `.npmrc`, where this repo's `link-workspace-packages=true`
-  had been silently ignored since (`pnpm config get link-workspace-packages` → `undefined`); with linking
-  off, pnpm takes the preferred version for the range from the local copy and then goes to the registry
-  for it. It went unnoticed because every in-repo dependency uses the `workspace:` protocol, which links
-  regardless. The three settings move to `pnpm-workspace.yaml` (zero lockfile churn, measured) and
-  `engines.pnpm` goes to `>=10`. `describeInstallFailure` now recognises the shape — an unresolvable
-  package that is a *dependency* of the one asked for, in a pnpm workspace — and names the setting,
-  instead of advising a registry check that is wrong here: the name is right and the range is satisfiable.
-
-  **A refresh no longer evicts what `add` installed.** A fetched plugin's dependencies are installed into
-  its own `.plugins/` cache directory, which is the same subtree `reload` evicts to re-download source —
-  so reload was structurally impossible for every http plugin with a dependency, the fetch being the very
-  thing that removed them. The subtree has two owners, and only the fetched half is the refresh's to
-  drop: `node_modules` and `package-lock.json` are kept. A refreshed manifest declaring something NEW is
-  answered as well, and before anything is loaded: `add` plans a fetched plugin's declared dependencies
-  from its manifest and lists them in the approval for the plugin itself, then installs them and loads it
-  once; `reload` fetches the refreshed copy, offers what it newly declares (`provision-deps`), and loads
-  it only if that went through — declined, the working copy is restored. Both used to load first, fail on
-  the first missing import (logged as an error with a stack), and only then ask and retry. The log note for
-  an unmet declared dependency, and the resolve error for a bare import, said this route "installs no
-  dependencies"; both now say how the plugin gets them.
-
-  **A failed reload is a no-op again, not an outage.** `reload` was `unload` then `load` with nothing
-  around the load, so a failure left the plugin unloaded and its tools gone (`404` on its endpoints). A
-  refresh now sets the previous copy aside rather than deleting it; on a failure it is restored and
-  re-loaded, and the result says which happened. Its provisioning is not rolled back with it.
-
-- **`cli` / `tool-plugin`** — a fetched plugin can import a bare CDN URL (issue #89). A URL may be a
-  module *and* the parent of others, which is how esm.sh, jsdelivr and unpkg all serve a bare package:
-  `https://esm.sh/ms@2.1.3` re-exports `/ms@2.1.3/es2022/ms.mjs`. The cache mirrored each URL under its
-  own path, so the first became the *file* `.plugins/esm.sh/ms@2.1.3` and the second's `mkdir` failed
-  with `ENOTDIR` — the documented way to bring a third-party dependency on the http route crashed the
-  loader on the commonest shape of one.
-
-  A module imported by absolute URL now keeps that URL as its identity, as it does in the browser, rather
-  than becoming a mirrored file. Its imports resolve against the URL that answered it, so a redirect
-  (unpkg's `lit@3?module` → `lit@3.3.3/index.js?module=`) resolves correctly and two URLs redirected to
-  one module load it once; the query is part of its name (`?bundle` and `?dev` are two modules, where the
-  mirror dropped it); its `import.meta.url` is the URL, matching the browser; and its bare imports are
-  looked up from the cache, reaching what a mirrored file's reach. It is stored under `.plugins/.urls/`,
-  keyed by a hash of the URL, so no URL can be a path that collides with another or decodes outside the
-  cache — `chart.js` beside `chart.js/auto` is two modules. A warm boot still asks the network for
-  nothing, and a module the old mirror already held is served from where it is, writing nothing, so an
-  upgrade needs neither the network nor a writable cache.
-
-  Two consequences of the URL being the identity, each refused with what to write instead rather than
-  resolved behind the importer's back. A URL import is fetched at exactly that URL, as the browser does:
-  the mirror used to try `x.ts` behind an absolute `…/x.js`, and a miss now names the `.ts` URL to import
-  (a plugin's own relative `./x.js` still finds `x.ts`). And a fetched plugin's own file is not imported
-  by its URL: its files load as `file:` modules, so the same file under its URL would be a second copy
-  with its own module state — the import is refused, naming the relative path or package name that
-  reaches the one copy.
-
-  A plugin's own files are mirrored exactly as before: a package was a file tree before it was served, so
-  the mirror is faithful there, and a Node-only plugin still reads its files through `import.meta.url`.
-  The mirror now refuses a URL whose host is a dot segment (`http://../`) or whose path encodes a
-  separator (`%2F`), the two spellings that survive URL parsing and would put a file outside `.plugins/`.
-  Its rules are stated once (`@matatbread/matbot-tool-plugin/cache-layout`) — the path, the `.js` → `.ts`
-  candidates and the per-host scheme record — for the module hook and `materializeRemote` alike, rather
-  than as a copy in each.
-
-  The `plugin` tool's description and `docs/DEVELOPING.md` said an http/github plugin "installs no
-  dependency graph" and that any bare import means the host's copy. Since the dependencies a fetched
-  plugin declares are installed into its cache directory (0.4.20, above), the model was told to work
-  around a dependency it could simply have approved; both now say what happens.
-
-- **`tool-plugin` / `cli`** — `plugin remove` takes back what `plugin add` created, and only that (issue
-  #98). Nothing recorded what an install created, so `remove` and the undo of a failed `add` both inferred
-  it from what they found, and a live add/reload/remove run across all four routes showed `remove` leaving
-  most of it behind: a github/http plugin's source and the full dependency tree installed into it, its
-  set-aside copy as empty directories, and its name link — so a removed plugin was still importable by
-  name. What a thing is decides who removes it:
-
-  - **matbot's own cache** — a fetched plugin's source, its installed dependencies, its set-aside copy and
-    its name link — is derivable from the config entry, so `remove` deletes it, unless another configured
-    plugin's files live in the same directory (two plugins from one repo). A removed plugin is therefore no
-    longer listed by `discover_local`, which lists what is cached.
-  - **the project's files** — a key `npm add` wrote into `package.json`, or the `node_modules` and lockfile
-    installing a local plugin's dependencies created in its directory — carry nothing saying who put them
-    there. So `add` (and `matbot install`) records what it created as it creates it, under
-    `.plugins/.installs/`, and `remove` offers back exactly that, through the existing `npm-uninstall` gate
-    and a new `remove-provisioned` one. It no longer reads `package.json` to decide, which was how it could
-    offer to uninstall a package the project declared itself. "Created" means the plugin's own name arriving
-    in a manifest that declared it in no section beforehand. A package from an install made before this
-    release has no record, so `remove` names the command to uninstall it rather than offering to.
-
-  What `add` cannot carry through, or take back exactly, it now refuses before anything is asked or
-  written, saying what to do instead — rather than installing and then inferring what it had installed:
-
-  - **An npm plugin is installed by its package name only.** A `@<version>`, a tarball and a git URL are
-    refused: which copy a project carries is its own decision, made with its package manager, followed by
-    `plugin add <name>` — or `plugin reload <name>` for a version installed in place of a loaded one.
-    `add foo@2.0.0` used to write `foo@2.0.0` into `matbot.yaml`, which nothing could load.
-  - **An npm package is checked before it is installed**: its manifest — the installed copy's, else the
-    registry's via `npm view`, honouring the project's `.npmrc` — must declare `matbotRuntime` including
-    `node`, as a URL plugin's already had to. A library is refused rather than installed and removed.
-  - **The project's own install is the project's.** A package already installed is configured as it is, with
-    no package manager run (one used to rewrite its declared range); a declared but uninstalled one, or a
-    project with no `package.json` to record the install in, is refused.
-  - **A duplicate plugin name is refused before installing**, on every route.
-  - **A local plugin's dependencies are installed only on empty ground** — no `node_modules`, no lockfile.
-    `npm ci` deletes a `node_modules` first and planning rewrites a lockfile, so a directory the author has
-    installed into is used as it is when complete, and otherwise refused, naming what is missing. An install
-    that fails removes what it wrote.
-
-  So an `add` that disowns the plugin after installing it — an incompatible runtime, not a plugin when
-  loaded — takes back exactly what it created, unasked: the npm package it added, the `node_modules` and
-  lockfile it created, and a fetched plugin's cache. A fetched plugin's cache is also kept on `remove` when a
-  provider's `module:` lives in it. A plugin's name link now follows whichever copy was materialised last;
-  it was first-writer-wins, so a plugin installed from github resolved by name to the copy an earlier http
-  install had left, and a link to a removed directory could never be replaced. And `plugin add npm:<name>`,
-  the documented way to force the npm route, works: the `npm:` was passed to the package manager, which
-  reads it as an alias and refused every one — and is refused when something local also answers to the
-  name, since the entry recorded is the name and a restart would load the local one instead.
-
-- **`background-jobs` / `sessions`** — a job's reporting conversation is stated where the model reads
-  it. Both tools described the append target as "this conversation" or "a default", which a model
-  reads as the conversation it is in when it looks: it told the user a job would "report back here"
-  — true only of the conversation the job was created in — and, running *as* a job, it took
-  `session_action append` with no `sessionId` to be writing into its own session. Nothing about where
-  an append lands has changed: the target is fixed when the job is created, from the `session` given
-  or the conversation the creating call is made from, and stored on the job; a job's own session is a
-  throwaway on an ephemeral run that nobody reads, and is never the target. The descriptions now say
-  that, the `session` parameter says it is recorded rather than followed, `sessionId` says it wins
-  outright when given, and `background_job_action list` points at the `session` it reports in each
-  row as the thing to read instead of assuming.
-
-- **`function-tools`** — `tool_function`'s description says that `fetch`, `AbortSignal`, `WebSocket`,
-  `console` and the timers are ordinary globals in a body (issue #99). Composing a body, the model reached
-  for the `http` tool — installing it if it was absent — for a request plain `fetch` would make: `http` has
-  a schema and is visible as a candidate, while the global was mentioned only in passing. The sentence sits
-  beside the one saying a runner *may* withhold globals, which left the model unsure whether `fetch` was
-  among them; it is not withheld by the node runner, and `types` lists any global that a runner does withhold.
-
-- **`http`** — a header value can come from the Vault (#104). `{ "Vault": "KEY_NAME" }` sends the stored
-  value, so a keyed REST API needs no secret in the conversation. Each key is gated as `http.secret` on
-  `<origin> <key>` before the vault is read — one call per key, `fallback: false`, standing answers for
-  the pair or the whole origin and never for the key alone. While a key is attached a redirect is not
-  followed (fetch strips only `Authorization` and `Cookie` across origins), the URL must be absolute
-  http(s), and the resolved values are redacted from the result and from every error. The string may
-  also be a template, each key written `${NAME}` — `{ "Authorization": { "Vault": "Bearer ${ACME_KEY}" } }`
-  — so the key holds only the token; every key in it is gated on its own, and a malformed reference is
-  refused before anything is asked. The template is the tool's own grammar, parsed into names that are
-  read one by one — never handed to `Vault.resolve`.
-
-- **`web-bundle`** — a remote plugin's imports resolve in the browser as they do on node (#94, #95, #96).
-  A module still runs from a `blob:` URL, which resolves no relative reference, so its imports are now
-  found by sucrase's parser rather than a regex — text in a string, template or comment is no longer
-  rewritten — and resolved against the URL that answered the fetch, so a CDN redirect no longer sends a
-  module's relative imports to the wrong path, and two URLs redirecting to one module load it once. A
-  root-relative import (`/lib/x.js`) resolves against the plugin's origin. `import(…)` resolves when it
-  is called, so a computed specifier works and a dependency is fetched only if it is actually imported;
+- **`tool-types`**
+  - A body's imports are type-checked against what the installation permits: node's declarations are
+    scoped with `paths`, one entry per reachable module (65 files rather than 168), instead of
+    `types: ['node']`. `@types/node` becomes a dependency.
+  - New structural rules beside the cast gate: **ENV-GATE** rejects the runner's withheld globals and
+    `import.meta` (a renamed destructuring and a type position are exempt), and **IMPORT-GATE** enforces
+    the restriction, which `paths` alone cannot. `ToolCheckDiagnostic.label` names the rule.
+  - Diagnostics match the runtime: compiled-plugin hints no longer fire on a snippet, importing
+    `@matatbread/matbot-plugin-api` from a body is refused (it typechecked and failed at the first call),
+    a bare builtin is typed where the gate permits it, a bare `node` is explained as a missing colon, and
+    tsc's "install type definitions for node" advice is replaced with something the author can act on.
+  - **Fix:** the check program's root is absolute; a relative one meant the snippet was never matched,
+    so nothing was checked and every snippet passed.
+- **`function-tools`**
+  - Type text is walked bracket-aware: `Promise<A> | Promise<B>` no longer becomes `A> | Promise<B`, and
+    a string-literal type such as `'a|b'` or `Promise<'a>b'>` is no longer split or left wrapped. Each
+    was spliced verbatim into the dts and the wire text.
+  - `tool_function`'s description says `fetch`, `AbortSignal`, `WebSocket`, `console` and the timers are
+    ordinary globals in a body, so the model stops reaching for (or installing) `http` instead (#99).
+  - A `define` (or `package`) the store refuses changes nothing in the tool registry (#106). Both
+    registered before writing, so a refused write left the caller's unsaved code running under the name —
+    with a store that refuses writes to shared-in items, someone else's function — and a refused new name
+    stayed registered but untracked. Source is still compiled first, so bad source fails first. A
+    read-only refusal names the next step, and a `check` sweep no longer stops at a shared definition it
+    cannot re-stamp.
+  - A stored function never replaces a tool `function-tools` did not register (#107). `reload` removed
+    whatever held the name, bypassing the `tools.overwrite` gate, so a shared-in or stale definition could
+    displace another plugin's tool. It is now skipped with a warning and reported as `shadowedBy` by
+    `list` and `SHADOWED` by `check`; ownership is the live tool's plugin stamp, and a freed name is
+    registered at the next reload.
+- **`tool-plugin` / `cli`** — `plugin add`, `reload` and `remove`, fixed from a live install.
+  - **`add` of a plugin peer-depending on plugin-api no longer fails with `ERR_PNPM_NO_MATCHING_VERSION`**
+    (#90). pnpm ≥ 10 reads its settings from `pnpm-workspace.yaml`, not `.npmrc`, so
+    `link-workspace-packages` had been silently ignored; the settings move there and `engines.pnpm` is
+    `>=10`. The failure is now recognised and the setting named.
+  - **`reload` keeps a fetched plugin's installed dependencies** (#90); it used to evict them with the
+    source. `add` and `reload` plan a fetched plugin's declared dependencies from its manifest and ask
+    before loading it, rather than failing on the first missing import.
+  - **A failed `reload` restores the previous copy** (#90) instead of leaving the plugin unloaded.
+  - **A fetched plugin can import a bare CDN URL** (#89). A URL that is both a module and the parent of
+    others (`https://esm.sh/ms@2.1.3`) failed with `ENOTDIR`. A URL import now keeps its URL as its
+    identity, as in the browser: redirects and queries resolve correctly, `import.meta.url` is the URL,
+    and it is cached by hash under `.plugins/.urls/`. It is fetched at exactly that URL (no `.ts`
+    fallback), and a plugin importing its own file by URL is refused, naming the spelling that reaches the
+    one copy. A plugin's own files are mirrored as before, now refusing a dot-segment host or an encoded
+    separator.
+  - **`remove` takes back what `add` created, and only that** (#98). Matbot's own cache (fetched source,
+    its dependencies, its name link) is deleted unless another configured plugin or a provider's `module:`
+    shares it. Project changes (a `package.json` key, a local plugin's `node_modules`/lockfile) are
+    recorded at install under `.plugins/.installs/` and offered back through `npm-uninstall` and a new
+    `remove-provisioned` gate; an install from before this release has no record, so `remove` names the
+    command instead.
+  - **`add` refuses up front what it cannot carry through:** an npm spec other than a bare name (a
+    version, tarball or git URL — install it with your package manager, then `add` the name); a package
+    whose manifest does not declare `matbotRuntime` including `node`; a declared-but-uninstalled package,
+    or a project with no `package.json`; a duplicate plugin name; and a local plugin's dependencies unless
+    the ground is empty or already complete. An already-installed package is used as it is. An `add` that
+    disowns the plugin after installing takes back exactly what it created.
+  - `plugin add npm:<name>` works (the prefix was passed to the package manager), and a name link follows
+    the copy materialised last. The tool description and `docs/DEVELOPING.md` say what happens to a
+    fetched plugin's dependencies.
+- **`cli`** — a `select` prompt numbers its options when they no longer fit on one line, and resolves
+  an exact value or label, then a shown number, then a unique prefix. A miss re-asks once instead of
+  silently taking the default; free text is returned where `allowOther` allows it.
+- **`http`** — a header value can come from the Vault (#104): `{ "Vault": "KEY" }`, or a template
+  `{ "Vault": "Bearer ${KEY}" }`. Each key is gated as `http.secret` on `<origin> <key>` before it is
+  read; while one is attached redirects are not followed and the URL must be absolute http(s), and
+  resolved values are redacted from results and errors.
+- **`web-bundle`** — a remote plugin's imports resolve in the browser as on node (#94, #95, #96): found
+  by parsing rather than a regex, resolved against the URL that answered (so CDN redirects work and
+  dedupe), root-relative imports against the plugin's origin, and `import(…)` at call time.
   `import.meta.url` is the module's real URL.
+- **`background-jobs` / `sessions`** — the tool descriptions say where a job reports: the conversation
+  fixed when it was created (from `session` or the creating call), never the job's own throwaway session.
+  `background_job_action list` points at each row's `session`. Behaviour is unchanged.
+- **`frontend/web`**
+  - Double-click a user bubble to edit what you sent and resend it: the session is cut at that message
+    and the edit submitted as a new turn, attachments kept by reference and robo blocks dropped. This
+    replaces the divider's **Resend**.
+  - Streaming writes the DOM once per animation frame instead of once per delta, with the same latency;
+    profiles had shown hundreds of long frames. A thinking block no longer scrolls past the viewport.
+  - A session waiting on a question for the user shows a **red** sidebar dot (`prompting` on the
+    `session-busy` event), including to a stream that connects while the question is open.
+  - In the in-process transport, stopping a session cancels a parked prompt rather than answering it
+    with the field's default.
+  - A conversation link carries its profile (`#<profile>:<session>~<params>`), from the address bar,
+    **Copy link** and a fork/split marker, so it opens in the right profile rather than the receiver's
+    most recent conversation. No prefix means Global.
+  - In a conversation shared in from another profile, a fork/split marker links to its peer only if that
+    peer was shared too, and otherwise says so.
+  - The turn just answered can be edited (double-click) and cut/forked from its divider without a
+    refresh. A live divider and bubble now take their message index by traceId rather than by position,
+    which drifted once a fired `contextual` trigger drew a divider a reload does not — so each later
+    divider carried the previous turn's index, and a cut from it hit the wrong turn.
+- **`edit-session`** — every `session_edit` action accepts `msgId` as an alternative to `msgIndex`
+  (give one, not both). An id the session does not hold is an error that changes nothing, and an edit
+  now locates its message in the same read it edits.
+- **`chatjimmy`** — the `systemText` prompt is passed through.
+- **`prompt-api`** (new, prototype) — a browser-only provider for the browser's on-device model through
+  the Prompt API (`LanguageModel`; Gemini Nano in Chrome). Streams text, round-trips open-loop tool calls,
+  degrades to text-only where the browser lacks tool use, and reports first-run download progress. Offered by
+  the web bundle's setup wizard as a self-contained adapter.
 
-- **`frontend/web`** — a link to a conversation in a profile opens that conversation in that profile.
-  The fragment named the session alone, so the receiver resolved it under whatever profile *their*
-  browser had active and silently opened their most recent conversation instead. The profile is now
-  written into every session fragment — `#<profile>:<session>~<params>` — by the address bar, a
-  message's **Copy link** and a fork/split marker's **Open →**, and kept there rather than stripped on
-  load, so sharing the page's URL (the usual way on mobile) carries it. A fragment with no prefix means
-  Global, and adopting it now switches to Global; `#new` still follows the tab. The prefix is split
-  syntactically, so it no longer depends on the profile list having loaded, and a message link pasted
-  into an open tab keeps its `msg` (the fragment was not decoded on that path).
-
-- **`frontend/web`** — a fork/split marker in a conversation shared in from another profile links to
-  its peer only if that peer was shared too, and says "not shared with you" otherwise. Sharing one half
-  of a split shares that half alone, so the link used to open nothing.
-
-- **`function-tools`** — a `define` (or `package`) the store refuses changes nothing in the tool registry
-  (#106). Both registered the new definition before writing it, so a refused write left the caller's
-  unsaved code running under the name. With a store that refuses writes to items shared in, that meant
-  someone else's function. A refused NEW name was left registered but untracked, so it could be neither
-  removed nor defined again. Source is still compiled before the write, so bad source fails first. A
-  read-only refusal keeps the store's reason and adds the next step (choose another name, or `remove`
-  theirs). A `check` sweep no longer stops at a shared definition whose fingerprint it cannot re-stamp.
-
-- **`function-tools`** — a stored function never replaces a tool `function-tools` did not register
-  (#107). `reload` removed whatever held a stored function's name before registering it. That bypassed
-  the host's `tools.overwrite` gate and let a shared-in or stale definition displace another plugin's
-  tool, including on a `StorageBackend` swap after later plugins had loaded. Such a function is now
-  skipped with a warning, and `list` reports it as `shadowedBy` (a package as `shadowed`) and `check` as
-  `SHADOWED`, both worked out at the time of the call. Ownership is the live tool's plugin stamp, not
-  only the record of what was registered, so a name another plugin has since taken over is not taken
-  back by a reload, a `define` or a `remove`. A function whose name is freed is registered at the next
-  reload.
+- **`cli`** — reloading a plugin fetched over http re-evaluates its own imports, not only its entry. The
+  module hook answered a fetched plugin's imports from the remote loader and returned before passing the
+  reload's `?mbfresh` stamp on, so a refresh re-fetched a changed import to disk and Node handed back the
+  copy it had already evaluated under the same URL: an owner's edit to anything but the entry never
+  reached a reload. The stamp now reaches a fetched plugin's mirrored files as it reaches a local one's.
+  A module imported by absolute URL keeps its URL unstamped, as before.
 
 ## 0.4.19
 

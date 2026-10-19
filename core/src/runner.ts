@@ -450,6 +450,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
           case 'thinking':
             yield { type: 'thinking', delta: ev.delta, traceId };
             break;
+          case 'progress':
+            yield { type: 'progress', pct: ev.pct, ...(ev.message !== undefined ? { message: ev.message } : {}), traceId };
+            break;
           case 'thinking-block':
             assistantParts.push({ type: 'thinking', thinking: ev.thinking, signature: ev.signature });
             break;

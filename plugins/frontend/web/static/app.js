@@ -2453,7 +2453,7 @@ function flyToPlace(nodes, from) {
 function appendUserBubble(text, msgIdx, pending, traceId, media) {
   messagesEl.querySelector('.empty-state')?.remove();
   if (messagesEl.querySelector('.message')) {
-    messagesEl.appendChild(createMsgDivider(msgIdx));
+    messagesEl.appendChild(createMsgDivider(msgIdx, traceId));
   }
   const div = makeBubble('user' + (pending ? ' pending' : ''), text, media);
   markEditable(div, msgIdx);
@@ -2464,10 +2464,12 @@ function appendUserBubble(text, msgIdx, pending, traceId, media) {
 }
 
 // A machine-authored turn (a followup resubmission). Presented agent-side with the robot badge.
-function appendRoboBubble(text, msgIdx, traceId, media) {
+// `ownTurn` false is robo content folded onto a turn already drawn (`robo-user`): it is part of that
+// turn's stored user message, so a reload draws it under that turn's divider and so must the live view.
+function appendRoboBubble(text, msgIdx, traceId, media, ownTurn = true) {
   messagesEl.querySelector('.empty-state')?.remove();
-  if (messagesEl.querySelector('.message')) {
-    messagesEl.appendChild(createMsgDivider(msgIdx));
+  if (ownTurn && messagesEl.querySelector('.message')) {
+    messagesEl.appendChild(createMsgDivider(msgIdx, traceId));
   }
   const div = makeBubble('robo', text, media);
   if (traceId) div.dataset.trace = traceId;
@@ -2511,10 +2513,11 @@ function appendUserTurn(content, msgIdx, traceId) {
   return last;
 }
 
-function createMsgDivider(msgIdx) {
+function createMsgDivider(msgIdx, traceId) {
   const div = document.createElement('div');
   div.className = 'msg-divider';
   if (msgIdx !== undefined) div.dataset.msgIdx = msgIdx;
+  if (traceId) div.dataset.trace = traceId;   // what the `done` back-fill matches a live divider by
 
   const line = document.createElement('div');
   line.className = 'msg-divider-line';
@@ -3576,6 +3579,8 @@ async function renderTurn(sid, traceId) {
   let hasText         = false;
   let thinkingContent = null;
   let thinkingAccum   = '';
+  /** @type {{ el: Element, label: Element, bar: HTMLElement }} */
+  let progress        = null;
   let currentTool     = null;
   let providerToolPending = false;
 
@@ -3613,7 +3618,31 @@ async function renderTurn(sid, traceId) {
 
   try {
     for await (const ev of turnEvents(traceId)) {
+      // Provider progress describes the wait before anything else happens, so whatever comes next ends it.
+      if (progress && ev.type !== 'progress') { progress.el.remove(); progress = null; }
       switch (ev.type) {
+        case 'progress': {
+          // Above the loading dots, not instead of them: a full bar still has an answer to wait for.
+          markStarted();
+          if (!progress) {
+            const el    = document.createElement('div');
+            const label = document.createElement('div');
+            const track = document.createElement('div');
+            const bar   = document.createElement('div');
+            el.className = 'msg-progress';
+            track.className = 'msg-progress-track';
+            bar.className = 'msg-progress-bar';
+            track.appendChild(bar);
+            el.append(label, track);
+            turnWrap.insertBefore(el, loadingEl);
+            progress = { el, label, bar };
+          }
+          const pct = Math.max(0, Math.min(100, ev.pct));
+          progress.label.textContent = (ev.message ?? 'Preparing') + ' — ' + pct + '%';
+          progress.bar.style.width = pct + '%';
+          break;
+        }
+
         case 'queued': {
           // The submission itself, delivered on the stream. Render its user bubble here (in delta
           // order). queued > 0 ⇒ it's waiting behind a running turn → float the egg-timer; queued
@@ -3994,7 +4023,7 @@ async function renderTurn(sid, traceId) {
             .map(c => c.text)
             .join('\n');
           const media = liveMedia(ev.content);
-          if (text || media.length) appendRoboBubble(text, undefined, ev.traceId, media);
+          if (text || media.length) appendRoboBubble(text, undefined, ev.traceId, media, false);
           break;
         }
 
@@ -4042,35 +4071,24 @@ async function renderTurn(sid, traceId) {
           const turnFooter  = makeTurnFooter(perProvider, turnTimestamp(ev.session?.messages, traceId));
           if (turnWrap && turnFooter) turnWrap.appendChild(turnFooter);
           loadFiles();
-          // Back-fill origIdx on any dividers added without an index this turn. Not from a parallel turn's
-          // copy, whose indexes are not the session's: a cut or fork from that divider would miss.
+          // Back-fill the index on dividers and user bubbles drawn live without one, so a cut/fork from the
+          // divider and a double-click edit address the stored message. Not from a parallel turn's copy,
+          // whose indexes are not the session's: a cut or fork from that divider would miss.
+          // Matched by traceId, never by position. Pairing the n-th unindexed node with the n-th new user
+          // message drifted for good the first time the live view drew a node a reload would not (a robo
+          // bubble's divider, a merged parallel pair): every later turn took its predecessor's index and
+          // the latest was left with none — the one thing a refresh appeared to fix.
           if (ev.session && !parallelTraces.has(traceId)) {
-            const allDividers = [...messagesEl.querySelectorAll('.msg-divider')];
-            const unindexed   = allDividers.filter(d => d.dataset.msgIdx === undefined);
-            if (unindexed.length > 0) {
-              const indexed  = allDividers.filter(d => d.dataset.msgIdx !== undefined);
-              const lastIdx  = indexed.length > 0 ? parseInt(indexed[indexed.length - 1].dataset.msgIdx) : -1;
-              const newIdxs  = ev.session.messages
-                .map((m, i) => ({ m, i }))
-                .filter(({ m, i }) => m.role === 'user' && i > lastIdx)
-                .map(({ i }) => i);
-              for (let j = 0; j < Math.min(unindexed.length, newIdxs.length); j++) {
-                unindexed[j].dataset.msgIdx = newIdxs[j];
-              }
+            const userIdx = new Map();
+            ev.session.messages.forEach((m, i) => {
+              if (m.role === 'user' && m.traceId && !userIdx.has(m.traceId)) userIdx.set(m.traceId, i);
+            });
+            for (const d of messagesEl.querySelectorAll('.msg-divider[data-trace]:not([data-msg-idx])')) {
+              const i = userIdx.get(d.dataset.trace);
+              if (i !== undefined) d.dataset.msgIdx = i;
             }
-            // The same back-fill for the user bubbles, which carry an index of their own so a
-            // double-click can edit them. Done independently of the dividers: the first turn of a
-            // session has a bubble and no divider, so the two lists do not line up.
-            const bubbles  = [...messagesEl.querySelectorAll('.message.user')];
-            const unindexB = bubbles.filter(b => b.dataset.msgIdx === undefined);
-            if (unindexB.length > 0) {
-              const indexedB = bubbles.filter(b => b.dataset.msgIdx !== undefined);
-              const lastB    = indexedB.length > 0 ? parseInt(indexedB[indexedB.length - 1].dataset.msgIdx) : -1;
-              const newB     = ev.session.messages
-                .map((m, i) => ({ m, i }))
-                .filter(({ m, i }) => m.role === 'user' && i > lastB)
-                .map(({ i }) => i);
-              for (let j = 0; j < Math.min(unindexB.length, newB.length); j++) markEditable(unindexB[j], newB[j]);
+            for (const b of messagesEl.querySelectorAll('.message.user[data-trace]:not([data-msg-idx])')) {
+              markEditable(b, userIdx.get(b.dataset.trace));
             }
           }
           break;
@@ -4097,6 +4115,7 @@ async function renderTurn(sid, traceId) {
     // Don't markStarted() here — a turn that was only queued then cancelled must not spawn an empty
     // assistant wrap. Just clear any loading dots that are still showing.
     if (loadingEl) { loadingEl.remove(); loadingEl = null; }
+    if (progress) { progress.el.remove(); progress = null; }
     refreshSessions();
     loadFiles();
     // If the output extends below the viewport fold, morph the send button
