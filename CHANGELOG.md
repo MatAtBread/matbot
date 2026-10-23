@@ -9,6 +9,22 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
+  page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
+  - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
+    declared tool can be named, and its arguments must fit its schema.
+  - History is rendered deterministically, so WebLLM reuses its prefill between rounds.
+  - Download and load report as `progress`.
+  - A model id is checked before anything downloads: an unknown one names the closest, and an f16 build
+    on a GPU without f16 names its f32 build.
+  - The `webllm_models` tool lists the runnable models with their GPU memory, whether this GPU can run
+    them, and what is downloaded, and deletes a downloaded one.
+  - Offered by the web bundle's setup wizard.
+
 ## 0.4.20
 
 ### Breaking changes

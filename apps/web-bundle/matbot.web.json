@@ -62,6 +62,12 @@
       "module": "plugins/providers/customer-services",
       "modelHint": "customer-services",
       "selfContained": true
+    },
+    {
+      "label": "WebLLM — open models on your GPU, in the page (Qwen3-4B by default, ~3.4 GB first download; no endpoint or API key)",
+      "module": "plugins/providers/webllm",
+      "modelHint": "Qwen3-4B-q4f16_1-MLC",
+      "selfContained": true
     }
   ],
 
