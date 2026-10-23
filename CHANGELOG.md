@@ -9,10 +9,14 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.21
 
 ### Optional
 
+- **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
+  capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
+  one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
+  as `checkedElsewhere` once, since the withheld set is part of the environment its verdict names.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
   - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
