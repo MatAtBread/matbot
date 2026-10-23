@@ -21,8 +21,14 @@ churn and less likely to affect a consumer who doesn't use them.
   - Download and load report as `progress`.
   - A model id is checked before anything downloads: an unknown one names the closest, and an f16 build
     on a GPU without f16 names its f32 build.
-  - The `webllm_models` tool lists the runnable models with their GPU memory, whether this GPU can run
-    them, and what is downloaded, and deletes a downloaded one.
+  - The `webllm_models` tool describes the runnable models and deletes a downloaded one. `list` gives full
+    rows (GPU memory, whether this GPU can run it, downloaded/loaded) only for what a `query` or
+    `downloaded` selects, and otherwise the bare ids, so it never fills a small model's window. A
+    selection that matches nothing returns every id rather than an empty list.
+  - A conversation longer than the context window has its oldest turns left out of what is sent, whole
+    turns only, so a tool call keeps its result. The session is unchanged, the model is told, and the cut
+    stays put across turns so WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill
+    is re-fitted with a stricter estimate.
   - Offered by the web bundle's setup wizard.
 
 ## 0.4.20

@@ -1,11 +1,20 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
 import { ReplyParser, toChatMessages, toolCallFormat, type Piece } from './format.js';
+import { CHARS_PER_TOKEN, fitToWindow, forgetCut, isWindowOverflow, omittedNote } from './window.js';
 import { DEFAULT_LIBRARY, cacheBackend, checkModel, library, loadEngine, type CacheBackend, type ChatRequest, type InitProgressReport, type Loaded } from './webllm.js';
 
 export const DEFAULT_MODEL = 'Qwen3-4B-q4f16_1-MLC';
 // WebLLM's prebuilt Qwen3 records cap the window at 4096, which matbot's system context and a tool list
 // alone can fill. 8192 costs roughly another 0.6 GB of GPU memory for a 4B model; `contextWindow` changes it.
 const DEFAULT_CONTEXT = 8192;
+// Room kept for the reply when `maxTokens` does not say how much.
+const REPLY_RESERVE = 1024;
+// Characters per token assumed on each attempt: the default, then stricter after each overflow WebLLM reports.
+const OVERFLOW_ESTIMATES = [CHARS_PER_TOKEN, 2.25, 1.5] as const;
+
+function noteMessage(text: string): Message {
+  return { id: 'webllm-omitted-note', role: 'system', content: [{ type: 'text', text }], createdAt: new Date(0).toISOString(), traceId: '' };
+}
 
 const NO_WEBGPU = 'webllm: this browser has no WebGPU (navigator.gpu), which WebLLM needs to run a model. '
   + 'Chrome and Edge have it on most desktops; elsewhere check chrome://gpu or the browser\'s WebGPU flag.';
@@ -84,73 +93,110 @@ export class WebLLMAdapter implements ProviderAdapter {
     const offered       = params['tools'] === false ? [] : tools;
     const cache         = cacheBackend(params['cache']);
 
-    const chat = toChatMessages(messages, offered);
-    const last = chat.at(-1);
-    if (!last || last.role !== 'user')
-      throw new Error('webllm: the conversation must end with a user turn or a tool result — WebLLM cannot continue an assistant message.');
-
-    const request: ChatRequest = {
-      messages:       chat,
-      stream:         true,
-      stream_options: { include_usage: true },
-      ...(typeof params.maxTokens   === 'number' ? { max_tokens:  params.maxTokens }   : {}),
-      ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
-      ...(typeof params.topP        === 'number' ? { top_p:       params.topP }        : {}),
-      ...(params.stopSequences ? { stop: params.stopSequences } : {}),
-      ...(offered.length > 0 ? { response_format: toolCallFormat(offered) } : {}),
-      // Qwen3 reasons before every answer unless told not to, which on a laptop GPU is most of the wait.
-      extra_body: { enable_thinking: params['thinking'] === true },
+    // What the reply may use is taken off the window first: WebLLM decodes into the same window, so a
+    // prompt that only just fits leaves the answer nowhere to go.
+    const reserve = typeof params.maxTokens === 'number' ? params.maxTokens : REPLY_RESERVE;
+    const budget  = Math.max(0, contextWindow - reserve);
+    const requestFor = (charsPerToken: number): { request: ChatRequest; omitted: number } => {
+      const fitted = fitToWindow(messages, offered, budget, charsPerToken);
+      const kept   = fitted.omitted > 0 ? [...fitted.messages, noteMessage(omittedNote(fitted.omitted))] : fitted.messages;
+      const chat   = toChatMessages(kept, offered);
+      if (chat.at(-1)?.role !== 'user')
+        throw new Error('webllm: the conversation must end with a user turn or a tool result — WebLLM cannot continue an assistant message.');
+      return {
+        omitted: fitted.omitted,
+        request: {
+          messages:       chat,
+          stream:         true,
+          stream_options: { include_usage: true },
+          ...(typeof params.maxTokens   === 'number' ? { max_tokens:  params.maxTokens }   : {}),
+          ...(typeof params.temperature === 'number' ? { temperature: params.temperature } : {}),
+          ...(typeof params.topP        === 'number' ? { top_p:       params.topP }        : {}),
+          ...(params.stopSequences ? { stop: params.stopSequences } : {}),
+          ...(offered.length > 0 ? { response_format: toolCallFormat(offered) } : {}),
+          // Qwen3 reasons before every answer unless told not to, which on a laptop GPU is most of the wait.
+          extra_body: { enable_thinking: params['thinking'] === true },
+        },
+      };
     };
+    // Fail before loading a model if the call cannot be sent at all.
+    requestFor(CHARS_PER_TOKEN);
 
     const held = yield* this.acquire(libraryUrl, model, contextWindow, cache, signal);
-    const raw: string[] = [];
-    let finish: string | undefined;
-    let usage: Record<string, unknown> | undefined;
     let onAbort: (() => void) | undefined;
     try {
       const { engine } = await held.loaded;
       onAbort = (): void => void engine.interruptGenerate();
       signal.addEventListener('abort', onAbort, { once: true });
-      const parser = new ReplyParser();
-      let reasoning = '';
-      const events = function* (pieces: Piece[]): Generator<CompletionEvent> {
-        for (const p of pieces) {
-          switch (p.kind) {
-            case 'text':     yield { type: 'text-delta', delta: p.text }; break;
-            case 'thinking': reasoning += p.text; yield { type: 'thinking', delta: p.text }; break;
-            case 'call':     yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: p.arguments }; break;
-            case 'cut-call':
-              yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: {},
-                truncated: { bytes: p.bytes, ...(finish ? { stopReason: finish } : {}) } };
-              break;
-          }
-        }
-      };
 
-      for await (const chunk of await engine.chat.completions.create(request)) {
-        const choice = chunk.choices[0];
-        const delta  = choice?.delta.content;
-        if (delta) { raw.push(delta); yield* events(parser.push(delta)); }
-        if (choice?.finish_reason) finish = choice.finish_reason;
-        if (chunk.usage) usage = chunk.usage;
-      }
-      signal.throwIfAborted();
-      yield* events(parser.end());
-      if (reasoning) yield { type: 'reasoning-block', reasoning };
-      if (usage) {
-        yield {
-          type:         'usage',
-          inputTokens:  typeof usage['prompt_tokens'] === 'number' ? usage['prompt_tokens'] : 0,
-          outputTokens: typeof usage['completion_tokens'] === 'number' ? usage['completion_tokens'] : 0,
-          reported:     { ...usage },
+      // The estimate is only an estimate: where WebLLM still refuses the prompt — at prefill, before any
+      // output — the call is re-fitted with a stricter one rather than failed.
+      for (const [attempt, charsPerToken] of OVERFLOW_ESTIMATES.entries()) {
+        const { request, omitted } = requestFor(charsPerToken);
+        if (omitted > 0)
+          console.warn(`[webllm] ${omitted} earliest turn${omitted === 1 ? '' : 's'} left out to fit the ${contextWindow}-token context window; the model is told so. The session is unchanged.`);
+        const raw: string[] = [];
+        let finish: string | undefined;
+        let usage: Record<string, unknown> | undefined;
+        let emitted = false;
+        const parser = new ReplyParser();
+        let reasoning = '';
+        const events = function* (pieces: Piece[]): Generator<CompletionEvent> {
+          for (const p of pieces) {
+            emitted = true;
+            switch (p.kind) {
+              case 'text':     yield { type: 'text-delta', delta: p.text }; break;
+              case 'thinking': reasoning += p.text; yield { type: 'thinking', delta: p.text }; break;
+              case 'call':     yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: p.arguments }; break;
+              case 'cut-call':
+                yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: {},
+                  truncated: { bytes: p.bytes, ...(finish ? { stopReason: finish } : {}) } };
+                break;
+            }
+          }
         };
+
+        try {
+          for await (const chunk of await engine.chat.completions.create(request)) {
+            const choice = chunk.choices[0];
+            const delta  = choice?.delta.content;
+            if (delta) { raw.push(delta); yield* events(parser.push(delta)); }
+            if (choice?.finish_reason) finish = choice.finish_reason;
+            if (chunk.usage) usage = chunk.usage;
+          }
+        } catch (e) {
+          if (isWindowOverflow(e) && !emitted && attempt < OVERFLOW_ESTIMATES.length - 1 && !signal.aborted) {
+            forgetCut(messages);
+            continue;
+          }
+          if (isWindowOverflow(e))
+            throw new Error(`webllm: the conversation does not fit the ${contextWindow}-token context window even with its `
+              + 'earlier turns left out — the system prompt, the tool list and the current turn alone are too long. '
+              + 'Raise `contextWindow` (it costs GPU memory), offer fewer tools (the tool-router plugin, or '
+              + '`parameters.tools: false`), or start a new conversation.', { cause: e });
+          throw e;
+        } finally {
+          // What the model was sent and what it wrote, verbatim, at the level DevTools hides unless "Verbose".
+          console.debug('[webllm] exchange', { model, attempt, omitted, request, reply: raw.join(''), finish, usage });
+        }
+
+        signal.throwIfAborted();
+        yield* events(parser.end());
+        if (reasoning) yield { type: 'reasoning-block', reasoning };
+        if (usage) {
+          yield {
+            type:         'usage',
+            inputTokens:  typeof usage['prompt_tokens'] === 'number' ? usage['prompt_tokens'] : 0,
+            outputTokens: typeof usage['completion_tokens'] === 'number' ? usage['completion_tokens'] : 0,
+            reported:     { ...usage },
+          };
+        }
+        if (finish === 'length') yield { type: 'truncated', reason: 'max-tokens', raw: finish };
+        yield { type: 'done' };
+        return;
       }
-      if (finish === 'length') yield { type: 'truncated', reason: 'max-tokens', raw: finish };
-      yield { type: 'done' };
     } finally {
       if (onAbort) signal.removeEventListener('abort', onAbort);
-      // What the model was sent and what it wrote, verbatim, at the level DevTools hides unless "Verbose".
-      console.debug('[webllm] exchange', { model, request, reply: raw.join(''), finish, usage });
       release(held);
     }
   }

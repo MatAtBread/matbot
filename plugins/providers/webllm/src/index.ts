@@ -1,5 +1,5 @@
 export { WebLLMAdapter, DEFAULT_MODEL } from './adapter.js';
-export { webllmModelsTool, type WebLLMModelSummary } from './models.js';
+export { webllmModelsTool, type WebLLMModelList, type WebLLMModelSummary } from './models.js';
 
 import type { MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { WebLLMAdapter }         from './adapter.js';

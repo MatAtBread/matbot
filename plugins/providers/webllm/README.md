@@ -33,11 +33,17 @@ A refused request leaves the loaded model alone.
 
 The plugin also registers a tool for choosing among models:
 
-- **`list`** returns every LLM the library can run, smallest first. Each entry gives its id, the GPU memory
-  it needs (`vramMB`), whether this GPU has the features it needs (`runsHere`), and whether it is already
-  `downloaded` or `loaded`. `query` narrows by words in the id (`"qwen3 4b"`), and `downloaded: true` lists
-  only what is on this device. The full list is over 150 entries, too long for a small model's context, so
-  the description steers it to filter.
+- **`list`** describes the models the library can run, smallest first. Detail costs context, and a small
+  model's window is the scarcest thing here: a full row for each of the ~160 models would be most of an 8k
+  window. So:
+  - **`matched`**: full rows, only for the models a call selects. A row gives the id, the GPU memory needed
+    (`vramMB`), whether this GPU has the features it needs (`runsHere`), and whether it is `downloaded` or
+    `loaded`. A call selects with `query` (words that all appear in the id, e.g. `"qwen3 4b"`) and/or
+    `downloaded: true`.
+  - **`others`**: just the ids (about 1.5–2k tokens for all of them), given when the call selects nothing,
+    or when its selection matches nothing. A model that searched for something that is not in any id
+    (`"webllm"`) gets the ids it can search, not an empty list.
+  - **`hint`**: says which of these happened and how to narrow.
 - **`delete`** removes a downloaded model from this origin's cache to free its storage.
 
 To switch a profile, pass a listed id to the `provider` tool's `update`.
@@ -82,6 +88,47 @@ History is rendered the way Qwen's chat template renders it: calls as `<tool_cal
 assistant's text, results as `<tool_response>` blocks in a user turn. Rendering is deterministic, so WebLLM
 can reuse its prefill whenever a request extends the previous conversation exactly. A tool round or a new
 turn then prefills only what is new.
+
+## Long conversations
+
+The model's context window (8192 tokens by default) is much smaller than a remote provider's. A session
+moved here from Claude or GPT would otherwise fail with WebLLM's `ContextWindowSizeExceededError`. So when a
+conversation does not fit, the oldest **turns** are left out of what is sent:
+
+- **The session is unchanged.** Switching back to a large-window provider sends everything again.
+- **Whole turns only.** A turn is a user message and everything after it, so a tool call is never parted
+  from its result. The current turn is always kept.
+- **Room for the reply.** The budget is the window minus `maxTokens` (or 1024).
+- **Estimated size.** WebLLM has no way to count tokens ahead of a request, so size is estimated from
+  rendered length at 3 characters per token. If WebLLM still refuses at prefill, which is before any output,
+  the call is re-fitted with a stricter estimate, up to twice.
+- **A stable cut point.** When trimming is needed, the cut leaves a quarter of the budget spare, and is
+  remembered per conversation. That keeps the start of what is sent unchanged for several turns, which is
+  what lets WebLLM reuse its prefill; a cut that moved every turn would re-read the whole window every time.
+- **The model is told.** A line in the system prompt says how many earlier turns it cannot see, and to say
+  so rather than guess. The user sees a console warning.
+
+If the system prompt, the tools and the current turn alone do not fit, the call fails with an error naming
+the remedies: a larger `contextWindow`, fewer tools, or a new conversation.
+
+### Open: shorten or summarise
+
+Leaving turns out is the simplest strategy that avoids the error, not a settled design. The alternatives:
+
+- **Shorten (what this does).** Cheap and exact, and stable enough for prefill reuse. Everything in the
+  omitted turns is gone as far as the model is concerned.
+- **Summarise, recursively.** The gist of what is cut survives, but each summary is a generation pass by the
+  same small model, out of the same small window. Summaries of summaries drift. And every new summary changes
+  the start of the prompt, so prefill reuse is lost unless summaries are made in fixed chunks at the cut.
+  It also belongs outside this adapter. A model answering from a summary that is in no session breaks
+  matbot's rule that the session is the record. A `contribute` hook that stores its summary as a marker
+  would be visible, durable, and usable by any small-window provider.
+- **Fetch on demand.** Leave turns out, but let the model ask for them. The note already says they exist;
+  a tool that reads them back (`session_action get`, or a search over the session) would keep the window
+  small and fetch only what a question needs. It depends on the model knowing when to look, which is the
+  weakest skill of a small one.
+
+These can combine: shorten always, summarise or fetch for what is cut.
 
 ## Known gaps
 
