@@ -25,10 +25,15 @@ churn and less likely to affect a consumer who doesn't use them.
     rows (GPU memory, whether this GPU can run it, downloaded/loaded) only for what a `query` or
     `downloaded` selects, and otherwise the bare ids, so it never fills a small model's window. A
     selection that matches nothing returns every id rather than an empty list.
-  - A conversation longer than the context window has its oldest turns left out of what is sent, whole
-    turns only, so a tool call keeps its result. The session is unchanged, the model is told, and the cut
-    stays put across turns so WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill
-    is re-fitted with a stricter estimate.
+  - Only models trained on the tool-call format the adapter uses are listed or accepted while tools are
+    offered: the Qwen3, Qwen2.5 and Hermes families, 39 of WebLLM's models. Others would answer instead of
+    calling tools. Any chat model may still be used with `parameters.tools: false`.
+  - A conversation longer than the context window is fitted to it, cheapest loss first. Large tool results
+    in earlier turns are shortened, keeping their start and saying how much is left out. Only if that is
+    not enough are the oldest whole turns left out, so a tool call keeps its result. The current turn is
+    never touched, the session is unchanged, and the model is told. Both decisions stay put across turns, so
+    WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill is re-fitted with a
+    stricter estimate.
   - Offered by the web bundle's setup wizard.
 
 ## 0.4.20

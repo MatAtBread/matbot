@@ -25,7 +25,28 @@ still using the old one.
 
 The id is checked before anything downloads:
 - an id WebLLM does not know is refused, naming the closest ones;
+- a model not trained on this adapter's tool format is refused while tools are offered (see below);
 - a `q4f16` build on a GPU without the `shader-f16` feature is refused, naming its `q4f32` build.
+
+### Which models can call tools
+
+WebLLM records nothing about this. Its `functionCallingModelIds` concerns its own `tools` path, which this
+adapter does not use. What matters here is whether a family was trained on the Hermes
+`<tool_call>{"name": …, "arguments": …}` format, as read off each family's published chat template. The
+constraint can force a valid call only once a model writes `<tool_call>`, and one never trained on it rarely
+does.
+
+| Family | Tool calls here | Why |
+|---|---|---|
+| Qwen3, Qwen2.5, Qwen2.5-Coder | yes | Hermes-style JSON in the template |
+| Hermes-2-Pro, Hermes-2-Theta, Hermes-3 | yes | the format's origin; documented on the model cards |
+| Qwen3.5 | no | calls tools in XML (`<function=…><parameter=…>`); supportable later via WebLLM's `qwen_xml_parameter` tag |
+| Qwen2.5-Math | no | shares Qwen2.5's template, but is a maths specialist |
+| Llama 3.x, Mistral, Ministral | no | formats of their own |
+| Qwen2, DeepSeek-R1 distills, Phi, Gemma, SmolLM2, others | no | no tool format |
+
+That is 39 of WebLLM 0.2.85's models. With tools offered, any other is refused, naming the closest one that
+qualifies. With `parameters.tools: false`, any chat model may be used for plain conversation.
 
 A refused request leaves the loaded model alone.
 
@@ -33,14 +54,13 @@ A refused request leaves the loaded model alone.
 
 The plugin also registers a tool for choosing among models:
 
-- **`list`** describes the models the library can run, smallest first. Detail costs context, and a small
-  model's window is the scarcest thing here: a full row for each of the ~160 models would be most of an 8k
-  window. So:
+- **`list`** describes the models the library can run that can call tools (above), smallest first. Detail costs context, and a small
+  model's window is the scarcest thing here: a full row for each would cost far more than the ids. So:
   - **`matched`**: full rows, only for the models a call selects. A row gives the id, the GPU memory needed
     (`vramMB`), whether this GPU has the features it needs (`runsHere`), and whether it is `downloaded` or
     `loaded`. A call selects with `query` (words that all appear in the id, e.g. `"qwen3 4b"`) and/or
     `downloaded: true`.
-  - **`others`**: just the ids (about 1.5–2k tokens for all of them), given when the call selects nothing,
+  - **`others`**: just the ids (about 400 tokens for all 39), given when the call selects nothing,
     or when its selection matches nothing. A model that searched for something that is not in any id
     (`"webllm"`) gets the ids it can search, not an empty list.
   - **`hint`**: says which of these happened and how to narrow.
@@ -92,8 +112,17 @@ turn then prefills only what is new.
 ## Long conversations
 
 The model's context window (8192 tokens by default) is much smaller than a remote provider's. A session
-moved here from Claude or GPT would otherwise fail with WebLLM's `ContextWindowSizeExceededError`. So when a
-conversation does not fit, the oldest **turns** are left out of what is sent:
+moved here from Claude or GPT would otherwise fail with WebLLM's `ContextWindowSizeExceededError`. A single
+large tool result does the same: it fills most of the window, and the next turn has room for little else.
+So when a conversation does not fit, two things happen, cheapest loss first:
+
+1. **Large tool results in earlier turns are shortened.** A result over 800 characters keeps its first 400,
+   plus a note of how much was left out and that calling the tool again shows the whole of it. That is the
+   bulk the model has already read and answered from. Who asked what, and what was decided, survives. The
+   current turn is never shortened: its latest result may be what the model is answering from.
+2. **The oldest turns are left out** only if that is not enough.
+
+Either way:
 
 - **The session is unchanged.** Switching back to a large-window provider sends everything again.
 - **Whole turns only.** A turn is a user message and everything after it, so a tool call is never parted
@@ -102,11 +131,11 @@ conversation does not fit, the oldest **turns** are left out of what is sent:
 - **Estimated size.** WebLLM has no way to count tokens ahead of a request, so size is estimated from
   rendered length at 3 characters per token. If WebLLM still refuses at prefill, which is before any output,
   the call is re-fitted with a stricter estimate, up to twice.
-- **A stable cut point.** When trimming is needed, the cut leaves a quarter of the budget spare, and is
-  remembered per conversation. That keeps the start of what is sent unchanged for several turns, which is
+- **A stable start.** Once a conversation needs shortening, that is remembered for it, and a turn's shortened
+  form never changes. When turns must go, the cut leaves a quarter of the budget spare and is remembered too. That keeps the start of what is sent unchanged for several turns, which is
   what lets WebLLM reuse its prefill; a cut that moved every turn would re-read the whole window every time.
-- **The model is told.** A line in the system prompt says how many earlier turns it cannot see, and to say
-  so rather than guess. The user sees a console warning.
+- **The model is told.** A shortened result says so itself. A line in the system prompt says how many
+  earlier turns it cannot see, and to say so rather than guess. The user sees a console warning listing both.
 
 If the system prompt, the tools and the current turn alone do not fit, the call fails with an error naming
 the remedies: a larger `contextWindow`, fewer tools, or a new conversation.
@@ -115,7 +144,8 @@ the remedies: a larger `contextWindow`, fewer tools, or a new conversation.
 
 Leaving turns out is the simplest strategy that avoids the error, not a settled design. The alternatives:
 
-- **Shorten (what this does).** Cheap and exact, and stable enough for prefill reuse. Everything in the
+- **Shorten (what this does).** Shrinking old tool results, then dropping turns. Cheap and exact, and stable
+  enough for prefill reuse. Everything in the
   omitted turns is gone as far as the model is concerned.
 - **Summarise, recursively.** The gist of what is cut survives, but each summary is a generation pass by the
   same small model, out of the same small window. Summaries of summaries drift. And every new summary changes

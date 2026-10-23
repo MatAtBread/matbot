@@ -1,6 +1,6 @@
 import type { Tool, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
 import { resident } from './adapter.js';
-import { appConfig, chatModels, closestModels, gpuFeatures, library } from './webllm.js';
+import { appConfig, closestModels, gpuFeatures, library, toolModels } from './webllm.js';
 
 export interface WebLLMModelSummary {
   id:             string;
@@ -48,18 +48,18 @@ type Input =
 export const webllmModelsTool: Tool<ToolResultOf<'webllm_models'>> = {
   name: 'webllm_models',
   description:
-    'The models the WebLLM provider can run in this browser. Every model runs on this device\'s GPU, and '
-    + 'downloads (once, often gigabytes) the first time it is used. A model\'s id names its family, size and '
-    + 'quantisation, e.g. "Qwen3-4B-q4f16_1-MLC" or "Llama-3.2-3B-Instruct-q4f32_1-MLC".\n\n'
-    + '"list" with no other input returns every id, smallest first. Both inputs below are optional; give '
-    + 'either to get full details for the models they select — "vramMB" (GPU memory needed), whether it '
-    + '"runsHere" (this GPU has the features it needs), and whether it is "downloaded" or "loaded":\n'
-    + '- "query": words that all appear in the model id, e.g. "qwen3", "4b" or "qwen3 4b". It searches ids '
-    + 'only, so words like "webllm" or "model" match nothing. If nothing matches, every id is returned instead.\n'
+    'The models the WebLLM provider can run in this browser that can call tools: the Qwen3, Qwen2.5 and Hermes '
+    + 'families. Others would answer in prose instead of using tools, so they are not listed. Every model runs '
+    + 'on this device\'s GPU, and downloads (once, often gigabytes) the first time it is used. A model\'s id '
+    + 'names its family, size and quantisation, e.g. "Qwen3-4B-q4f16_1-MLC" or "Hermes-3-Llama-3.2-3B-q4f16_1-MLC".\n\n'
+    + '"list" with no other input returns every id, smallest first. Both inputs below are optional; give either '
+    + 'to get full details for the models they select: "vramMB" (GPU memory needed), whether it "runsHere" '
+    + '(this GPU has the features it needs), and whether it is "downloaded" or "loaded".\n'
+    + '- "query": words that all appear in the model id, e.g. "qwen3", "4b" or "qwen3 4b". It searches ids only, '
+    + 'so words like "webllm" or "model" match nothing. If nothing matches, every id is returned instead.\n'
     + '- "downloaded": true selects the models already on this device.\n'
-    + 'Qwen and Hermes models handle tool calls best; "q4f16" builds are smaller and faster where the GPU '
-    + 'supports them, "q4f32" the fallback. To switch a profile to a model, use the provider tool\'s "update" '
-    + 'with the id.\n\n'
+    + '"q4f16" builds are smaller and faster where the GPU supports them, "q4f32" the fallback. To switch a '
+    + 'profile to a model, use the provider tool\'s "update" with the id.\n\n'
     + '"delete" removes a downloaded model from this device to free its storage; it downloads again if used.',
   inputSchema: {
     type:       'object',
@@ -77,7 +77,7 @@ export const webllmModelsTool: Tool<ToolResultOf<'webllm_models'>> = {
       const now    = resident();
       const lib    = await library(now.library);
       const config = appConfig(lib, now.cache);
-      const models = [...chatModels(lib)].sort((a, b) =>
+      const models = [...toolModels(lib)].sort((a, b) =>
         (a.vram_required_MB ?? Infinity) - (b.vram_required_MB ?? Infinity) || a.model_id.localeCompare(b.model_id));
       const total  = models.length;
 

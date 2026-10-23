@@ -1,6 +1,6 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
 import { ReplyParser, toChatMessages, toolCallFormat, type Piece } from './format.js';
-import { CHARS_PER_TOKEN, fitToWindow, forgetCut, isWindowOverflow, omittedNote } from './window.js';
+import { CHARS_PER_TOKEN, fitToWindow, forgetFit, isWindowOverflow, omittedNote } from './window.js';
 import { DEFAULT_LIBRARY, cacheBackend, checkModel, library, loadEngine, type CacheBackend, type ChatRequest, type InitProgressReport, type Loaded } from './webllm.js';
 
 export const DEFAULT_MODEL = 'Qwen3-4B-q4f16_1-MLC';
@@ -97,7 +97,7 @@ export class WebLLMAdapter implements ProviderAdapter {
     // prompt that only just fits leaves the answer nowhere to go.
     const reserve = typeof params.maxTokens === 'number' ? params.maxTokens : REPLY_RESERVE;
     const budget  = Math.max(0, contextWindow - reserve);
-    const requestFor = (charsPerToken: number): { request: ChatRequest; omitted: number } => {
+    const requestFor = (charsPerToken: number): { request: ChatRequest; omitted: number; shrunk: number } => {
       const fitted = fitToWindow(messages, offered, budget, charsPerToken);
       const kept   = fitted.omitted > 0 ? [...fitted.messages, noteMessage(omittedNote(fitted.omitted))] : fitted.messages;
       const chat   = toChatMessages(kept, offered);
@@ -105,6 +105,7 @@ export class WebLLMAdapter implements ProviderAdapter {
         throw new Error('webllm: the conversation must end with a user turn or a tool result — WebLLM cannot continue an assistant message.');
       return {
         omitted: fitted.omitted,
+        shrunk:  fitted.shrunk,
         request: {
           messages:       chat,
           stream:         true,
@@ -122,7 +123,7 @@ export class WebLLMAdapter implements ProviderAdapter {
     // Fail before loading a model if the call cannot be sent at all.
     requestFor(CHARS_PER_TOKEN);
 
-    const held = yield* this.acquire(libraryUrl, model, contextWindow, cache, signal);
+    const held = yield* this.acquire(libraryUrl, model, contextWindow, cache, offered.length > 0, signal);
     let onAbort: (() => void) | undefined;
     try {
       const { engine } = await held.loaded;
@@ -132,9 +133,12 @@ export class WebLLMAdapter implements ProviderAdapter {
       // The estimate is only an estimate: where WebLLM still refuses the prompt — at prefill, before any
       // output — the call is re-fitted with a stricter one rather than failed.
       for (const [attempt, charsPerToken] of OVERFLOW_ESTIMATES.entries()) {
-        const { request, omitted } = requestFor(charsPerToken);
-        if (omitted > 0)
-          console.warn(`[webllm] ${omitted} earliest turn${omitted === 1 ? '' : 's'} left out to fit the ${contextWindow}-token context window; the model is told so. The session is unchanged.`);
+        const { request, omitted, shrunk } = requestFor(charsPerToken);
+        if (omitted > 0 || shrunk > 0)
+          console.warn(`[webllm] to fit the ${contextWindow}-token context window: `
+            + [shrunk > 0 ? `${shrunk} earlier tool result${shrunk === 1 ? '' : 's'} shortened` : '',
+               omitted > 0 ? `${omitted} earliest turn${omitted === 1 ? '' : 's'} left out (the model is told)` : '']
+              .filter(Boolean).join('; ') + '. The session is unchanged.');
         const raw: string[] = [];
         let finish: string | undefined;
         let usage: Record<string, unknown> | undefined;
@@ -166,7 +170,7 @@ export class WebLLMAdapter implements ProviderAdapter {
           }
         } catch (e) {
           if (isWindowOverflow(e) && !emitted && attempt < OVERFLOW_ESTIMATES.length - 1 && !signal.aborted) {
-            forgetCut(messages);
+            forgetFit(messages);
             continue;
           }
           if (isWindowOverflow(e))
@@ -177,7 +181,7 @@ export class WebLLMAdapter implements ProviderAdapter {
           throw e;
         } finally {
           // What the model was sent and what it wrote, verbatim, at the level DevTools hides unless "Verbose".
-          console.debug('[webllm] exchange', { model, attempt, omitted, request, reply: raw.join(''), finish, usage });
+          console.debug('[webllm] exchange', { model, attempt, omitted, shrunk, request, reply: raw.join(''), finish, usage });
         }
 
         signal.throwIfAborted();
@@ -209,6 +213,7 @@ export class WebLLMAdapter implements ProviderAdapter {
     model:         string,
     contextWindow: number,
     cache:         CacheBackend | undefined,
+    withTools:     boolean,
     signal:        AbortSignal,
   ): AsyncGenerator<CompletionEvent, Slot> {
     const key = JSON.stringify([libraryUrl, model, contextWindow, cache]);
@@ -226,7 +231,7 @@ export class WebLLMAdapter implements ProviderAdapter {
     }
 
     // Before the slot changes hands: a request naming a model that cannot run must not unload the one that can.
-    await checkModel(await library(libraryUrl), model);
+    await checkModel(await library(libraryUrl), model, withTools);
     lastLoaded = { library: libraryUrl, cache };
     const reports: InitProgressReport[] = [];
     let wake = (): void => {};

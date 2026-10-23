@@ -143,6 +143,26 @@ export function chatModels(lib: WebLLM): ModelRecord[] {
   return lib.prebuiltAppConfig.model_list.filter(r => r.model_type !== 1);
 }
 
+// The families trained on the tool format this adapter speaks — `<tool_call>{"name": …, "arguments": …}`,
+// the Hermes format Qwen adopted — read off each family's published chat template (and, for Hermes-3, whose
+// template omits it, its model card). WebLLM records nothing of the kind: its `functionCallingModelIds` is
+// about its own `tools` path, which this adapter does not use. A model outside these can still be made to
+// emit a valid call by the constraint, but only once it writes `<tool_call>`, which one never trained on
+// the format rarely does — it answers in prose, or invents a format of its own.
+// Left out on purpose: Qwen3.5 (it calls tools in XML, `<function=…><parameter=…>`), Qwen2.5-Math (shares
+// Qwen2.5's template, but is a maths specialist), Qwen2 and the DeepSeek-R1 distills (no tool format), and
+// Llama 3.x and Mistral (formats of their own).
+const TOOL_FAMILIES = /^(Qwen3-|Qwen2\.5-(?!Math)|Hermes-2-Pro-|Hermes-2-Theta-|Hermes-3-)/;
+
+export function callsTools(modelId: string): boolean {
+  return TOOL_FAMILIES.test(modelId);
+}
+
+// The models worth offering to matbot, which always has tools to offer.
+export function toolModels(lib: WebLLM): ModelRecord[] {
+  return chatModels(lib).filter(r => callsTools(r.model_id));
+}
+
 // Ranked by shared name segments (family, size, quantisation), so `qwen3-4b` finds the Qwen3-4B builds and
 // a near-miss spelling still lands among its siblings.
 export function closestModels(id: string, records: readonly ModelRecord[], n = 5): string[] {
@@ -163,14 +183,22 @@ export function closestModels(id: string, records: readonly ModelRecord[], n = 5
 
 // Refused before anything downloads or loads: an unknown id would otherwise surface as a library error
 // after the worker started, and an f16 build on a GPU without f16 as a shader failure after gigabytes.
-export async function checkModel(lib: WebLLM, model: string): Promise<void> {
+// `withTools`: whether this call offers tools. Without them any chat model will do (`parameters.tools: false`).
+export async function checkModel(lib: WebLLM, model: string, withTools: boolean): Promise<void> {
   const models = chatModels(lib);
   const record = models.find(r => r.model_id === model);
   if (!record) {
-    const near = closestModels(model, models);
+    const near = closestModels(model, withTools ? toolModels(lib) : models);
     throw new Error(`webllm: "${model}" is not a model this WebLLM build can run.`
       + (near.length > 0 ? ` Closest: ${near.join(', ')}.` : '')
-      + ' The webllm_models tool lists them all.');
+      + ' The webllm_models tool lists them.');
+  }
+  if (withTools && !callsTools(model)) {
+    const near = closestModels(model, toolModels(lib), 3);
+    throw new Error(`webllm: "${model}" is not trained on the tool-call format this provider uses, so it would answer `
+      + 'instead of calling tools. Use a Qwen3, Qwen2.5 or Hermes model'
+      + (near.length > 0 ? ` (closest: ${near.join(', ')})` : '')
+      + ', or set `parameters.tools: false` to use it for plain chat.');
   }
   const have = await gpuFeatures();
   const missing = have ? (record.required_features ?? []).filter(f => !have.has(f)) : [];
