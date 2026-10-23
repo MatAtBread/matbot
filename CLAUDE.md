@@ -926,10 +926,18 @@ says it carries matbot's full access, and a package's also says it covers everyt
 
 **What this is not.** `vm` is not a capability boundary — a body runs in this context, and
 `(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
-`process`/`globalThis`/`global`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
+`process`/`globalThis`/`global`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
 node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
 documented API" to "know a published trick", and makes the intended path gated and revocable. A real
 boundary is another process.
+
+**The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
+and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of
+`import('node:buffer')` describing it as full access, which teaches a human to click "always". What it
+does expose is memory (`.buffer` of a small one is the shared allocation pool; `allocUnsafe` is not
+zeroed), equally reachable after the import. Each name still on the list reaches all the others —
+`process.getBuiltinModule`, `globalThis.process`, `Function('return process')()` — which is why there is
+no per-name setting to re-enable one: it would be a single switch spelled as a list.
 
 The withheld set and `ENV-GATE`'s list are **one list in two places**, and the checker's must track the
 runner's: a global that is shadowed but not rejected typechecks and fails at the first call, which is the

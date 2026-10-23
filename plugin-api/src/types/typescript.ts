@@ -139,7 +139,7 @@ export interface FunctionRunner {
   canonicalImport?(spec: string): string;
   /**
    * Identifiers a body does NOT have — anything this runner withholds, shadows or never binds (node's
-   * withholds `process`, `globalThis`, `Buffer`, `eval` and `Function`, and names the phantom
+   * withholds `process`, `globalThis`, `global`, `eval` and `Function`, and names the phantom
    * `require`/`module`/`__dirname` too, which never existed in a bare function expression but whose node
    * types would otherwise make one typecheck and then fail at the first call).
    *

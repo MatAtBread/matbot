@@ -23,8 +23,15 @@ const PENDING = 'matbot.functionRunner.pending';
  *
  * `console`, `fetch` and the timers are deliberately absent: a body legitimately logs, waits and makes
  * requests, and `fetch` means network access is NOT what this withholds.
+ *
+ * So is `Buffer`, which reaches no capability — it is a view over memory and does no IO — and is the one
+ * way to base64 bytes on node 24, which has no `Uint8Array.fromBase64`. Withholding it only put a prompt
+ * in front of `import('node:buffer')` that described it as carrying matbot's full access. What it does
+ * expose is memory: `Buffer.from('a').buffer` is the whole shared allocation pool and `allocUnsafe` is not
+ * zeroed, so a body can read leftover bytes of other recent allocations in this process. That was equally
+ * true after the import, and a body that can `fetch` is not being kept from data.
  */
-const WITHHELD = ['process', 'globalThis', 'global', 'Buffer', 'eval', 'Function'] as const;
+const WITHHELD = ['process', 'globalThis', 'global', 'eval', 'Function'] as const;
 const PHANTOM  = ['require', 'module', 'exports', '__dirname', '__filename'] as const;
 const SHADOWED = [...WITHHELD, ...PHANTOM] as const;
 

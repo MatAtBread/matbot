@@ -451,6 +451,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       prefixLines: prefix.split('\n').length - 1,
       ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
+      globalTypes: nodeGlobalTypes(),
       ...(restricted !== undefined ? { permittedImports: restricted } : {}),
       // ENV-GATE's list, from the runner that withholds them. Absent with no runner, which is correct:
       // nothing is withheld there either, so there is nothing to reject.
@@ -519,6 +520,15 @@ export function createToolTypesPlugin(): MatbotPluginSpec {
 
 export const plugin: MatbotPluginSpec = createToolTypesPlugin();
 
+
+// The node globals a body has that the standard library does not declare: `Buffer`, and its overloads in
+// buffer.buffer.d.ts. The rest of what a body is given (`fetch`, the timers, `console`, `TextEncoder`,
+// `atob`) is in lib.dom. Loaded whether or not the runner withholds it, since ENV-GATE rejects a withheld
+// name either way, and with no runner a body really has it.
+function nodeGlobalTypes(): string[] {
+  const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
+  return ['buffer.buffer.d.ts', 'buffer.d.ts'].map(f => join(nodeTypes, f)).filter(f => existsSync(f));
+}
 
 // Where @types/node declares a builtin. Most have a file of their own, but a few subpaths are declared
 // inside their parent's (`path/posix` in path.d.ts, `util/types` in util.d.ts, `test/reporters` in

@@ -240,6 +240,10 @@ export async function checkSnippetAgainst(opts: {
    *  permitted module, so a module outside the set does not resolve and is a compile error rather than
    *  something that typechecks and is refused at run time. Built by the caller, which knows the set. */
   importPaths?: Record<string, string[]>;
+  /** Declaration files for the globals a body HAS beyond the standard library, loaded as roots: on node,
+   *  `Buffer`. Module types arrive only through {@link importPaths}, which load on an import, so a body
+   *  using a node global without importing anything would otherwise fail on a name it really has. */
+  globalTypes?: readonly string[];
   /** The restriction itself, when there is one — `paths` cannot enforce it. Loading ONE builtin's
    *  declaration file pulls in the ambient `declare module 'node:…'` blocks of everything its own
    *  declarations reference (`node:fs` reaches `node:stream`, which reaches most of the rest), so a
@@ -262,6 +266,7 @@ export async function checkSnippetAgainst(opts: {
     virtualPath: `${opts.root}/__mb_toolcheck_${crypto.randomUUID()}.ts`,
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
     ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
+    ...(opts.globalTypes  !== undefined ? { globalTypes:  opts.globalTypes  } : {}),
     ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
     ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
   });
@@ -336,7 +341,7 @@ try {
     };
     const fe = host.fileExists.bind(host); host.fileExists = function (f) { return f === virtual || fe(f); };
     const rf = host.readFile.bind(host);   host.readFile   = function (f) { return f === virtual ? source : rf(f); };
-    program = ts.createProgram([virtual], options, host);
+    program = ts.createProgram([virtual].concat(workerData.globalTypes ?? []), options, host);
     const sf = program.getSourceFile(virtual);
     targets = sf
       ? [].concat(program.getSyntacticDiagnostics(sf)).concat(program.getSemanticDiagnostics(sf))
@@ -419,7 +424,6 @@ try {
     __dirname:  "'__dirname' is not defined in a function body, and neither is 'process' — a body computes and calls tools, it does not navigate the filesystem by hand. 'context.workdir' is the directory a call was given, when it was given one.",
     __filename: "'__filename' is not defined in a function body. There is no file — the body is compiled from source held in the session.",
     process:    "'process' is not defined in a function body — the runner withholds it, so there is no 'process.env', 'process.cwd()' or 'process.getBuiltinModule()'. A module comes from a gated 'await import('node:…')', and 'context.workdir' is the directory a call was given.",
-    Buffer:     "'Buffer' is not defined in a function body — the runner withholds it. Use a 'Uint8Array', or import it where the gate can be asked: 'const { Buffer } = await import('node:buffer')'.",
     globalThis: "'globalThis' is not defined in a function body — the runner withholds it, so a host global cannot be reached by name. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
     global:     "'global' is not defined in a function body — the runner withholds it, and it is node's older alias for 'globalThis', which is withheld too. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
     eval:       "'eval' is not defined in a function body — the runner withholds it. There is nothing to evaluate at run time: write the code, or call another tool with 'await tool.<name>(…)'.",

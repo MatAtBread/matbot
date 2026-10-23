@@ -285,7 +285,7 @@ test('a function NAMED execute does not share a one-off body\'s standing answers
 test('the withheld globals are undefined, and a real import() is inert', async () => {
   const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
   const typeofs = runner.compile(`(async function () { return [typeof process, typeof globalThis, typeof Buffer, typeof require, typeof eval].join(','); })`);
-  assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined,undefined');
+  assert.equal(await typeofs(noLoader), 'undefined,undefined,function,undefined,undefined', 'Buffer is memory, not a capability');
   assert.deepEqual([...runner.withheldGlobals ?? []].slice(0, 2), ['process', 'globalThis'],
                    'and the list is published, so a checker need not keep its own');
 
@@ -323,7 +323,7 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
   assert.deepEqual([...(await unbounded.settings!()).permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
 
-  const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof Buffer, typeof eval, typeof require].join(','); })`);
+  const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof globalThis, typeof eval, typeof require].join(','); })`);
   assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
 
   const escaped = unbounded.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
