@@ -13,6 +13,15 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`tool-router`** — the tool window is set in the plugin's settings instead of constants, so a small
+  model can be given fewer tools at once: `targetWindow` (default 20), `cullTrigger` and `cullTarget`
+  (default from `targetWindow`, 100% and 60%), and `eagerFill` (default false). Lowering `targetWindow`
+  alone shrinks the whole window. Settings are read on each call, so a change applies from the next one.
+  - The new `tool_router_config` tool (`get`/`set`/`clear`) changes them where `default_settings:` cannot
+    be authored, such as the browser. `set` refuses a non-positive or non-integer value, and a combination
+    that defeats itself once stored values are included (`cullTrigger` below `targetWindow`, `cullTarget`
+    above `cullTrigger`), and then writes nothing. It is left out of `tool_search`'s catalogue line and never
+    pinned, but a search finds it.
 - **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
   capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
   one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
