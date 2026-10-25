@@ -143,7 +143,9 @@ export class WebLLMAdapter implements ProviderAdapter {
         let finish: string | undefined;
         let usage: Record<string, unknown> | undefined;
         let emitted = false;
-        const parser = new ReplyParser();
+        // `lenientCalls` reads a call the model wrote without its `<tool_call>` tags as a call. Off
+        // only where a model is found to write JSON examples as prose (see ReplyParser).
+        const parser = new ReplyParser({ bareCalls: params['lenientCalls'] !== false });
         let reasoning = '';
         const events = function* (pieces: Piece[]): Generator<CompletionEvent> {
           for (const p of pieces) {
@@ -155,6 +157,16 @@ export class WebLLMAdapter implements ProviderAdapter {
               case 'cut-call':
                 yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: {},
                   truncated: { bytes: p.bytes, ...(finish ? { stopReason: finish } : {}) } };
+                break;
+              case 'unparsed-call':
+                // The tool is deliberately NOT called. Running it with `{}` in place of arguments it never
+                // had turns a formatting slip into a real side effect — and that is what a call the model
+                // got wrong used to look like from outside: a tool that ran on nothing and returned its
+                // own error, or a dump of its defaults, which then read as the model's result.
+                // What the model actually wrote is shown instead: the reader sees the JSON, and the model
+                // meets its own attempt in history and can correct it on the next round.
+                console.warn('[webllm] unreadable tool call — not run', { name: p.name, body: p.body, finish });
+                yield { type: 'text-delta', delta: p.body };
                 break;
             }
           }
