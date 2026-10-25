@@ -26,6 +26,19 @@ churn and less likely to affect a consumer who doesn't use them.
   capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
   one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
   as `checkedElsewhere` once, since the withheld set is part of the environment its verdict names.
+- **`chatjimmy`** — tool calling, done in the prompt since the endpoint has none. On by default;
+  `parameters.tools: false` turns it off. Tools are described in the system prompt in the `<tools>` / `<tool_call>` format, calls are
+  parsed out of the reply, and results are replayed as `<tool_response>` turns saying what to do with
+  them, restating the user's question. Only the first `maxCalls` calls of a reply are kept (default 1),
+  because the model writes on past a call. A call whose arguments are not an object is shown, not run. A
+  reply that ends at the token limit is reported as truncated.
+  - Every request is fitted to the endpoint's ~6k-token window (`contextWindow`). It shortens old tool
+    results and then tool descriptions, leaves out the earliest turns, and then leaves out tools, keeping
+    the ones the latest tool result names. Past the window, the endpoint returns an empty response, and
+    that is now reported as an error rather than passed on as an empty turn. This applies with
+    `tools: false` too.
+  - Sampling defaults to greedy (`topK: 1`) when tools are offered; a profile's own `topK` still wins.
+  - `debug: true` logs each exchange whole.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
   - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
