@@ -8,6 +8,14 @@ import { DEFAULT_CONTEXT, REPLY_RESERVE, fitToWindow, size } from './window.js';
 const DEFAULT_ENDPOINT = 'https://chatjimmy.ai/api/chat';
 const DEFAULT_MODEL    = 'llama3.1-8B';
 
+// The endpoint sends no CORS headers, so a page's every call fails as a bare TypeError ("Failed to fetch")
+// that names no cause. A CORS-unblocking extension is the only way through from a browser.
+function explained(e: unknown): unknown {
+  return e instanceof TypeError && 'document' in globalThis
+    ? new Error(`ChatJimmy: ${e.message}. The endpoint sends no CORS headers, so a browser blocks it unless a CORS-unblocking extension is enabled for this page.`, { cause: e })
+    : e;
+}
+
 interface ChatJimmyStats {
   decode_rate:    number;
   decode_tokens:  number;
@@ -80,13 +88,16 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'content-type': 'application/json',
+        // The endpoint parses JSON whatever the type says, and text/plain keeps this a CORS "simple" request:
+        // no preflight, so a CORS-unblocking extension need only add a header to the response. JSON forced a
+        // preflight, which the endpoint answers without CORS headers and extensions often fail to patch.
+        'content-type': 'text/plain;charset=UTF-8',
         'origin':       'https://chatjimmy.ai',
         'referer':      'https://chatjimmy.ai/',
       },
       body,
       signal,
-    });
+    }).catch((e: unknown) => { throw explained(e); });
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
@@ -147,7 +158,8 @@ export class ChatJimmyAdapter implements ProviderAdapter {
         ? { status: 'ok' }
         : { status: 'degraded', reason: `models endpoint returned ${res.status}` };
     } catch (e) {
-      return { status: 'down', reason: e instanceof Error ? e.message : String(e) };
+      const err = explained(e);
+      return { status: 'down', reason: err instanceof Error ? err.message : String(err) };
     }
   }
 }

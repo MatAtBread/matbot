@@ -19,6 +19,17 @@ providers:
 
 Both `endpoint` and `model` default to the values above, and no credentials are needed.
 
+## In a browser
+
+The web bundle's setup wizard offers it, but the endpoint sends no CORS headers, so a browser blocks
+every call unless a CORS-unblocking extension is enabled for the page. Without one, a turn fails with an
+error saying so rather than a bare "Failed to fetch".
+
+[CORS Pilot](https://chromewebstore.google.com/detail/cors-pilot/eogaenkbjkndkjpadmnffhcmaplhfenl) is
+known to work. "CORS Unblock" was tried and left the response without `Access-Control-Allow-Origin`.
+The request is sent as `text/plain`, so there is no preflight, and an extension only has to add that one
+response header.
+
 ## Tool calling
 
 The endpoint has no tool support, so the adapter does it in the prompt: the tools are listed in the system

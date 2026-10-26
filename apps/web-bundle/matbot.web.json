@@ -64,6 +64,12 @@
       "selfContained": true
     },
     {
+      "label": "ChatJimmy — very fast hosted Llama 3.1 8B, no API key (needs a CORS-unblocking browser extension)",
+      "module": "plugins/providers/chatjimmy",
+      "modelHint": "llama3.1-8B",
+      "selfContained": true
+    },
+    {
       "label": "WebLLM — open models on your GPU, in the page (Qwen3-4B by default, ~3.4 GB first download; no endpoint or API key)",
       "module": "plugins/providers/webllm",
       "modelHint": "Qwen3-4B-q4f16_1-MLC",

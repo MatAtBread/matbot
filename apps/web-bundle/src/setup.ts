@@ -2,6 +2,7 @@
 // google-drive synced provider tool); imported for local use and re-exported so this module's importers
 // are unchanged.
 import type { AvailableProvider, ProviderDraft } from '@matatbread/matbot-browser';
+import type { MatbotPluginSpec, ProviderAdapter, ProviderConfig } from '@matatbread/matbot-plugin-api';
 export type { AvailableProvider, ProviderDraft };
 
 const CSS = `
@@ -27,6 +28,23 @@ function ensureStyles(): void {
   s.textContent = CSS;
   document.head.appendChild(s);
   stylesInjected = true;
+}
+
+// Imported by package name, which resolves through the bundle's import map as the boot load will, so this
+// is the same module instance the provider later runs in. Only for a self-contained adapter: an endpoint
+// adapter could list nothing before the URL and key it would list with have been typed.
+const adapters = new Map<string, Promise<ProviderAdapter | undefined>>();
+function adapterFor(a: AvailableProvider, config: ProviderConfig): Promise<ProviderAdapter | undefined> {
+  let p = adapters.get(a.module);
+  if (!p) {
+    p = (import(/* @vite-ignore */ a.module) as Promise<Record<string, unknown>>).then(mod => {
+      const spec = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined;
+      return spec?.provider?.(config);
+    });
+    p.catch(() => adapters.delete(a.module));
+    adapters.set(a.module, p);
+  }
+  return p;
 }
 
 function field(labelText: string, input: HTMLElement): HTMLLabelElement {
@@ -70,21 +88,65 @@ export function runProviderSetup(
 
     const endpoint = document.createElement('input');
     const model    = document.createElement('input');
+    // Replaces the text input when the adapter can list its models (ProviderAdapter.models).
+    const modelList = document.createElement('select');
+    modelList.hidden = true;
     const apiKey   = document.createElement('input');
     apiKey.type = 'password';
     apiKey.placeholder = 'sk-…';
 
     const endpointField = field('Endpoint URL', endpoint);
     const modelField    = field('Model', model);
+    modelField.appendChild(modelList);
     const apiKeyField   = field('API key', apiKey);
 
+    const showModels = (ids: string[] | undefined, hint: string | undefined): void => {
+      modelList.replaceChildren(...(ids ?? ['Loading models…']).map(id => {
+        const o = document.createElement('option');
+        o.value = o.textContent = id;
+        return o;
+      }));
+      modelList.disabled = ids === undefined;
+      if (ids !== undefined && hint !== undefined && ids.includes(hint)) modelList.value = hint;
+      model.hidden = true;
+      modelList.hidden = false;
+      modelField.style.display = '';
+    };
+    const showModelInput = (): void => {
+      model.hidden = false;
+      modelList.hidden = true;
+      modelField.style.display = '';
+    };
+
+    let shown = 0;
     const applyHints = (): void => {
       const a = available[Number(type.value)];
-      // A self-contained adapter (e.g. a local demo LLM) needs no endpoint/model/key — hide them.
+      // A self-contained adapter (e.g. a local demo LLM) needs no endpoint/key — hide them, and the model
+      // too unless the adapter can list the models it runs.
       const sc = !!a?.selfContained;
       for (const f of [endpointField, modelField, apiKeyField]) f.style.display = sc ? 'none' : '';
       endpoint.placeholder = a?.endpointHint ?? 'https://…';
       model.placeholder    = a?.modelHint ?? 'model-name';
+      model.hidden     = false;
+      modelList.hidden = true;
+      if (!a || !sc) return;
+
+      const asked  = ++shown;
+      const config: ProviderConfig = { name: name.value.trim(), module: a.module, model: a.modelHint ?? '' };
+      void adapterFor(a, config).then(async adapter => {
+        if (asked !== shown || !adapter?.models) return;
+        showModels(undefined, a.modelHint);
+        try {
+          const ids = await adapter.models(config);
+          if (asked !== shown) return;
+          // By name, numerically, so a family's sizes sit together in order (Qwen3-0.6B … Qwen3-14B).
+          const byName = [...ids].sort(new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare);
+          if (byName.length > 0) showModels(byName, a.modelHint); else showModelInput();
+        } catch (e) {
+          console.warn(`[matbot] could not list the models of ${a.label}:`, e);
+          if (asked === shown) showModelInput();
+        }
+      }, (e: unknown) => console.warn(`[matbot] could not load ${a.module}:`, e));
     };
     type.addEventListener('change', applyHints);
     applyHints();
@@ -101,11 +163,15 @@ export function runProviderSetup(
     const submit = (): void => {
       const a = available[Number(type.value)];
       const sc = !!a?.selfContained;
+      // A list still loading picks nothing, so a self-contained adapter falls back to its hint.
+      const picked = modelField.style.display === 'none' ? ''
+        : !modelList.hidden ? (modelList.disabled ? '' : modelList.value)
+        : model.value.trim();
       const draft: ProviderDraft = {
         name:     name.value.trim(),
         module:   a?.module ?? '',
         endpoint: sc ? '' : endpoint.value.trim(),
-        model:    sc ? (a?.modelHint ?? a?.label ?? '') : model.value.trim(),
+        model:    sc ? (picked || a?.modelHint || a?.label || '') : picked,
         apiKey:   sc ? '' : apiKey.value.trim(),
       };
       if (!draft.name)   { err.textContent = 'A name is required.';     return; }

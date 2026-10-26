@@ -1,6 +1,6 @@
 import type { Tool, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
 import { resident } from './adapter.js';
-import { appConfig, closestModels, gpuFeatures, library, toolModels } from './webllm.js';
+import { appConfig, closestModels, gpuFeatures, library, offeredModels } from './webllm.js';
 
 export interface WebLLMModelSummary {
   id:             string;
@@ -77,8 +77,7 @@ export const webllmModelsTool: Tool<ToolResultOf<'webllm_models'>> = {
       const now    = resident();
       const lib    = await library(now.library);
       const config = appConfig(lib, now.cache);
-      const models = [...toolModels(lib)].sort((a, b) =>
-        (a.vram_required_MB ?? Infinity) - (b.vram_required_MB ?? Infinity) || a.model_id.localeCompare(b.model_id));
+      const models = offeredModels(lib);
       const total  = models.length;
 
       switch (input.action) {

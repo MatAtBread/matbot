@@ -264,4 +264,10 @@ export interface ProviderAdapter {
     signal:   AbortSignal
   ): AsyncIterable<CompletionEvent>;
   health(): Promise<HealthStatus>;
+  /**
+   * The model ids this adapter can run under `config`, for a person choosing one (the browser setup
+   * wizard). Absent where the adapter cannot enumerate them, and a rejection means the same: the caller
+   * asks for a model name instead.
+   */
+  models?(config: ProviderConfig): Promise<string[]>;
 }

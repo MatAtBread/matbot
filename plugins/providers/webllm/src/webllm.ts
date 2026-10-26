@@ -163,6 +163,12 @@ export function toolModels(lib: WebLLM): ModelRecord[] {
   return chatModels(lib).filter(r => callsTools(r.model_id));
 }
 
+// Smallest first: on a GPU in a page, memory decides what runs at all.
+export function offeredModels(lib: WebLLM): ModelRecord[] {
+  return toolModels(lib).sort((a, b) =>
+    (a.vram_required_MB ?? Infinity) - (b.vram_required_MB ?? Infinity) || a.model_id.localeCompare(b.model_id));
+}
+
 // Ranked by shared name segments (family, size, quantisation), so `qwen3-4b` finds the Qwen3-4B builds and
 // a near-miss spelling still lands among its siblings.
 export function closestModels(id: string, records: readonly ModelRecord[], n = 5): string[] {

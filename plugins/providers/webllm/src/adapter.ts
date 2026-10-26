@@ -1,7 +1,7 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
 import { ReplyParser, toChatMessages, toolCallFormat, type Piece } from './format.js';
 import { CHARS_PER_TOKEN, fitToWindow, forgetFit, isWindowOverflow, omittedNote } from './window.js';
-import { DEFAULT_LIBRARY, cacheBackend, checkModel, library, loadEngine, type CacheBackend, type ChatRequest, type InitProgressReport, type Loaded } from './webllm.js';
+import { DEFAULT_LIBRARY, cacheBackend, checkModel, library, loadEngine, offeredModels, type CacheBackend, type ChatRequest, type InitProgressReport, type Loaded } from './webllm.js';
 
 export const DEFAULT_MODEL = 'Qwen3-4B-q4f16_1-MLC';
 // WebLLM's prebuilt Qwen3 records cap the window at 4096, which matbot's system context and a tool list
@@ -293,6 +293,12 @@ export class WebLLMAdapter implements ProviderAdapter {
     } catch (e) {
       return { status: 'down', reason: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  async models(config: ProviderConfig): Promise<string[]> {
+    const params = config.parameters ?? {};
+    const lib    = await library(typeof params['library'] === 'string' ? params['library'] : DEFAULT_LIBRARY);
+    return offeredModels(lib).map(r => r.model_id);
   }
 }
 

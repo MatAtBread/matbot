@@ -28,6 +28,9 @@ churn and less likely to affect a consumer who doesn't use them.
   beside the `validate` hooks, so a validator registered there keeps working until then. Removing it in
   0.5.0 is a breaking change: a validator still registered under the key will silently stop being consulted.
   Register a `validate` hook instead.
+- **`ProviderAdapter.models?(config)`** — the model ids an adapter can run, for a person choosing one. The
+  browser setup wizard offers them as a drop-down for a self-contained adapter; absent, or rejecting, it
+  asks for a model name as before.
 
 ### Bug fixes
 
@@ -98,6 +101,9 @@ churn and less likely to affect a consumer who doesn't use them.
   browser-only tools on node (`webllm_models`), nor google-drive's `managedBy` on `plugin`'s result (#110).
   `collectToolTypeRoots`, `buildToolTypesData` and `buildMatbotToolsDts` take a trailing `runtime`
   (default `'node'`), and the web bundle's contract bake passes `'browser'`.
+- **`chatjimmy`** — runs in the browser too, and the web bundle's setup wizard offers it. The endpoint sends
+  no CORS headers, so it needs a CORS-unblocking browser extension, which the wizard says. Without one, a
+  turn fails with an error that says so, not a bare "Failed to fetch".
 - **`chatjimmy`** — tool calling, done in the prompt since the endpoint has none. On by default;
   `parameters.tools: false` turns it off. Tools are described in the system prompt in the `<tools>` / `<tool_call>` format, calls are
   parsed out of the reply, and results are replayed as `<tool_response>` turns saying what to do with
@@ -132,7 +138,9 @@ churn and less likely to affect a consumer who doesn't use them.
     never touched, the session is unchanged, and the model is told. Both decisions stay put across turns, so
     WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill is re-fitted with a
     stricter estimate.
-  - Offered by the web bundle's setup wizard.
+  - Offered by the web bundle's setup wizard, which asks which model to use from a drop-down of the same
+    models `webllm_models` lists (Qwen3-4B preselected). If the list cannot be fetched, the wizard shows a
+    text field instead, and leaving it empty uses Qwen3-4B.
 
 ## 0.4.20
 
