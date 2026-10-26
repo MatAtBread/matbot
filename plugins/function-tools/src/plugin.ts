@@ -3,7 +3,7 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
+import { buildAsyncFn, buildBodyFn, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
@@ -283,14 +283,16 @@ class FunctionStore {
   }
 
   /** Register a tool for every stored function, dropping any this plugin registered that is no longer
-   *  there. Idempotent, so it serves both boot and a StorageBackend swap (which replaces the whole set). */
+   *  there. Idempotent, so it serves both boot and a StorageBackend swap (which replaces the whole set).
+   *  Each body compiles at its first call ({@link onFirstCall}): it compiled when it was defined, so all
+   *  a reload needs up front is its signature. */
   async reload(): Promise<void> {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
       const holder = this.holderOf(doc.id);
       if (holder !== undefined) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": the name is held by a tool from "${holder}"`); continue; }
-      try { this.commit(await this.build(recordOf(doc))); seen.add(doc.id); }
+      try { this.commit(await this.build(recordOf(doc), true)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of this.registered) if (!seen.has(name) && this.owns(name)) this.machine.tools.remove(name);
@@ -423,9 +425,12 @@ class FunctionStore {
     if (this.holderOf(name) !== undefined) throw new Error(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
   }
 
-  private async build(rec: FunctionRecord): Promise<Tool> {
-    const sig = parseSignature(rec.definition);
-    const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
+  private async build(rec: FunctionRecord, deferCompile = false): Promise<Tool> {
+    const sig   = parseSignature(rec.definition);
+    const names = sig.params.map(p => p.name);
+    const fn    = deferCompile
+      ? onFirstCall(() => buildAsyncFn(this.machine, rec.definition, names))
+      : await buildAsyncFn(this.machine, rec.definition, names);
     return definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
   }
 
@@ -455,7 +460,7 @@ class PackageStore {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
-      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition)); seen.add(doc.id); }
+      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition, true)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping package "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
@@ -567,8 +572,10 @@ class PackageStore {
 
   /** Compile, then check every exported name, registering nothing — so a failure at either step, or a
    *  refused write after it, leaves the previous definition (or nothing) registered. */
-  private async prepare(name: string, parsed: ParsedPackage, definition: string): Promise<Tool[]> {
-    const pkg  = await buildPackageFn(this.machine, definition, parsed);
+  private async prepare(name: string, parsed: ParsedPackage, definition: string, deferCompile = false): Promise<Tool[]> {
+    const pkg  = deferCompile
+      ? onFirstCall(() => buildPackageFn(this.machine, definition, parsed))
+      : await buildPackageFn(this.machine, definition, parsed);
     const mine = this.owned.get(name);
     for (const e of parsed.exports) {
       if (foreignHolder(this.machine, mine, e.toolName) !== undefined) {

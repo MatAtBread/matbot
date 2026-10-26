@@ -26,6 +26,12 @@ churn and less likely to affect a consumer who doesn't use them.
     tool in sequence — on a remote `StorageBackend` that was a network round trip per tool for the whole
     boot (#109). Tools registered while a batch is in flight form the next one. If the query fails, it
     falls back to per-key `get`, never to treating every tool as uncached.
+- **`function-tools`** — stored functions and packages are no longer compiled at boot (or on a
+  `StorageBackend` swap). Each one compiles at its first call, so startup costs only parsing the
+  signatures: 200 large functions took 2.4s with `function-runner-node` and now take 50ms, and a single
+  function took ~0.2s, most of it the runner's first load of TypeScript. A stored definition that no
+  longer compiles is now registered and reports the error when called, where boot used to skip it with a
+  warning. `define` and `package` still compile straight away, so a bad new definition is still refused.
 - **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
   capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
   one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed

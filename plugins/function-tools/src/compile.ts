@@ -46,6 +46,18 @@ export async function buildAsyncFn(host: CompileHost, definition: string, paramN
 }
 
 /**
+ * Defer a compile to the first call: what a reload hands the registry for a definition that was already
+ * compiled when it was defined. Boot cost was all compile — the strip, the runner's parse, and the
+ * runner's first `require('typescript')`, measured at ~0.2s for one stored function and ~2.5s for 200
+ * large ones — for functions most turns never call. A failed build is not kept, so a later call (under a
+ * runner registered since, say) tries again.
+ */
+export function onFirstCall<A extends unknown[]>(build: () => Promise<(...args: A) => Promise<unknown>>): (...args: A) => Promise<unknown> {
+  let built: Promise<(...args: A) => Promise<unknown>> | undefined;
+  return (...args) => (built ??= build().catch((e: unknown) => { built = undefined; throw e; })).then(fn => fn(...args));
+}
+
+/**
  * Compile `body` under the host's current {@link FunctionRunner}, and again at a call that finds a different
  * one. A runner's bound lives in the function it returns, so a compiled body cannot be handed to another;
  * and a defined function is compiled once and then called for as long as it stays registered, across any
