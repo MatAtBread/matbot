@@ -1,6 +1,7 @@
 import type {
   Hook, HookPoint, HookRegistrar, Message, MessageContent, Session, DeferredScreen, TurnToolSource,
   ScreenContext, ContributeContext, ToolCallContext, ToolCallResult, ToolResultContext, FollowupContext,
+  ValidateContext, ToolInputError,
 } from './types.js';
 import { foldOntoUserTurn, createMessage } from './session.js';
 import { withUsageSite } from './usage-context.js';
@@ -190,6 +191,24 @@ export class HookRegistry implements HookRegistrar {
       if (r && (r.rejectTool || r.abort)) return r;
     }
     return {};
+  }
+
+  // validate asks EVERY hook — no short-circuit — so neither the verdict nor the message depends on which
+  // validator happened to load first: refused if any refuses, with every refusal's errors (a field two
+  // validators both reject is said once). `[]` from any is "valid"; `undefined` from all is no opinion.
+  async runValidate(ctx: Omit<ValidateContext, 'removeHook'>): Promise<ToolInputError[] | undefined> {
+    let opinion: ToolInputError[] | undefined;
+    const seen = new Set<string>();
+    for (const hook of this.on('validate')) {
+      const r = await this.invoke(hook, ctx.signal, () => hook.handler({ ...ctx, removeHook: () => this.removeOne('validate', hook) }));
+      if (!r) continue;
+      opinion ??= [];
+      for (const e of r) {
+        const key = `${e.path}\0${e.message}`;
+        if (!seen.has(key)) { seen.add(key); opinion.push(e); }
+      }
+    }
+    return opinion;
   }
 
   // toolresult folds the tool result through each hook — a transform pipeline (redaction, truncation);

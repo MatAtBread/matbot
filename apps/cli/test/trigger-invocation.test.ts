@@ -26,16 +26,16 @@ function memoryStore(): Store<Trigger> {
   } as unknown as Store<Trigger>;
 }
 
-// A stand-in for a registered ToolCallValidator: `noargs` takes an empty object, nothing else.
+// A stand-in for the registry's `validate`: `noargs` takes an empty object, nothing else.
 function machine(seen: unknown[], events: ToolEvent[] = [{ type: 'result', value: 'ok' }]): MatbotMachine {
   const noargs: Tool = {
     name: 'noargs', description: '', inputSchema: { type: 'object' },
     executor: { async *execute(input) { seen.push(input); yield* events; } },
   };
   return {
-    tools: { resolve: (name: string) => name === 'noargs' ? noargs : null },
-    ToolCallValidator: {
-      validateToolCall: async (_tool: string, params: unknown) =>
+    tools: {
+      resolve: (name: string) => name === 'noargs' ? noargs : null,
+      validate: async (_tool: string, params: unknown) =>
         params !== null && typeof params === 'object' && Object.keys(params).length === 0
           ? []
           : [{ path: '.', message: 'expected an empty object' }],

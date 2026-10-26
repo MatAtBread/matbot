@@ -23,8 +23,8 @@ export {
  * type formation and analysis — it derives the dts, the wire contracts and the JSON Schemas from each
  * tool's `ToolContract`, and emits a validator from the checker's resolved params type — but it is not
  * itself a validator and registers no validator service. Enforcement is a consumer's:
- * `@matatbread/matbot-tool-ts-validation` calls this, applies a policy, and registers the
- * `ToolCallValidator` that core consults at the executor.
+ * `@matatbread/matbot-tool-ts-validation` calls this, applies a policy, and registers the `validate`
+ * hook that core dispatches at the executor.
  *
  * That separation is the point. A code generator (`skills_compiler`, `function-tools`) loads this package
  * for `dts()`/`check()` alone; if loading it also switched input enforcement on, adopting typed codegen

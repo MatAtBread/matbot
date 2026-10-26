@@ -27,23 +27,17 @@ export function invocationParams(invoke: TriggerInvoke): unknown {
   return invoke.params ?? {};
 }
 
-// core declares `ToolCallValidator` on MatbotServices, and triggers does not depend on core, so the key
-// is read structurally. Same shape as core's `ToolInputValidator`.
-interface InvocationValidator {
-  validateToolCall(tool: string, parameters: unknown): Promise<{ path: string; message: string }[] | undefined>;
-}
-
 /**
- * Check an invocation against the tool's declared input BEFORE it is stored, with the same validator the
- * executor applies when the trigger fires — so a trigger that could never run is refused while its author
- * is present to fix it, rather than failing silently on some later turn. Returns the rejection as text,
- * or `undefined` to accept. A tool that is not registered, or no validator, is accepted: a trigger
- * naming an absent tool fails soft by design, and nothing here can check what nothing declares.
+ * Check an invocation against the tool's declared input BEFORE it is stored, with the same validators the
+ * executor applies when the trigger fires (`tools.validate`) — so a trigger that could never run is
+ * refused while its author is present to fix it, rather than failing silently on some later turn. Returns
+ * the rejection as text, or `undefined` to accept. A tool that is not registered, or no validator, is
+ * accepted: a trigger naming an absent tool fails soft by design, and nothing here can check what nothing
+ * declares.
  */
 export async function checkInvocation(services: MatbotMachine, invoke: TriggerInvoke): Promise<string | undefined> {
   if (services.tools.resolve(invoke.tool) === null) return undefined;
-  const validator = (services as MatbotMachine & { ToolCallValidator?: InvocationValidator }).ToolCallValidator;
-  const errs = await validator?.validateToolCall(invoke.tool, invocationParams(invoke));
+  const errs = await services.tools.validate?.(invoke.tool, invocationParams(invoke));
   if (errs === undefined || errs.length === 0) return undefined;
   return `params do not match tool "${invoke.tool}": ${errs.map(e => `${e.path}: ${e.message}`).join('; ')}`;
 }

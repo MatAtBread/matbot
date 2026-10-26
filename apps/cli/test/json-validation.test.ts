@@ -1,18 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { plugin } from '../../../plugins/json-validation/src/index.ts';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
-import type { JSONSchema } from '@matatbread/matbot-plugin-api';
+import type { JSONSchema, Hook, ToolInputError } from '@matatbread/matbot-plugin-api';
 
-async function validatorFor(inputSchema: JSONSchema): Promise<ToolInputValidator> {
-  let registered: ToolInputValidator | undefined;
+type Validate = Extract<Hook, { on: 'validate' }>;
+
+async function validatorFor(inputSchema: JSONSchema): Promise<{ validateToolCall(tool: string, parameters: unknown): Promise<ToolInputError[] | undefined> }> {
+  let registered: Validate | undefined;
   const services = {
     tools: { resolve: () => ({ inputSchema }) },
-    register: async (_key: string, v: ToolInputValidator) => { registered = v; },
+    hooks: { register: (h: Hook) => { if (h.on === 'validate') registered = h; } },
   };
-  await plugin.setup(services as never);
+  await plugin.setup!(services as never);
   assert.ok(registered);
-  return registered;
+  const hook = registered;
+  return {
+    validateToolCall: async (tool, parameters) =>
+      (await hook.handler({ tool, parameters, signal: new AbortController().signal, removeHook() {} })) ?? undefined,
+  };
 }
 
 test('an undeclared key is named first when the call is refused anyway', async () => {

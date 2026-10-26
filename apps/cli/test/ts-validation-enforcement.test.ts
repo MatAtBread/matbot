@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
+import type { MatbotMachine, Hook } from '@matatbread/matbot-plugin-api';
 import { ItemChangeKind, runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
 
@@ -13,9 +12,9 @@ import { plugin as tsValidation } from '@matatbread/matbot-tool-ts-validation';
 //   tool-types      does the type formation and analysis, and SUPPLIES a generated validator per tool
 //                   (`toolValidators()`); it registers no validator service, so a code generator loading
 //                   it for `dts()` alone never silently starts having its tool calls rejected.
-//   ts-validation   CONSUMES that, applies an enforcement policy, and registers core's
-//                   `ToolCallValidator` — the key core consults at the executor, so the model's path,
-//                   HTTP tool routes and `invokeTool` are all covered by one validator.
+//   ts-validation   CONSUMES that, applies an enforcement policy, and registers a `validate` hook —
+//                   which core dispatches at the executor, so the model's path, HTTP tool routes and
+//                   `invokeTool` are all covered.
 //
 // What is worth pinning here is the policy, since every one of its states is a way to get enforcement
 // wrong; the generation itself is pinned in tool-contract-validators.test.ts.
@@ -26,7 +25,6 @@ function harness(opts: {
   enforce?:   string;
   entry?:     ToolValidator;          // absent ⇒ no contract for this tool
   supplier?:  false;                  // tool-types not loaded
-  previous?:  ToolInputValidator;     // a validator this one displaces
 }): {
   setup(): Promise<void>;
   validate(input: unknown): Promise<Errs | undefined>;
@@ -43,12 +41,11 @@ function harness(opts: {
   // write announces itself, so a test needs to publish one.
   const sinks: ((n: unknown) => void)[] = [];
   if (opts.enforce !== undefined) store.set('enforce', opts.enforce);
-  let registered: ToolInputValidator | undefined;
+  let registered: Extract<Hook, { on: 'validate' }> | undefined;
 
   // A real registry, so a service the plugin registers itself is observable here — which is how the
   // self-install path is tested rather than assumed.
   const reg: Record<string, unknown> = {
-    ...(opts.previous !== undefined ? { ToolCallValidator: opts.previous } : {}),
     ...(opts.supplier === false ? {} : {
       // Only `toolValidators` matters: ts-validation duck-types the supply off ToolTypeIndex, so the
       // rest of that service (dts/check/wireContracts) is beside the point here.
@@ -65,13 +62,10 @@ function harness(opts: {
       get: async <T,>(k: string): Promise<T | undefined> => { reads++; return store.get(k) as T | undefined; },
       set: async () => {}, delete: async () => {},
     }),
-    register: async (key: string, value: unknown) => {
-      reg[key] = value;
-      if (key === 'ToolCallValidator') registered = value as ToolInputValidator;
-    },
+    register: async (key: string, value: unknown) => { reg[key] = value; },
     unregister: (key: string) => { delete reg[key]; },
+    hooks: { register: (h: Hook) => { if (h.on === 'validate') registered = h; }, removeByPlugin() {} },
     get ToolTypeIndex() { return reg['ToolTypeIndex']; },
-    get ToolCallValidator() { return opts.previous; },
     // Enough machine for a REAL ToolTypeIndex to be constructed: it subscribes to tool-registry changes
     // to know when its dts is stale, and roots its scan at the config's directory. `configPath` is left
     // undefined so the scan roots at '.', which keeps these tests off the monorepo walk — the generated
@@ -101,7 +95,9 @@ function harness(opts: {
     async validate(input: unknown) {
       if (!registered) await tsValidation.setup?.(services);
       console.warn = (...a: unknown[]) => { warnings.push(a.map(String).join(' ')); };
-      try { return await registered!.validateToolCall('session_action', input); }
+      try {
+        return (await registered!.handler({ tool: 'session_action', parameters: input, signal: new AbortController().signal, removeHook() {} })) ?? undefined;
+      }
       finally { console.warn = original; }
     },
   };
@@ -134,7 +130,7 @@ test("'warn' reports clean so the call proceeds, but says what it would have don
   assert.ok(h.warnings.some(w => w.includes('Would reject')), 'the near-miss must be audible');
 });
 
-test("'off' hands straight over, and does not claim to have checked", async () => {
+test("'off' is no opinion, and does not claim to have checked", async () => {
   const h = harness({ enforce: 'off', entry: FAILS });
   assert.equal(await h.validate({ action: 'rename' }), undefined, 'off must be NO OPINION, not "valid"');
   assert.deepEqual(h.warnings, []);
@@ -156,23 +152,18 @@ test('an unconstrained field is announced once, and does not stop validation', a
   assert.ok(h.warnings.some(w => w.includes('unconstrained field')), 'a caveat must be visible');
 });
 
-test('no typed contract defers to the validator this one displaced', async () => {
-  // The typed path has nothing for this tool, so the schema validator it loaded over must still get its
-  // say — otherwise adopting typed validation silently switches off schema validation.
-  const schemaSaid = [{ path: '.x', message: 'expected string' }];
-  const h = harness({ enforce: 'reject', previous: { validateToolCall: async () => schemaSaid } });
-  assert.deepEqual(await h.validate({ x: 1 }), schemaSaid, 'the displaced validator must be consulted');
-  assert.ok(h.warnings.some(w => w.includes('no typed contract')), 'and the gap must be announced');
+// No contract is NO OPINION, never "valid" — so the schema validator beside this one still decides. That
+// it is consulted is core's to guarantee (every `validate` hook runs), and is pinned in
+// tool-executor-validation.test.ts; here, only that this one does not answer for a contract it lacks.
+test('no typed contract is no opinion, and says so once', async () => {
+  const h = harness({ enforce: 'reject' });
+  assert.equal(await h.validate({ x: 1 }), undefined);
+  assert.ok(h.warnings.some(w => w.includes('no typed contract')), 'the gap must be announced');
 });
 
-test('a REFUSED contract also defers, naming why', async () => {
-  const schemaSaid = [{ path: '.n', message: 'expected number' }];
-  const h = harness({
-    enforce: 'reject',
-    entry: { refused: 'params.n: bigint (JSON.stringify throws on it)' },
-    previous: { validateToolCall: async () => schemaSaid },
-  });
-  assert.deepEqual(await h.validate({ n: 'x' }), schemaSaid);
+test('a REFUSED contract is no opinion too, naming why', async () => {
+  const h = harness({ enforce: 'reject', entry: { refused: 'params.n: bigint (JSON.stringify throws on it)' } });
+  assert.equal(await h.validate({ n: 'x' }), undefined);
   assert.ok(h.warnings.some(w => w.includes('cannot be validated as JSON') && w.includes('bigint')),
     'an unvalidatable contract must say so, not pass silently');
 });

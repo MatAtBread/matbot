@@ -48,8 +48,12 @@ export interface RunConfig {
  *               ephemeral context — supersede rather than follow), and/or append durable `markers`
  *               to the committed session (LLM-invisible annotations — the second durable-write point
  *               after `screen`, safe because it too fires once per turn).
+ *   validate    the EXECUTOR, before every call through every door — the runner, `POST /tools/:name`,
+ *               `invokeTool` — and `tools.validate`. Not a runner channel, so it carries no session.
+ *               Every hook runs; the call is refused if ANY returns errors. `undefined` is no opinion,
+ *               never "valid". See {@link ValidateContext}.
  */
-export type HookPoint = 'screen' | 'contribute' | 'toolcall' | 'toolresult' | 'followup';
+export type HookPoint = 'screen' | 'contribute' | 'toolcall' | 'toolresult' | 'followup' | 'validate';
 
 export interface ScreenContext {
   session: Session;
@@ -181,6 +185,41 @@ export interface ToolResultContext {
   /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
   removeHook(): void;
 }
+/**
+ * One rejected field. `path` is dotted, as a caller would WRITE the access (`.items[0].name`) rather
+ * than as JSON Pointer — the reader is either a model repairing its own call or a developer looking at
+ * a 422, and both write dots. `.` alone is the whole value.
+ *
+ * `value` is what was actually supplied there, and is what makes the difference between a message a
+ * model can act on and one it has to guess at. Optional because a validator may not have it, and
+ * `undefined` specifically means ABSENT: JSON carries no undefined, so there is nothing to show for a
+ * missing property beyond saying it is missing.
+ */
+export interface ToolInputError {
+  path:   string;
+  message: string;
+  value?: unknown;
+}
+
+/**
+ * A tool call about to execute, for a validator to judge — `json-validation` against the tool's
+ * `inputSchema`, `ts-validation` against its `ToolContract` params type. A hook rather than a service
+ * so several co-exist with no reference to each other: each is consulted, a call is refused if any
+ * refuses it, and unloading one removes only its own opinion. It was a single-valued service key, which
+ * forced the second validator to capture the first and delegate to it — so the pair depended on load
+ * order, and on each other.
+ *
+ * Return errors to refuse, `[]` to say the input is valid, or nothing for NO OPINION (no contract for
+ * this tool, or one that cannot be honestly validated). A throw is no opinion too, logged.
+ */
+export interface ValidateContext {
+  readonly tool:       string;
+  readonly parameters: unknown;
+  signal:  AbortSignal;
+  /** Unregister the hook currently running. For one-shot hooks that should fire at most once. */
+  removeHook(): void;
+}
+
 // The toolresult hook returns `{ result }` to replace the tool's result, or nothing to leave it
 // (and just observe) — a trivial single-field return, inlined in the Hook union like `contribute`'s.
 
@@ -235,4 +274,5 @@ export type Hook =
   | { on: 'contribute'; priority?: number; pluginName?: string; handler(ctx: ContributeContext): Message[]    | void | Promise<Message[]    | void> }
   | { on: 'toolcall';   priority?: number; pluginName?: string; handler(ctx: ToolCallContext):   ToolCallResult | void | Promise<ToolCallResult | void> }
   | { on: 'toolresult'; priority?: number; pluginName?: string; handler(ctx: ToolResultContext): { result: unknown } | void | Promise<{ result: unknown } | void> }
-  | { on: 'followup';   priority?: number; pluginName?: string; handler(ctx: FollowupContext):   FollowupResult | void | Promise<FollowupResult | void> };
+  | { on: 'followup';   priority?: number; pluginName?: string; handler(ctx: FollowupContext):   FollowupResult | void | Promise<FollowupResult | void> }
+  | { on: 'validate';   priority?: number; pluginName?: string; handler(ctx: ValidateContext):   ToolInputError[] | undefined | void | Promise<ToolInputError[] | undefined | void> };

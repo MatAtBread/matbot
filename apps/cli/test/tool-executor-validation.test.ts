@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ToolRegistryImpl, TOOL_INPUT_INVALID } from '@matatbread/matbot-core';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
+import type { ToolCallJudge } from '@matatbread/matbot-core';
 import type { Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 // Validation sits on the EXECUTOR, not in a `toolcall` hook, because the hook is a runner channel and
@@ -29,8 +29,7 @@ function stubTool(): { tool: Tool; calls: unknown[] } {
   return { tool, calls };
 }
 
-const validator = (errs: { path: string; message: string }[] | undefined): ToolInputValidator =>
-  ({ validateToolCall: async () => errs });
+const validator = (errs: { path: string; message: string }[] | undefined): ToolCallJudge => async () => errs;
 
 async function drain(it: AsyncIterable<ToolEvent>): Promise<ToolEvent[]> {
   const out: ToolEvent[] = [];
@@ -43,7 +42,7 @@ const CTX = {} as ToolContext;
 test('invalid input never reaches the tool, whichever door called it', async () => {
   const { tool, calls } = stubTool();
   const reg = new ToolRegistryImpl(undefined, undefined,
-    () => validator([{ path: '.title', message: 'required property missing' }]));
+    validator([{ path: '.title', message: 'required property missing' }]));
   reg.register(tool);
 
   const events = await drain(reg.resolve('session_action')!.executor.execute({ action: 'rename' }, CTX));
@@ -62,7 +61,7 @@ test('the message names the field, shows what was sent, and caps how much of it'
   // is rendered wrapped in its own field name — a fragment the caller can compare against what it sent.
   const one = async (errs: { path: string; message: string; value?: unknown }[]) => {
     const { tool } = stubTool();
-    const reg = new ToolRegistryImpl(undefined, undefined, () => validator(errs));
+    const reg = new ToolRegistryImpl(undefined, undefined, validator(errs));
     reg.register(tool);
     const events = await drain(reg.resolve('session_action')!.executor.execute({}, CTX));
     const ev = events[0]!;
@@ -98,7 +97,7 @@ test('the message names the field, shows what was sent, and caps how much of it'
 
 test('valid input runs the tool untouched', async () => {
   const { tool, calls } = stubTool();
-  const reg = new ToolRegistryImpl(undefined, undefined, () => validator([]));
+  const reg = new ToolRegistryImpl(undefined, undefined, validator([]));
   reg.register(tool);
 
   const events = await drain(reg.resolve('session_action')!.executor.execute({ action: 'list' }, CTX));
@@ -108,7 +107,7 @@ test('valid input runs the tool untouched', async () => {
 
 test('NO OPINION passes through — undefined is not a rejection', async () => {
   const { tool, calls } = stubTool();
-  const reg = new ToolRegistryImpl(undefined, undefined, () => validator(undefined));
+  const reg = new ToolRegistryImpl(undefined, undefined, validator(undefined));
   reg.register(tool);
 
   const events = await drain(reg.resolve('session_action')!.executor.execute({ whatever: 1 }, CTX));
@@ -117,11 +116,11 @@ test('NO OPINION passes through — undefined is not a rejection', async () => {
 });
 
 test('with no validator registered, core mandates nothing', async () => {
-  // Two ways to have none: the host wired no lookup at all, and a lookup that resolves to undefined
-  // (nothing has registered one yet, or it was unloaded). Neither may change behaviour.
+  // Two ways to have none: the host wired no judge at all, and one with no opinion (no validator has
+  // registered yet, or it was unloaded). Neither may change behaviour.
   for (const [label, reg] of [
-    ['no lookup wired', new ToolRegistryImpl()],
-    ['lookup resolves undefined', new ToolRegistryImpl(undefined, undefined, () => undefined)],
+    ['no judge wired', new ToolRegistryImpl()],
+    ['judge has no opinion', new ToolRegistryImpl(undefined, undefined, async () => undefined)],
   ] as const) {
     const { tool, calls } = stubTool();
     reg.register(tool);
@@ -135,7 +134,7 @@ test('the wrapper is applied once, so tool identity is stable', async () => {
   // Wrapped at registration rather than at resolve: `resolve(x) === resolve(x)` still holds, which
   // anything comparing or caching tools relies on.
   const { tool } = stubTool();
-  const reg = new ToolRegistryImpl(undefined, undefined, () => validator([]));
+  const reg = new ToolRegistryImpl(undefined, undefined, validator([]));
   reg.register(tool);
   assert.equal(reg.resolve('session_action'), reg.resolve('session_action'));
   assert.equal(reg.list()[0], reg.resolve('session_action'), 'list() and resolve() agree');
@@ -151,7 +150,7 @@ test('builtins seeded through the constructor are guarded too', async () => {
   // wrapper would leave `about_matbot`/`single_turn` unvalidated while everything else was checked.
   const { tool, calls } = stubTool();
   const reg = new ToolRegistryImpl([tool], undefined,
-    () => validator([{ path: '.action', message: 'expected one of "list", "get"' }]));
+    validator([{ path: '.action', message: 'expected one of "list", "get"' }]));
 
   const events = await drain(reg.resolve('session_action')!.executor.execute({ action: 'nope' }, CTX));
   assert.equal(events[0]?.type, 'error');

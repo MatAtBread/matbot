@@ -116,7 +116,7 @@ skills, workspace files, and provider config all persist in browser storage acro
 
 All the plugins are optional - install and try out as you please. Note that some, like `providers` are loaded indirectly when needed, and so you don't actually need to add them.
 
-Each plugin has a **Type**, the same classification the `plugin` tool's `list` action reports (`types`): what it contributes — `tools`, a `provider`, a `frontend`, a `storage` backend, `hooks`, or a **service** registered by name (`KnowledgeIndex`, `ToolCallValidator`, `ToolTypeIndex`, …).
+Each plugin has a **Type**, the same classification the `plugin` tool's `list` action reports (`types`): what it contributes — `tools`, a `provider`, a `frontend`, a `storage` backend, `hooks`, or a **service** registered by name (`KnowledgeIndex`, `ToolTypeIndex`, `ToolPresenter`, …).
 
 And a **Status**:
 
@@ -149,9 +149,9 @@ And a **Status**:
 | **tools + hooks** | `function-tools` | Functional | Author & run TypeScript functions that compose other tools in one pass (`tool_function`) |
 | | `triggers` | Functional | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
 | **hooks** | `hook-logger` | Example | Diagnostic: log every hook-channel firing |
-| **services** | `json-validation` | Functional | `ToolCallValidator`: validate tool inputs against their JSON Schema; the LLM self-corrects on mismatch |
-| | `ts-validation` | Functional | `ToolCallValidator`: validate tool inputs against the `ToolContract` params type (Node; needs `tool-types`) |
-| | `tool-types` | Functional | `ToolTypeIndex` (Node): derives a typed `.d.ts` of tool results so tool-composing codegen (`function-tools`, `skill-compiler`) is type-checked |
+| | `json-validation` | Functional | `validate` hook: validate tool inputs against their JSON Schema; the LLM self-corrects on mismatch |
+| | `ts-validation` | Functional | `validate` hook: validate tool inputs against the `ToolContract` params type (Node; needs `tool-types`). Loads beside `json-validation`; a call either refuses is refused |
+| **services** | `tool-types` | Functional | `ToolTypeIndex` (Node): derives a typed `.d.ts` of tool results so tool-composing codegen (`function-tools`, `skill-compiler`) is type-checked |
 | | `caching-tool-types` | Functional | `ToolTypeIndex` (Node): `tool-types` with its build kept in settings across restarts; load it instead of `tool-types` |
 | | `function-runner-node` | Functional | `FunctionRunner` (Node, optional): bounds a `tool_function` body's run time, withholds host globals, gates its `import(...)`. Without it a body runs unbounded and ungated |
 | | `tool-router` | Functional | `ToolPresenter`: serve the model a bounded per-turn window from a large tool library, with a `tool_search` entry point |

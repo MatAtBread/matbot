@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { PermissionDecision, PermissionRequest, Session, ToolContext, ToolEvent } from '@matatbread/matbot-core';
+import type { Hook, PermissionDecision, PermissionRequest, Session, ToolContext, ToolEvent } from '@matatbread/matbot-core';
 import { VaultImpl, createSession, permitted, refused } from '@matatbread/matbot-core';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
 import { httpTool } from '../../../plugins/http/src/index.ts';
 import { plugin as jsonValidation } from '../../../plugins/json-validation/src/index.ts';
 
@@ -183,14 +182,16 @@ test('an echoed key is redacted from results and errors — and nothing else is'
 });
 
 test('the schema admits both arms and refuses the guesses a model makes', async () => {
-  let validator: ToolInputValidator | undefined;
+  let validator: Extract<Hook, { on: 'validate' }> | undefined;
   await jsonValidation.setup?.({
     tools: { resolve: () => httpTool },
-    register: async (_k: string, v: ToolInputValidator) => { validator = v; },
+    hooks: { register: (h: Hook) => { if (h.on === 'validate') validator = h; } },
   } as never);
   assert.ok(validator);
   const check = async (value: unknown): Promise<string[]> =>
-    ((await validator!.validateToolCall('http', { url: 'https://x', headers: { H: value } })) ?? []).map(e => `${e.path}: ${e.message}`);
+    ((await validator!.handler({
+      tool: 'http', parameters: { url: 'https://x', headers: { H: value } }, signal: new AbortController().signal, removeHook() {},
+    })) ?? []).map(e => `${e.path}: ${e.message}`);
 
   assert.deepEqual(await check('Bearer abc'), []);
   assert.deepEqual(await check({ Vault: 'ACME_KEY' }), []);

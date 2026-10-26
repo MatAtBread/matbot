@@ -4,14 +4,14 @@
     "node",
     "browser"
   ],
-  "version": "0.4.15",
+  "version": "0.4.21",
   "engines": {
     "node": ">=24.0.0"
   },
   "files": [
     "src"
   ],
-  "description": "Validates tool-call inputs against each tool's JSON Schema, registered as core's ToolCallValidator so EVERY invocation door (the runner, HTTP tool routes, invokeTool) is checked at the executor rather than only the model's path.",
+  "description": "Validates tool-call inputs against each tool's JSON Schema, as a `validate` hook — which core dispatches at the executor, so EVERY invocation door (the runner, HTTP tool routes, invokeTool) is checked rather than only the model's path.",
   "keywords": [
     "matbot",
     "matbot-plugin",

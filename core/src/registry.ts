@@ -401,6 +401,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
+      validate:      async (name: string, parameters: unknown) => services.tools.validate?.(name, parameters),
     },
     hooks: {
       register(hook: Hook) {

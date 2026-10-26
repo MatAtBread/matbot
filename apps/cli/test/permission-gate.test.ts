@@ -313,7 +313,7 @@ test('the options separate what is shown from what is answered', async () => {
 });
 
 test('with nobody to ask, the policy delegates to the gate it displaced', async () => {
-  // Composition is the ToolCallValidator idiom: the pair composes in either load order, because the
+  // Composition is capture-and-delegate: the pair composes in either load order, because the
   // displaced gate is captured rather than shadowed.
   const seen: PermissionRequest[] = [];
   const previous: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };

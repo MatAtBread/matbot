@@ -13,11 +13,11 @@ import { defaultGate } from '@matatbread/matbot-default-gate';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import type { Layer } from './fixtures/stacks-service.ts';
 
-// The registry holds one value per key, and plugins stack on a key by capturing what they displace
-// (json-validation under ts-validation). Unloading used to `unregister` the key outright, whichever
-// plugin was current: unloading the one UNDERNEATH removed the one on top, and unloading the one on top
-// reverted past the one it had displaced. So `plugin reload json-validation` switched typed validation
-// off with it, silently.
+// The registry holds one value per key, and plugins can stack on a key by registering over one another
+// (a policy gate over a gate). Unloading used to `unregister` the key outright, whichever plugin was
+// current: unloading the one UNDERNEATH removed the one on top, and unloading the one on top reverted
+// past the one it had displaced. (json-validation under ts-validation did exactly this, before both
+// became `validate` hooks.)
 
 installPrincipalCarrier(createConstantPrincipalCarrier({ id: 'tester', type: 'user' }));
 installUsageCarrier(createAlsUsageCarrier());
@@ -53,12 +53,12 @@ async function stack(services: MatbotMachine, key: string, ...names: string[]): 
   return loaded.map(p => p.name);
 }
 
-const current = (services: MatbotMachine, key = 'ToolCallValidator'): Layer | undefined =>
+const current = (services: MatbotMachine, key = 'ExampleService'): Layer | undefined =>
   (services as unknown as Record<string, Layer | undefined>)[key];
 
 test('unloading the displaced plugin leaves the one on top in place', async t => {
   const { services } = await machine(t);
-  const [a, b] = await stack(services, 'ToolCallValidator', 'a', 'b');
+  const [a, b] = await stack(services, 'ExampleService', 'a', 'b');
   assert.equal(current(services)?.as, 'b');
 
   await unloadPlugin(a!, services);
@@ -70,7 +70,7 @@ test('unloading the displaced plugin leaves the one on top in place', async t =>
 
 test('unloading the plugin on top reinstates the one it displaced', async t => {
   const { services } = await machine(t);
-  const [a, b] = await stack(services, 'ToolCallValidator', 'a', 'b');
+  const [a, b] = await stack(services, 'ExampleService', 'a', 'b');
 
   await unloadPlugin(b!, services);
   assert.equal(current(services)?.as, 'a', 'the displaced registration is current again');

@@ -11,6 +11,24 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.21
 
+### API gaps filled
+
+- **A `validate` hook channel, for tool-input validators.** Core dispatches it at the executor, before every
+  call through every door (the model's path, `POST /tools/:name`, `invokeTool`), so it carries no session.
+  A handler returns `ToolInputError[]` to refuse, `[]` for valid, or nothing for no opinion; a throw is no
+  opinion, logged. Every `validate` hook is asked and the call is refused if any refuses it, with each
+  refusal's errors (one shared by two validators is said once). So validators co-exist with no reference to
+  each other, and neither the verdict nor the message depends on load order.
+- **`tools.validate(name, params)`** asks the same validators without running the tool, for a caller that
+  stores a call to make later. Optional on `ToolRegistry`. `ToolInputError` moved to plugin-api (core still
+  exports it).
+- **`ToolCallValidator` is `@deprecated`, and will be removed in 0.5.0.** A service key holds one value, so a
+  second validator had to capture the first and delegate to it: the pair depended on load order and on each
+  other, and unloading the one underneath took the other with it. It is still consulted, as one more opinion
+  beside the `validate` hooks, so a validator registered there keeps working until then. Removing it in
+  0.5.0 is a breaking change: a validator still registered under the key will silently stop being consulted.
+  Register a `validate` hook instead.
+
 ### Bug fixes
 
 - **Unloading a plugin withdraws only its own registration of a service.** The registry holds one value
@@ -30,6 +48,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`json-validation`, `ts-validation`** — each registers a `validate` hook instead of the `ToolCallValidator`
+  service, and neither captures nor calls the other. The verdict is unchanged — a call either one refuses is
+  refused — but it no longer depends on which loaded first, and unloading one leaves the other validating.
+  When `ts-validation` has no contract for a tool (or its `enforce` is `off`) it has no opinion, and the schema
+  check still stands.
+- **`triggers`** — a trigger's `invoke` is checked with `tools.validate` when it is stored, so it meets every
+  validator its call will meet when it fires.
+- **`hook-logger`** — logs the `validate` channel too.
 - **`cognition`** — its triggers are seeded whatever order `triggers` is listed in. It read `Triggers` once,
   when the `SkillManager` arrived, so with `triggers` listed after `cognition` the Inner voice and
   `remember_fact` triggers were never seeded, at that boot or any later one. Seeding passes now also run when
