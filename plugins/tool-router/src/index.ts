@@ -542,17 +542,42 @@ search. \`get\` reports what is in effect, and \`libraryTools\`, the count compa
     const seen  = new Set<string>();
     const queue: string[] = [];
     let pumping = false;
-    const extractOne = async (name: string): Promise<void> => {
+    const keyOf = (tool: Tool): string => hash(`${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema ?? {})}`);
+    // One store read per BATCH, not per tool (#109): boot enqueues every tool, and on a remote backend each
+    // `get` is a network round trip that held a connection for the whole warm-up. `undefined` means the
+    // query failed, so `extractOne` falls back to per-key `get` — never to "uncached", which would be an LLM
+    // call per tool. A key absent from a SUCCESSFUL result is a genuine miss and is not read again.
+    const prime = async (names: string[]): Promise<Map<string, NounRec> | undefined> => {
+      const keys = new Set<string>();
+      for (const n of names) {
+        const tool = services.tools.resolve(n);
+        if (!tool || tool.name === SEARCH) continue;
+        const key = keyOf(tool);
+        if (!seen.has(key)) keys.add(key);
+      }
+      const found = new Map<string, NounRec>();
+      if (!keys.size) return found;
+      try {
+        let cursor: string | undefined;
+        do {
+          const page = await nounStore.query({ where: { op: 'in', field: 'id', value: [...keys] }, immutable: true, cursor });
+          for (const r of page.items) found.set(r.id, r);
+          cursor = page.cursor;
+        } while (cursor !== undefined);
+        return found;
+      } catch { return undefined; }
+    };
+    const extractOne = async (name: string, primed: Map<string, NounRec> | undefined): Promise<void> => {
       const tool = services.tools.resolve(name);
       if (!tool || tool.name === SEARCH) return;
       // Content hash over EVERYTHING the derivation reads — name, description AND inputSchema — so any
       // rewrite (including a schema-only change) yields a new key and re-derives. A cache HIT therefore
       // guarantees every stored field is still valid; nouns and width are both persisted and stay fixed
       // until the next write. The store is thus the complete, always-fresh source of truth.
-      const key = hash(`${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema ?? {})}`);
+      const key = keyOf(tool);
       if (seen.has(key)) return;
       seen.add(key);
-      const cached    = await nounStore.get(key).catch(() => null);
+      const cached    = primed ? primed.get(key) ?? null : await nounStore.get(key).catch(() => null);
       let nouns       = cached?.nouns;
       let specificity = cached?.specificity;
       let widthBy     = cached?.widthBy;
@@ -582,12 +607,17 @@ search. \`get\` reports what is in effect, and \`libraryTools\`, the count compa
       if (pumping) return;
       pumping = true;
       try {
-        while (queue.length) { const n = queue.shift(); if (n) await extractOne(n).catch(() => {}); }
+        // Whatever is queued is one batch; registrations arriving while it is read or derived form the next.
+        while (queue.length) {
+          const batch  = queue.splice(0);
+          const primed = await prime(batch);
+          for (const n of batch) await extractOne(n, primed).catch(() => {});
+        }
         console.warn(`${TAG} derived wide/pinned (${derivedWide.size}): ${[...derivedWide].sort().join(', ') || '(none yet)'}`);
       } finally { pumping = false; }
     };
-    const enqueue = (name: string): void => { queue.push(name); void pump(); };
-    for (const t of services.tools.list()) enqueue(t.name);
+    const enqueue = (...names: string[]): void => { queue.push(...names); void pump(); };
+    enqueue(...services.tools.list().map(t => t.name));
     services.Notifier.consume(n => {
       if (n.kind !== RegistryChangeKind) return;
       idx = null;                                                        // tool set changed → rebuild BM25 index lazily

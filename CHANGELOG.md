@@ -22,6 +22,10 @@ churn and less likely to affect a consumer who doesn't use them.
     that defeats itself once stored values are included (`cullTrigger` below `targetWindow`, `cullTarget`
     above `cullTrigger`), and then writes nothing. It is left out of `tool_search`'s catalogue line and never
     pinned, but a search finds it.
+  - Warming the noun/width cache reads each batch of queued tools with one store query, not one `get` per
+    tool in sequence — on a remote `StorageBackend` that was a network round trip per tool for the whole
+    boot (#109). Tools registered while a batch is in flight form the next one. If the query fails, it
+    falls back to per-key `get`, never to treating every tool as uncached.
 - **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
   capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
   one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
