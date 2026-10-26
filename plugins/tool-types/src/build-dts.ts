@@ -1,4 +1,5 @@
 import type TS from 'typescript';
+import type { Runtime } from '@matatbread/matbot-plugin-api';
 import { compileToolValidator, generateValidator, type ToolValidator, type ValidatorSource } from './validator.js';
 
 // Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
@@ -111,7 +112,7 @@ export interface ToolTypeRoots {
 /** What a build of `pluginEntryUrls` would scan, without building it. Null when there is nothing to scan
  *  beyond plugin-api, or plugin-api itself cannot be found. */
 export async function collectToolTypeRoots(
-  projectRoot: string, pluginEntryUrls?: readonly string[],
+  projectRoot: string, pluginEntryUrls?: readonly string[], runtime: Runtime = 'node',
 ): Promise<ToolTypeRoots | null> {
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
   const { join } = await import('node:path');
@@ -163,6 +164,14 @@ export async function collectToolTypeRoots(
   // `plugins/bash` and `plugins/docker-bash` — still merges by Program file order, so the unloaded one can
   // win and describe the loaded one; that is what `conflicts` makes audible, and it cannot be filtered away
   // because the name IS live.
+  //
+  // Plugins for another runtime are the exception: those are skipped, by the loader's own pre-import rule
+  // (a package whose `matbotRuntime` is present, non-empty and excludes `runtime`). `liveToolNames` cannot
+  // stand in for that, because a static caller has no live set — a typed client generated at build time —
+  // and an augmentation of a shared shape (google-drive's `managedBy` on `LoadedPluginSummary`) is
+  // no tool name to filter. `runtime` is the runtime being DESCRIBED, not the one this runs on: the web
+  // bundle's build runs here to describe a browser. The resolvedUrl roots need no such rule; the loader
+  // has already gated them.
   // Generated `matbot-tools.d.ts` files are skipped (don't feed prior output back in).
   if (existsSync(join(projectRoot, 'plugins'))) {
     // Dot-directories wholesale rather than by name: this used to list `compiled-plugins` explicitly,
@@ -171,16 +180,24 @@ export async function collectToolTypeRoots(
     // A source tree keeps no augmentations under a dot-directory; `.git`, `.plugins` and a build root
     // sited there are all covered by one rule that cannot go stale.
     const SKIP = new Set(['node_modules', 'dist']);
-    const walk = (dir: string): void => {
+    // A directory with no package.json inherits its parent's answer, so each file is judged by its
+    // nearest package. Nothing is pruned: a package nested inside an excluded one answers for itself.
+    const admits = (dir: string, inherited: boolean): boolean => {
+      let declared: unknown;
+      try { declared = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).matbotRuntime; } catch { return inherited; }
+      return !Array.isArray(declared) || declared.length === 0 || declared.includes(runtime);
+    };
+    const walk = (dir: string, inherited: boolean): void => {
       let entries: string[];
       try { entries = readdirSync(dir); } catch { return; }
+      const admitted = admits(dir, inherited);
       for (const name of entries) {
         if (SKIP.has(name) || name.startsWith('.')) continue;
         const p = join(dir, name);
         let isDir: boolean;
         try { isDir = statSync(p).isDirectory(); } catch { continue; }
-        if (isDir) { walk(p); continue; }
-        if (!name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
+        if (isDir) { walk(p, admitted); continue; }
+        if (!admitted || !name.endsWith('.ts') || name.endsWith('matbot-tools.d.ts')) continue;
         const src = readFileSync(p, 'utf8');
         // Any augmentation of plugin-api, not just one naming `ToolContracts`/`MatbotServices`. Those two
         // are the interfaces EMITTED, but they are not the only ones that change what they mean: a tool
@@ -191,7 +208,7 @@ export async function collectToolTypeRoots(
         if (/declare\s+module\s+['"]@matatbread\/matbot-plugin-api['"]/.test(src)) roots.add(p);
       }
     };
-    walk(join(projectRoot, 'plugins'));
+    walk(join(projectRoot, 'plugins'), true);
   }
   if (roots.size === 1) return null;                          // nothing to scan beyond plugin-api itself
   return { pluginApiIndex, roots: [...roots] };
@@ -222,11 +239,11 @@ export async function collectToolTypeRoots(
 // deliberately — for no gain. So this argument buys exactly one thing: the validators.
 export async function buildToolTypesData(
   projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
-  syntheticContracts?: Readonly<Record<string, string>>,
+  syntheticContracts?: Readonly<Record<string, string>>, runtime: Runtime = 'node',
 ): Promise<ToolTypesData | null> {
   const ts = (await import('typescript')).default as typeof TS;
   const { join } = await import('node:path');
-  const found = await collectToolTypeRoots(projectRoot, pluginEntryUrls);
+  const found = await collectToolTypeRoots(projectRoot, pluginEntryUrls, runtime);
   if (!found) return null;
   const { pluginApiIndex, roots } = found;
 
@@ -601,8 +618,8 @@ export async function buildToolTypesData(
   // `getPreEmitDiagnostics`, which costs ~4x this whole build (measured: +750ms on a 40-root scan) and
   // says less: a raw TS2717 filter reports only the losing site, whereas the merged symbol's
   // declaration list names the winner too — and it can't distinguish a real clash from the legal
-  // identical re-declaration TypeScript never complains about (`bash`, `mcp_action` and
-  // `url_for_resource` are each declared twice here, identically, and are not conflicts).
+  // identical re-declaration TypeScript never complains about (`bash` and `mcp_action` are each declared
+  // twice here, identically, and are not conflicts; so is `url_for_resource` in a browser build).
   const relPath = (f: string): string => f.startsWith(projectRoot) ? f.slice(projectRoot.length + 1) : f;
   const siteOf  = (d: TS.Node): string =>
     `${relPath(d.getSourceFile().fileName)}:${d.getSourceFile().getLineAndCharacterOfPosition(d.getStart()).line + 1}`;
@@ -841,9 +858,9 @@ export function filterToolTypesData(data: ToolTypesData, liveToolNames: readonly
 /** {@link buildToolTypesData}, with every validator compiled — the in-process form. */
 export async function buildMatbotToolsDts(
   projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
-  syntheticContracts?: Readonly<Record<string, string>>,
+  syntheticContracts?: Readonly<Record<string, string>>, runtime: Runtime = 'node',
 ): Promise<MatbotToolsDts | null> {
-  const data = await buildToolTypesData(projectRoot, pluginEntryUrls, liveToolNames, syntheticContracts);
+  const data = await buildToolTypesData(projectRoot, pluginEntryUrls, liveToolNames, syntheticContracts, runtime);
   if (!data) return null;
   const { files: _files, dtsParts: _parts, validators, ...rest } = data;
   return { ...rest, validators: compileToolValidators(validators) };

@@ -310,7 +310,9 @@ async function main() {
     // registering ts-hooks.js directly keeps its `exclude` plumbing in one place.
     await import('../../apps/cli/register.js');
     const { buildMatbotToolsDts } = await import('../../plugins/tool-types/src/build-dts.ts');
-    const compiled = (await buildMatbotToolsDts(repoRoot))?.contracts ?? {};
+    // Described for the browser: the bundle's own plugins (webllm, google-drive's `managedBy`) are in, and
+    // a node-only declaration of a shared shape is out.
+    const compiled = (await buildMatbotToolsDts(repoRoot, undefined, undefined, undefined, 'browser'))?.contracts ?? {};
     let upgraded = 0;
     for (const name of Object.keys(toolContracts)) {
       if (compiled[name] === undefined) continue;

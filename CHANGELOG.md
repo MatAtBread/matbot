@@ -30,6 +30,12 @@ churn and less likely to affect a consumer who doesn't use them.
   capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
   one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
   as `checkedElsewhere` once, since the withheld set is part of the environment its verdict names.
+- **`tool-types`** — the scan of the monorepo `plugins/` tree skips a package whose `matbotRuntime`
+  excludes the runtime being described, by the loader's rule (absent or empty means no restriction). A
+  derivation given no live tool set, such as a typed client generated at build time, no longer declares
+  browser-only tools on node (`webllm_models`), nor google-drive's `managedBy` on `plugin`'s result (#110).
+  `collectToolTypeRoots`, `buildToolTypesData` and `buildMatbotToolsDts` take a trailing `runtime`
+  (default `'node'`), and the web bundle's contract bake passes `'browser'`.
 - **`chatjimmy`** — tool calling, done in the prompt since the endpoint has none. On by default;
   `parameters.tools: false` turns it off. Tools are described in the system prompt in the `<tools>` / `<tool_call>` format, calls are
   parsed out of the reply, and results are replayed as `<tool_response>` turns saying what to do with
