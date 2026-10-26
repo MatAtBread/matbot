@@ -297,6 +297,10 @@ type MediaStore   = FileStore;      // session media; see Media
 
 **Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: the filesystem backend; the browser: IndexedDB + OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
+**A plugin's unload withdraws its own registration, not the key.** The registry holds one value per key, but core remembers each plugin's registration in order, for every key. Withdrawing the current one reinstates the one it displaced; withdrawing a displaced one changes nothing; only the last one out reverts to the host (above). It was `unregister(key)`, which removed whatever was current, so where plugins stack by capturing what they displace (`ts-validation` over `json-validation`, a gate over a gate), unloading the one underneath took the one on top with it. `StorageBackend` is the exception on one side only: a displaced backend was closed by the swap, so withdrawing the live one reverts to the host's — but withdrawing a displaced one still leaves the live one alone.
+
+**A reference captured from the registry is hard.** Unloading its provider changes what the registry resolves, not what a plugin already holds, so an object that outlives its plugin is that provider's to answer for — by failing with "service no longer active", not by working on half-torn-down state. Resolution through the registry is dynamic, so the removal of a dependency can only be relied on dynamically; nothing static can see it coming. A dependency that must hold is a real `package.json` import, which loads and unloads the two as a unit (*Discovery vs. direct dependency*).
+
 ### Context switch & the deferred StorageBackend swap
 
 `StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (nothing holding the machine — in practice, the pump's queue drained). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
@@ -656,7 +660,7 @@ correct (different trust root, different decision), but a policy author is keyin
 
 **`PermissionGate` is a swap-member, not an optional service.** Absence is not a sensible state, so
 the host captures a boot default and `unregister` reverts to it — "unload the policy ⇒ back to
-asking", with no revert rule of its own. (A do-nothing always-present default *would* be the
+asking", with no revert rule of its own. (Back to the policy it displaced, if a plugin supplied one.) (A do-nothing always-present default *would* be the
 fail-open shape; a default that *asks* is not.) A gate wanting "my rules, else the previous
 behaviour" captures the gate it displaces and delegates — the `ToolCallValidator` idiom, so a pair
 composes in either load order — and it is the reason this key is the one swap-member the hosts do

@@ -392,7 +392,7 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     // scoped register() that attributes a service key. Attributing it now makes unloading that plugin
     // revert storage to the host base, exactly as for a runtime register().
     const name = preScanned !== undefined ? getPluginNameForSpecifier(preScanned.spec) : undefined;
-    if (name !== undefined) recordServiceKey(name, 'StorageBackend');
+    if (name !== undefined) recordServiceKey(name, 'StorageBackend', preScanned!.backend);
   };
 
   return { services, makeRunner, loaded };

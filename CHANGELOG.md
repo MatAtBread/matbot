@@ -11,7 +11,37 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.21
 
+### Bug fixes
+
+- **Unloading a plugin withdraws only its own registration of a service.** The registry holds one value
+  per key, and unloading used to `unregister` the key outright, whichever plugin was current. Where plugins
+  stack on a key by capturing what they displace (`ts-validation` over `json-validation`), unloading the one
+  underneath removed the one on top too — `plugin reload json-validation` switched typed validation off with
+  it — and unloading the one on top reverted past the one it had displaced, to the host default. Now
+  withdrawing the current registration reinstates the one it displaced, withdrawing a displaced one changes
+  nothing, and only the last one out reverts to the host. The same holds for the swap-members, a plugin's own
+  `unregister`, and `StorageBackend`, with one difference: a displaced backend was closed by the swap, so
+  withdrawing the live one still reverts to the host's own — but withdrawing a displaced one no longer pulls
+  the live backend out from under everything.
+- **Concurrent first uses of an adapter module that `plugins:` does not list share one load.** Each started
+  its own: the first won and the rest failed on "already registered", so their `complete()` calls failed.
+  Boot is when they arrive together — a skills reindex analyses every skill at once through one provider — so
+  this happened on every boot of such a config. A failed load is not remembered; the next use tries again.
+
 ### Optional
+
+- **`cognition`** — its triggers are seeded whatever order `triggers` is listed in. It read `Triggers` once,
+  when the `SkillManager` arrived, so with `triggers` listed after `cognition` the Inner voice and
+  `remember_fact` triggers were never seeded, at that boot or any later one. Seeding passes now also run when
+  `Triggers` arrives, one at a time. It also no longer passes its own abort signal to `mounted.observe`: that
+  controller was created once per plugin instance and aborted by the first teardown, so a later setup of the
+  same instance observed nothing.
+- **`mcp-http`** — a persisted server no longer holds up boot. `setup()` awaited every reconnect, one server
+  after another, with no bound on the handshake: an unroutable endpoint held the whole boot for ~21s, and one
+  that accepted the connection and never replied held it indefinitely, along with every plugin listed after
+  it. Reconnects now run in the background and concurrently, as the node `mcp` plugin's already did. The
+  `initialize` + `tools/list` handshake has a 30s bound, which `mcp_action add` also gets, and an unload
+  aborts a handshake still in flight instead of letting it register tools for a plugin that has gone.
 
 - **`tool-router`** — the tool window is set in the plugin's settings instead of constants, so a small
   model can be given fewer tools at once: `targetWindow` (default 20), `cullTrigger` and `cullTarget`

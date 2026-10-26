@@ -521,7 +521,9 @@ absent. When one plugin is a *specialization* of another (it depends on it by co
 import and construct it directly with a hard `package.json` dependency instead. See CLAUDE.md
 for the full distinction and for the five swap-aware keys (`StorageBackend`, `KnowledgeIndex`,
 `Vault`, `Notifier`, `PermissionGate`) — each carries a host boot default and reverts to it when the
-plugin that registered one is unloaded.
+plugin that registered one is unloaded. For any key, unloading a plugin withdraws only its own
+registration: if another plugin had registered over it, that one stays; if it had displaced another
+plugin's, that one is reinstated.
 
 ### Plugin settings
 
@@ -837,7 +839,8 @@ stash it anywhere that outlives your plugin.
 
 `ask` is the prompt channel in scope for that call, or `undefined` when **no human is reachable** (a
 boot load, a background task, `POST /tools/:name`, a frontend that cannot ask). Unloading your plugin
-reverts to the host's boot default, which asks.
+reinstates the gate you displaced — the host's boot default, which asks, unless another plugin's was
+current.
 
 Two things to know before you write one. A standing answer is a *decision, not a channel*: it applies
 at every door, so allowing a gate outright also allows it for callers with no human behind them. And
