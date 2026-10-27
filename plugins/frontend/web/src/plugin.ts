@@ -82,6 +82,10 @@ export const plugin: MatbotPluginSpec = {
     const run = services.run;
     if (!run) throw new Error('frontend-web requires services.run');
 
+    // A browser origin other than this server's own that may call it — a dashboard hosted elsewhere.
+    // Absent means same-origin only, which is all the UI and the files this server serves need.
+    const cors = await services.settings().get<unknown>('cors_origin');
+
     webServer = createWebServer({
       store: sessions,
       run,
@@ -89,6 +93,7 @@ export const plugin: MatbotPluginSpec = {
       loadPlugin:    services.loadPlugin.bind(services),
       unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,
+      ...(typeof cors === 'string' && cors !== '' ? { cors } : {}),
       // An explicit `x-matbot-principal` header wins over any registered resolver (so a browser acting as
       // a chosen profile is honoured even when web-principal-user/auth pins a default identity); absent it,
       // a registered WebPrincipalResolver takes effect, else the header-aware default. Resolver looked up
@@ -123,7 +128,8 @@ export const plugin: MatbotPluginSpec = {
         // over HTTP — it greps for the process to find the port, or never thinks to call a tool from a script.
         services.systemContext.register(() =>
           'Every registered tool can be invoked over HTTP via the relative URL `/tools`. ' +
-          '`POST /tools/<name>` with the JSON params as the body returns the result as JSON (a tool error is a ' +
+          '`POST /tools/<name>` with the JSON params as the body (sent as `Content-Type: application/json` — ' +
+          'any other POST is refused) returns the result as JSON (a tool error is a ' +
           'non-2xx status with `{ error }`); `POST /stream/tools/<name>` streams the tool\'s events as SSE. ' +
           'Use it to call tools from scripts run by a live dashboard or similar.');
         resolve();

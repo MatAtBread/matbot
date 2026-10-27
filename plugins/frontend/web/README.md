@@ -13,3 +13,18 @@ answered on the user's behalf), heartbeat-based liveness detection, reconnect re
 ~6-socket-per-host budget, and what changes for a soft-tabbed UI or the serverless in-process build.
 
 `static/app.js` + `static/http-transport.js` are the reference implementation of all of it.
+
+## Calling it from elsewhere
+
+The server answers its own origin only: the UI, and any dashboard it serves from `/files/`, call it
+same-origin. A page hosted on another origin is granted by naming that origin in the plugin's settings:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-frontend-web':
+    cors_origin: http://dashboards.lan:8080
+```
+
+Every POST must be sent as `Content-Type: application/json`, with or without a body; anything else is
+refused with 415. That is what stops a page on another origin from sending one without the browser asking
+first.

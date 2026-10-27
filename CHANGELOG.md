@@ -141,6 +141,14 @@ churn and less likely to affect a consumer who doesn't use them.
   - Offered by the web bundle's setup wizard, which asks which model to use from a drop-down of the same
     models `webllm_models` lists (Qwen3-4B preselected). If the list cannot be fetched, the wizard shows a
     text field instead, and leaving it empty uses Qwen3-4B.
+- **`frontend-web`** — closes the server to other origins (#111). **Breaking** for a page served from
+  elsewhere that calls this server.
+  - No `Access-Control-Allow-Origin` is sent by default; it was `*`. On an installation walled off by its
+    network rather than by a login, that let any page a user on the network visited read and drive the
+    whole API. A dashboard hosted on another origin is granted with the plugin's `cors_origin` setting.
+  - Every POST must be sent as `Content-Type: application/json`, and anything else is refused with 415
+    before its body is read. A cross-origin page can send a `text/plain` or form POST without a preflight,
+    and every body was parsed as JSON whatever it claimed to be.
 
 ## 0.4.20
 

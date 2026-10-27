@@ -89,8 +89,9 @@
   }
 
   async function createSession(opts) {
-    const r = await apiFetch('/sessions', opts?.status === undefined ? { method: 'POST' } : {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: opts.status }),
+    const r = await apiFetch('/sessions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts?.status === undefined ? {} : { status: opts.status }),
     });
     return r.json();
   }
@@ -242,9 +243,11 @@
   }
 
   async function abort(sid, traceId) {
+    // JSON even with nothing to say: the server refuses any POST that is not, so no other page can send one unasked.
     await apiFetch('/sessions/' + sid + '/abort', {
       method: 'POST',
-      ...(traceId !== undefined ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ traceId }) } : {}),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(traceId !== undefined ? { traceId } : {}),
     });
   }
 

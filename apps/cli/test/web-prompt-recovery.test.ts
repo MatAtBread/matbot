@@ -139,6 +139,7 @@ async function serve(tool: Tool) {
 const submit = (base: string, sid: string): Promise<Response> =>
   fetch(`${base}/sessions/${sid}/submit`, {
     method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ content: 'go', provider: 'fake', concatQueue: true, mode: 'auto' }),
   });
 
@@ -158,7 +159,7 @@ test('a prompt raised with no stream attached is delivered to the next one', { t
     assert.ok(tab.seen.includes('prompt'), `expected the parked prompt; saw ${tab.seen.join(', ')}`);
     assert.match(tab.frames.find(f => f.startsWith('event: prompt'))!, /Install plugin/);
 
-    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', body: JSON.stringify({ answer: 'yes' }) });
+    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer: 'yes' }) });
     await settle();
     assert.deepEqual(prompted, ['yes']);
     tab.ac.abort();
@@ -188,7 +189,7 @@ test('a reload while a prompt is parked re-delivers it, and answers nothing itse
     await settle();
     assert.ok(reloaded.seen.includes('prompt'), `reloaded tab must see the question; saw ${reloaded.seen.join(', ')}`);
 
-    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', body: JSON.stringify({ answer: 'yes' }) });
+    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer: 'yes' }) });
     await settle();
     assert.deepEqual(prompted, ['yes']);
     reloaded.ac.abort(); zombie.ac.abort();
@@ -206,7 +207,7 @@ test('abandoning a session cancels its prompt rather than answering it', { timeo
     assert.ok(tab.seen.includes('prompt'));
 
     // Giving up is the one thing the user unambiguously did.
-    await fetch(`${base}/sessions/${session.id}/abort`, { method: 'POST' });
+    await fetch(`${base}/sessions/${session.id}/abort`, { method: 'POST', headers: { 'content-type': 'application/json' } });
     await settle();
     assert.deepEqual(prompted, [], 'a cancel is not an answer');
     const saved = await store.get(session.id);
@@ -298,7 +299,7 @@ test('the sidebar status says a session is waiting on the user, and stops saying
     await settle(100);
     assert.deepEqual(late.statuses, [{ sessionId: session.id, busy: true, prompting: true }]);
 
-    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', body: JSON.stringify({ answer: 'yes' }) });
+    await fetch(`${base}/sessions/${session.id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer: 'yes' }) });
     await settle();
     assert.deepEqual(prompted, ['yes']);
     assert.ok(sidebar.statuses.every(s => s.sessionId === session.id));
@@ -317,7 +318,7 @@ test('cancelling a parked prompt clears the waiting status', { timeout: 20000 },
     await settle();
     assert.equal(sidebar.statuses.at(-1)!.prompting, true);
 
-    await fetch(`${base}/sessions/${session.id}/abort`, { method: 'POST' });
+    await fetch(`${base}/sessions/${session.id}/abort`, { method: 'POST', headers: { 'content-type': 'application/json' } });
     await settle();
     assert.deepEqual(sidebar.statuses.at(-1), { sessionId: session.id, busy: false, prompting: false });
     sidebar.ac.abort();
