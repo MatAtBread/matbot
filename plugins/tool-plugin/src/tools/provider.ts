@@ -7,17 +7,13 @@ declare module '@matatbread/matbot-plugin-api' {
     provider: ProviderToolContract;
   }
 }
-import { applyProviderPatch, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, credentialKeyName, movedCredentialKeys, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
 import path                                                  from 'node:path';
 
 // Credential env-var naming convention for secrets created by this tool.
-function credEnvVarName(profileName: string): string {
-  return `MATBOT_API_KEY_${profileName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-}
-
 // ── Input types ───────────────────────────────────────────────────────────────
 
 type ProviderInput =
@@ -382,7 +378,7 @@ function makeExecutor(
           const credKey = credentialKey ?? 'apiKey';
           const answer  = await ctx.prompt(`${credKey} for provider "${name}" (leave blank if none required):`, '');
           if (answer.trim()) {
-            const varName = credEnvVarName(name);
+            const varName = credentialKeyName(name);
             // createSecret may return a different name (an existing key the value already lives
             // under, or a key name the user typed by mistake); reference what it returns.
             envVarName = await ctx.vault.createSecret(varName, answer.trim());
@@ -472,7 +468,8 @@ function makeExecutor(
           return;
         }
 
-        const next = applyProviderPatch(cur, patch);
+        const next  = applyProviderPatch(cur, patch, ctx.vault);
+        const moved = movedCredentialKeys(cur, next);
 
         const unwritable = unrepresentableYamlValue(next);
         if (unwritable !== undefined) {
@@ -498,12 +495,22 @@ function makeExecutor(
         }
 
         const show = (v: unknown): string => v === undefined ? '(unset)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v);
-        const diff = supplied.map(f => `  ${f}: ${show(cur[f])} → ${show(next[f])}`).join('\n');
+        // A credential is shown by the key it names, never by value: a literal secret in the yaml would
+        // otherwise be printed into a prompt every attached client receives.
+        const refs = (c: Record<string, string> | undefined): string =>
+          Object.values(c ?? {}).map(v => /^\$\{[^}]+\}$/.test(v) ? v : '(a literal value)').join(', ');
+        const diff = [
+          ...supplied.map(f => `  ${f}: ${show(cur[f])} → ${show(next[f])}`),
+          ...(moved.length > 0 ? [`  credentials: ${refs(cur.credentials)} → ${refs(next.credentials)}`] : []),
+        ].join('\n');
+        const detached = moved.length > 0
+          ? `\n\n**Its credential does not go with it**: the new endpoint is another origin, so the profile will read ${moved.join(', ')} instead, which is not set until supplied with \`plugin store-key\`.`
+          : '';
 
         // Confirmed like add/remove, and for a reason particular to update: the block is regenerated,
         // so any comment inside it does not survive. The caller sees that before it happens.
         const permit = await ctx.gate({ gate: 'update', subject: name, fallback: false,
-                                        label: `Update provider profile **"${name}"**?\n${diff}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_` });
+                                        label: `Update provider profile **"${name}"**?\n${diff}${detached}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_` });
         if (!permit.allowed) {
           yield { type: 'result', value: { message: refusalMessage(permit) } };
           return;
@@ -527,7 +534,11 @@ function makeExecutor(
           type:  'result',
           value: {
             message: `Profile "${name}" updated: ${supplied.join(', ')}.`
-              + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : ''),
+              + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : '')
+              + (moved.length > 0
+                ? ` Its credential was not sent to the new origin: the profile now reads ${moved.join(', ')}, which is not set. ` +
+                  'Ask the user to supply it with `plugin store-key`, if this endpoint should have one.'
+                : ''),
           },
         };
         return;

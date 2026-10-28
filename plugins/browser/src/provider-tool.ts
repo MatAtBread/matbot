@@ -37,9 +37,10 @@ export interface ProviderAdmin {
   available: AvailableProvider[];
   list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
-  /** Apply a patch to an existing profile — never its credentials (see {@link ProviderPatch}). `false`
-   *  ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
-  update(name: string, patch: ProviderPatch): Promise<boolean>;
+  /** Apply a patch to an existing profile with `applyProviderPatch`, and say which vault keys its credential
+   *  is now read from where the endpoint moved origin and the credential did not follow (empty otherwise).
+   *  `undefined` ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
+  update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined>;
   remove(name: string): Promise<boolean>;
 }
 
@@ -55,6 +56,13 @@ type ProviderInput =
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
  * exactly like `plugin store-key`. Persistence is entirely the injected {@link ProviderAdmin}'s concern.
  */
+/** What to tell the caller when a credential did not follow an endpoint to another origin. */
+function movedNote(keys: readonly string[]): string {
+  if (keys.length === 0) return '';
+  return ` Its credential was not sent to the new origin: the profile now reads ${keys.join(', ')}, which is not set. ` +
+         'Ask the user to supply it with the `plugin` tool\'s `store-key` action, if this endpoint should have one.';
+}
+
 export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResultOf<'provider'>> {
   const adapterList = () => admin.available.map((a, i) => `  ${i}. ${a.label}  (${a.module})`).join('\n');
 
@@ -134,11 +142,11 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         // No confirmation prompt and no endpoint probe, unlike the node tool: there is no YAML block to
         // rewrite (and so no comment to lose), and a browser cannot HEAD a third-party endpoint without
         // tripping CORS — a failed probe here would mean nothing about reachability.
-        const ok = await admin.update(name, patch);
+        const moved = await admin.update(name, patch);
         yield {
           type:  'result',
-          value: ok
-            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.` }
+          value: moved !== undefined
+            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedNote(moved)}` }
             : { message: `No provider named "${name}".` },
         };
         return;

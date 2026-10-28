@@ -11,6 +11,18 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.4.21
 
+### Breaking changes
+
+- **`applyProviderPatch(cur, patch, vault)`** — takes the vault (only its `hasKey`), and an `endpoint` that
+  moves a profile to another origin (scheme, host and port; clearing it back to the adapter's default
+  counts) no longer carries the credential (#111). The credential is sent wherever the endpoint points, so
+  an update could post the key to any host, and its prompt never said so. The profile is pointed at fresh
+  vault keys the vault does not hold, to be supplied out of band with `plugin store-key`; the old keys stay,
+  since another profile may share them. `movedCredentialKeys(cur, next)` names the new ones. A required
+  argument rather than an optional one, because every host applying a patch must apply this rule.
+  - The browser's `ProviderAdmin.update` returns those keys (`readonly string[] | undefined`) instead of a
+    boolean, so its tool can say so.
+
 ### API gaps filled
 
 - **A `validate` hook channel, for tool-input validators.** Core dispatches it at the executor, before every
@@ -216,6 +228,10 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`mcp`** — a local server's `env` values may name vault keys as `${KEY}`, read from the vault as the
   process starts and stored as written, never resolved (#111). It is how a server gets a token now that
   `.env` is not inherited; the spawn prompt names every key it will be given.
+- **`tool-plugin`, `browser`** — `provider update` follows the rule above: when the endpoint moves origin,
+  the confirmation (node) says the credential does not go with it and names the key it will read instead,
+  and both tools' results tell the model to have the user supply it with `plugin store-key`. A credential is
+  shown by key name only, never a literal value.
 
 ## 0.4.20
 

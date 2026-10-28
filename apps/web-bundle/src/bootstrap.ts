@@ -1,7 +1,7 @@
 import {
   getPluginNameForSpecifier, installPrincipalCarrier, createConstantPrincipalCarrier,
   installUsageCarrier, createSerialUsageCarrier, isMissingSecretError, loadPlugins,
-  unloadPlugin as unloadPluginFn, ProviderRegistryImpl, applyProviderPatch, assembleMachine, preScanStorage,
+  unloadPlugin as unloadPluginFn, ProviderRegistryImpl, applyProviderPatch, movedCredentialKeys, assembleMachine, preScanStorage,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, ProviderConfig, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
@@ -287,18 +287,19 @@ export async function boot(env: BootEnv): Promise<void> {
     providers.register(name !== undefined ? { ...cfg, module: name } : cfg);
     return cfg.name;
   };
-  // Patch an existing profile: merge, persist, re-register. No draft and no vault call — `update`
-  // carries no credential, so the stored `${ref}` (or its absence) rides through untouched, and the
-  // adapter cannot change, so nothing needs loading. A *baked* provider gets persisted to localStorage
+  // Patch an existing profile: merge, persist, re-register. `update` carries no credential, so the stored
+  // `${ref}` (or its absence) rides through untouched — unless the endpoint moves origin, when the vault is
+  // asked only for a fresh key name (see applyProviderPatch). The adapter cannot change, so nothing needs
+  // loading. A *baked* provider gets persisted to localStorage
   // by this, which is right: the seed overlay reads persisted profiles over baked ones, so the edit is
   // an override that survives a reload rather than one the next boot silently discards.
-  const updateProvider = async (name: string, patch: ProviderPatch): Promise<boolean> => {
+  const updateProvider = async (name: string, patch: ProviderPatch): Promise<readonly string[] | undefined> => {
     const cur = providers.get(name);
-    if (cur === undefined) return false;
-    const next = applyProviderPatch(cur, patch);
+    if (cur === undefined) return undefined;
+    const next = applyProviderPatch(cur, patch, services.Vault);
     savePersistedProvider(next);
     providers.register(next);
-    return true;
+    return movedCredentialKeys(cur, next);
   };
 
   const removeProvider = async (name: string): Promise<boolean> => {
