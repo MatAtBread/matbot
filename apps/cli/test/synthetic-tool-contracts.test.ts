@@ -62,7 +62,19 @@ const SESSION_STUB: Tool = {
   executor: { execute: () => (async function* () {})() },
 };
 
-const ALL = [SYNTHETIC, SYNTHETIC_API, SYNTHETIC_BAD, SESSION_STUB];
+// A function package's exports name the package's own types, carried on `toolContractTypes`. Two packages
+// each declaring a `Report` must not merge, and one whose declarations do not resolve fails alone.
+const typed = (name: string, toolContract: string, toolContractTypes: string): Tool => ({
+  name, description: 'a package export', inputSchema: { type: 'object' }, toolContract, toolContractTypes,
+  executor: { execute: () => (async function* () {})() },
+});
+const HUBS_TYPES = 'interface Report { hubs: Hub[] }\ninterface Hub { name: string; up: boolean }\ntype Mode = "quick" | "full"';
+const PKG_A_CHECK = typed('Hubs__check', 'ToolContract<Report, { mode: Mode; only?: Hub["name"][] }>', HUBS_TYPES);
+const PKG_A_LIST  = typed('Hubs__list',  'ToolContract<Hub[], { mode: Mode }>', HUBS_TYPES);
+const PKG_B       = typed('Other__run',  'ToolContract<Report, { report: Report }>', 'interface Report { total: number }');
+const PKG_BROKEN  = typed('Broken__run', 'ToolContract<Report, { x: string }>', 'interface Report { missing: NotDeclaredAnywhere }');
+
+const ALL = [SYNTHETIC, SYNTHETIC_API, SYNTHETIC_BAD, SESSION_STUB, PKG_A_CHECK, PKG_A_LIST, PKG_B, PKG_BROKEN];
 
 async function index(): Promise<ToolValidatorSupplier & {
   wireContracts(): Promise<Record<string, { params: string; result: string }>>;
@@ -151,4 +163,37 @@ test('one malformed contract is refused alone, taking nothing else with it', asy
     const v = validators[name];
     assert.ok(v && !('refused' in v), `${name} must survive its neighbour being broken`);
   }
+});
+
+test("a package's own types resolve for its exports, and two packages' types of one name never meet", async () => {
+  const validators = await (await index()).toolValidators();
+  const check = validators['Hubs__check'], list = validators['Hubs__list'], other = validators['Other__run'];
+  for (const [name, v] of [['Hubs__check', check], ['Hubs__list', list], ['Other__run', other]] as const) {
+    assert.ok(v && !('refused' in v), `${name} must be validated, got ${JSON.stringify(v)}`);
+  }
+  assert.deepEqual(check!.validate({ mode: 'full', only: ['hall'] }), []);
+  assert.ok(check!.validate({ mode: 'slow' }).length, 'a local alias is enforced');
+  assert.ok(check!.validate({ mode: 'quick', only: [1] }).length, 'and an indexed access into a local interface');
+  assert.deepEqual(other!.validate({ report: { total: 3 } }), [], "this package's Report");
+  assert.ok(other!.validate({ report: { hubs: [] } }).length, "not the other package's Report");
+});
+
+test('a package whose types do not resolve is refused alone', async () => {
+  const validators = await (await index()).toolValidators();
+  const broken = validators['Broken__run'];
+  assert.ok(broken && 'refused' in broken, `expected a refusal, got ${JSON.stringify(broken)}`);
+  assert.match(broken.refused, /NotDeclaredAnywhere/);
+  for (const name of ['Hubs__check', 'Other__run', 'synthetic_thing']) {
+    const v = validators[name];
+    assert.ok(v && !('refused' in v), `${name} must survive its neighbour's types being broken`);
+  }
+});
+
+test("the dts a body is checked against declares a package's types beside its contracts", async () => {
+  const dts = await (await index() as unknown as { dts(): Promise<string> }).dts();
+  assert.match(dts, /declare namespace ToolContractTypes\d+ \{[^}]*interface Report \{ hubs: Hub\[\] \}/);
+  assert.match(dts, /export type Hubs__check = ToolContract<Report, \{ mode: Mode; only\?: Hub\["name"\]\[\] \}>;/);
+  assert.match(dts, /"Hubs__check": ToolContractTypes\d+\.Hubs__check;/);
+  // One namespace for one package's exports, another for the other package.
+  assert.equal((dts.match(/declare namespace ToolContractTypes/g) ?? []).length, 3);
 });

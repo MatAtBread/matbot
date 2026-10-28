@@ -1,4 +1,5 @@
 import type { MatbotMachine, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import { contractArms } from '@matatbread/matbot-plugin-api';
 
 // A browser ToolTypeIndex. The node one (@matatbread/matbot-tool-types) runs the real TypeScript compiler
 // over each tool's on-disk source to recover its `ToolContracts` augmentation; the browser has neither the
@@ -188,16 +189,17 @@ class BrowserToolTypeIndex implements ToolTypeIndex {
   }
 
   async dts(): Promise<string> {
-    const arms = this.machine.tools.list().map(t => {
+    const { preamble, arms: armOf } = contractArms(this.machine.tools.list().map(t => {
       const emb = this.embedded[t.name];
       const contract = t.toolContract
         ?? (emb ? `ToolContract<${emb.result}, ${emb.params}>` : `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`);
-      return `    ${JSON.stringify(t.name)}: ${contract};`;
-    });
+      return { name: t.name, contract, types: t.toolContractTypes };
+    }));
+    const arms = [...armOf].map(([name, arm]) => `    ${JSON.stringify(name)}: ${arm};`);
     // `ToolContract` and the overloaded `tool` proxy resolve against plugin-api (textually — this dts is
     // shown to the model, not compiled here). A `toolContract` may name a plugin-api type (e.g. StoreQuery)
     // left bare; harmless in the shown text, which is enough for a composer to write `await tool.x(params)`.
-    return `import type { ToolContract } from '@matatbread/matbot-plugin-api';\n`
+    return `import type { ToolContract } from '@matatbread/matbot-plugin-api';\n${preamble}`
       + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`
       + `declare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\n`
       + `declare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\n`

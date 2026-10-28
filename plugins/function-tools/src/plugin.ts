@@ -590,6 +590,7 @@ class PackageStore {
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
         inputSchema:  e.inputSchema,
         toolContract: e.toolContract,
+        ...(e.toolContractTypes !== undefined ? { toolContractTypes: e.toolContractTypes } : {}),
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {

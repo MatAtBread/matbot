@@ -50,6 +50,11 @@ churn and less likely to affect a consumer who doesn't use them.
   since an approved host that answers 302 forwards the request to one nobody was asked about.
 - **`FunctionCall.fetch` / `FunctionCall.WebSocket`** — what a body's own `fetch` and `WebSocket` should be,
   handed to the runner per call beside `importModule`. Absent, the body has the platform's.
+- **`Tool.toolContractTypes`** and **`contractArms()`** — a `toolContract` string may name types declared
+  nowhere else (a function package's own `interface HubReport`), carried as declarations beside it.
+  `contractArms` writes such tools' `ToolContracts` arms for any file that declares them: each distinct set
+  of declarations in a namespace of its own, with an alias per tool, so the contract is kept as written and
+  two tools' types of one name never meet.
 
 ### Bug fixes
 
@@ -247,6 +252,11 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`cli`** — a background job's turns get no prompt, so a gate in one refuses as unattended (and is logged)
   instead of printing its question into the log and reading the answer from the closed pipe its config came
   on. A form there takes each field's default.
+- **`function-tools`, `tool-types`, `browser`** — a function package's export whose contract names the
+  package's own types is validated and typed. Each export carries the declarations its contract reaches
+  (`toolContractTypes`); they were missing from the program that types contract strings, so
+  `ts-validation` refused the tool ("Cannot find name 'HubReport'") and the dts named a type it never
+  declared. A declaration that does not resolve refuses only the tools that carry it.
 
 ## 0.4.20
 

@@ -290,3 +290,28 @@ test('a defined function or package runs under the runner current at each call, 
   }
   await teardown();
 });
+
+test("an export carries the package's own types its contract reaches, and no others", () => {
+  // Its contract is spliced into files that have never seen the package (the dts, the validator's program),
+  // so a type it names but does not carry is unresolved there, and the tool goes unvalidated.
+  const { exports } = parsePackage('Hubs', `
+interface HubReport { hubs: Hub[]; mode: Mode }
+interface Hub { name: string; up: boolean }
+type Mode = 'quick' | 'full'
+interface Unrelated { never: string }
+const LIMIT = 3
+
+export async function check(args: { mode: Mode }): Promise<HubReport> {
+  return { hubs: [], mode: args.mode };
+}
+
+export async function count(args: { n: number }): Promise<number> {
+  return args.n + LIMIT;
+}
+`);
+  const check = exports.find(e => e.name === 'check')!;
+  assert.equal(check.toolContract, 'ToolContract<HubReport, { mode: Mode }>');
+  assert.equal(check.toolContractTypes,
+    "interface HubReport { hubs: Hub[]; mode: Mode }\ninterface Hub { name: string; up: boolean }\ntype Mode = 'quick' | 'full'");
+  assert.equal(exports.find(e => e.name === 'count')!.toolContractTypes, undefined, 'a contract naming none carries none');
+});

@@ -1,5 +1,6 @@
 import type TS from 'typescript';
 import type { Runtime } from '@matatbread/matbot-plugin-api';
+import { contractArms } from '@matatbread/matbot-plugin-api';
 import { compileToolValidator, generateValidator, type ToolValidator, type ValidatorSource } from './validator.js';
 
 // Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
@@ -77,6 +78,9 @@ export interface MatbotToolsDts {
  * build read. Serialisable by construction, so a build can be kept beyond the process that made it; what
  * it depends on is exactly its arguments, tool-types itself, and the content of `files`.
  */
+/** A tool's `toolContract` string, with the declarations of its own it names (`toolContractTypes`). */
+export interface SyntheticContract { contract: string; types?: string }
+
 export interface ToolTypesData extends Omit<MatbotToolsDts, 'validators'> {
   validators: Record<string, ValidatorSource>;
   /** `dts` in pieces, one per tool, so {@link filterToolTypesData} can narrow it without a rebuild. */
@@ -239,7 +243,7 @@ export async function collectToolTypeRoots(
 // deliberately — for no gain. So this argument buys exactly one thing: the validators.
 export async function buildToolTypesData(
   projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
-  syntheticContracts?: Readonly<Record<string, string>>, runtime: Runtime = 'node',
+  syntheticContracts?: Readonly<Record<string, SyntheticContract>>, runtime: Runtime = 'node',
 ): Promise<ToolTypesData | null> {
   const ts = (await import('typescript')).default as typeof TS;
   const { join } = await import('node:path');
@@ -270,6 +274,14 @@ export async function buildToolTypesData(
   const TYPE_FLAGS = ts.SymbolFlags.Type | ts.SymbolFlags.Interface | ts.SymbolFlags.TypeAlias;
   const apiTypeNames = new Set(apiExports.filter(s => (s.flags & TYPE_FLAGS) !== 0).map(s => s.name));
 
+  // The namespace of contract types (see `contractArms`) that a diagnostic at `at` sits inside, as the tools it serves.
+  const namespaceServing = (sf: TS.SourceFile, at: number, namespaces: ReadonlyMap<string, readonly string[]>): readonly string[] | undefined => {
+    for (const st of sf.statements) {
+      if (ts.isModuleDeclaration(st) && at >= st.getStart() && at < st.getEnd()) return namespaces.get(st.name.getText());
+    }
+    return undefined;
+  };
+
   /**
    * Validators for the tools whose contract is a `toolContract` STRING. The emitter needs a `ts.Type`,
    * and a string is not one, so the strings are rendered into a virtual augmentation file and typed.
@@ -288,28 +300,31 @@ export async function buildToolTypesData(
    */
   const syntheticValidators = (): Record<string, ValidatorSource> => {
     const out: Record<string, ValidatorSource> = {};
-    const usable: Record<string, string> = {};
+    const usable: Record<string, SyntheticContract> = {};
 
     // Screened one at a time, BEFORE any is rendered into the shared file: they become properties of one
     // interface, where a single stray brace would swallow every arm after it and take the whole batch
     // down. A malformed string is a stated refusal rather than a silent absence — nothing else in the
     // system parses these, so until now a broken one was merely bad documentation.
-    for (const [name, text] of Object.entries(syntheticContracts ?? {})) {
-      const probe = ts.createSourceFile('/probe.ts', `type __P = ${text};\n`, ts.ScriptTarget.ES2022, true);
+    for (const [name, c] of Object.entries(syntheticContracts ?? {})) {
+      const probe = ts.createSourceFile('/probe.ts',
+        `type __P = ${c.contract};\n${c.types !== undefined ? `declare namespace __N {\n${c.types}\n}\n` : ''}`, ts.ScriptTarget.ES2022, true);
       const bad = (probe as unknown as { parseDiagnostics?: readonly TS.Diagnostic[] }).parseDiagnostics ?? [];
       if (bad.length > 0) {
         out[name] = { refused: `toolContract does not parse as a type: ${ts.flattenDiagnosticMessageText(bad[0]!.messageText, ' ')}` };
-      } else out[name] = (usable[name] = text, { refused: 'not resolved' });   // replaced below, or kept as the refusal
+      } else out[name] = (usable[name] = c, { refused: 'not resolved' });   // replaced below, or kept as the refusal
     }
     const names = Object.keys(usable);
     if (names.length === 0) return out;
 
-    const body = names.map(n => `    ${JSON.stringify(n)}: ${usable[n]!};`).join('\n');
+    // A contract naming types of its own gets them in a namespace beside it, and its arm is the alias there.
+    const { preamble, arms, namespaces } = contractArms(names.map(n => ({ name: n, contract: usable[n]!.contract, types: usable[n]!.types })));
+    const body = names.map(n => `    ${JSON.stringify(n)}: ${arms.get(n)!};`).join('\n');
     // Exactly the plugin-api types these arms name, from the resolved export set — the same rule
-    // `registryBlock` uses for the dts. A synthetic tool inlines its own shape types, so what is left is
-    // genuine plugin-api exports.
-    const referenced = ['ToolContract', ...[...apiTypeNames].filter(t => new RegExp(`\\b${t}\\b`).test(body))];
-    const src = `import type { ${[...new Set(referenced)].join(', ')} } from '@matatbread/matbot-plugin-api';\n`
+    // `registryBlock` uses for the dts. What a contract declares itself is in the preamble, so what is left
+    // is genuine plugin-api exports.
+    const referenced = ['ToolContract', ...[...apiTypeNames].filter(t => new RegExp(`\\b${t}\\b`).test(preamble + body))];
+    const src = `import type { ${[...new Set(referenced)].join(', ')} } from '@matatbread/matbot-plugin-api';\n${preamble}`
       + `declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${body}\n  }\n}\n`;
 
     const virtualPath = join(projectRoot, '__matbot_synthetic_contracts__.ts');
@@ -352,10 +367,19 @@ export async function buildToolTypesData(
         ? (ts.isStringLiteral(n.name) || ts.isIdentifier(n.name) ? n.name.text : undefined)
         : undefined;
       const msg = ts.flattenDiagnosticMessageText(d.messageText, ' ');
-      if (name !== undefined) broken.set(name, msg);
+      // Inside a namespace of contract types, it is the fault of the tools that namespace serves, and theirs
+      // only. Asked first: a property signature found in there belongs to a declared interface, not to an arm.
+      const served = namespaceServing(sf, d.start, namespaces);
+      if (served !== undefined) for (const k of served) broken.set(k, msg);
+      else if (name !== undefined) broken.set(name, msg);
       // A file-level diagnostic (a failed import) cannot be attributed to one arm, so it condemns them all.
       else for (const k of names) broken.set(k, msg);
     }
+
+    const aliasedContract = (node: TS.TypeNode): TS.TypeNode | undefined => {
+      if (!ts.isTypeReferenceNode(node) || !ts.isQualifiedName(node.typeName) || !namespaces.has(node.typeName.left.getText())) return undefined;
+      return chk.getSymbolAtLocation(node.typeName.right)?.declarations?.find(ts.isTypeAliasDeclaration)?.type;
+    };
 
     // Read the arms off the virtual file's own declarations rather than the merged ToolContracts symbol:
     // this Program has no scanned arms to merge, and going via the file keeps each tool's node in hand.
@@ -369,7 +393,8 @@ export async function buildToolTypesData(
             out[name] = { refused: `toolContract does not typecheck: ${fault}` };
             return;
           }
-          const ann = n.type;
+          // An arm that names a contract-types alias is read through to the contract written there.
+          const ann = aliasedContract(n.type) ?? n.type;
           const arms = ts.isUnionTypeNode(ann) ? [...ann.types] : [ann];
           const paramNodes: TS.TypeNode[] = [];
           let ok = true;
@@ -858,7 +883,7 @@ export function filterToolTypesData(data: ToolTypesData, liveToolNames: readonly
 /** {@link buildToolTypesData}, with every validator compiled — the in-process form. */
 export async function buildMatbotToolsDts(
   projectRoot: string, pluginEntryUrls?: readonly string[], liveToolNames?: readonly string[],
-  syntheticContracts?: Readonly<Record<string, string>>, runtime: Runtime = 'node',
+  syntheticContracts?: Readonly<Record<string, SyntheticContract>>, runtime: Runtime = 'node',
 ): Promise<MatbotToolsDts | null> {
   const data = await buildToolTypesData(projectRoot, pluginEntryUrls, liveToolNames, syntheticContracts, runtime);
   if (!data) return null;

@@ -314,6 +314,12 @@ export interface Tool<R = unknown> {
    *  its contract as a `ToolContracts` augmentation instead and omits this. Foreign tools (e.g. MCP proxies)
    *  that have neither fall back to the loose `inputSchema`. */
   toolContract?: string;
+  /** Declarations (`interface`, `type`) that {@link toolContract} names and that exist nowhere else — a
+   *  function package's own types, which its exports' contracts refer to by name. In scope for this tool's
+   *  contract only: a consumer declares them in a namespace of their own beside the contract
+   *  (`contractArms`), so two tools' types of one name never meet. Absent ⇒ the contract names only
+   *  plugin-api types and TypeScript's own. */
+  toolContractTypes?: string;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

@@ -21,6 +21,8 @@ export interface PackageExport {
   resultType:  string;
   inputSchema: JSONSchema;
   toolContract: string;
+  /** The package's own type declarations the contract names, directly or through one another. */
+  toolContractTypes?: string;
 }
 
 export interface ParsedPackage {
@@ -77,9 +79,40 @@ function assertStatement(source: string, at: number): void {
  * `const` or `type` ends at a top-level `;`, or at a line break where ASI would end it: the token before
  * can end an expression and the token after cannot continue one.
  */
-function assertStatelessTopLevel(source: string): void {
+function assertStatelessTopLevel(source: string): TypeDeclaration[] {
+  const types: TypeDeclaration[] = [];
   let at = nextSignificant(source, 0);
-  while (at !== -1) at = nextSignificant(source, declarationEnd(source, at) + 1);
+  while (at !== -1) {
+    const end = declarationEnd(source, at);
+    const declared = /^(?:interface|type)\s+([A-Za-z_$][\w$]*)/.exec(source.slice(at, at + 120));
+    if (declared !== null) types.push({ name: declared[1] as string, text: source.slice(at, end + 1).trimEnd() });
+    at = nextSignificant(source, end + 1);
+  }
+  return types;
+}
+
+/** A top-level `interface` or `type` of a package, which its exports' contracts may name. */
+interface TypeDeclaration { name: string; text: string }
+
+/**
+ * The declarations `contract` reaches: those it names, then those they name, and so on. A contract is
+ * spliced into files that have never seen the package (the dts, the validator's program), so a name it
+ * leaves behind does not resolve there — and the validator then refuses the tool rather than check it.
+ * Matched as whole words, which can only over-include: a property that happens to share a type's name
+ * brings that declaration along, which is harmless.
+ */
+function typesReachedBy(contract: string, declared: readonly TypeDeclaration[]): string | undefined {
+  const used = new Set<TypeDeclaration>();
+  const pending = [contract];
+  while (pending.length > 0) {
+    const text = pending.pop() as string;
+    for (const d of declared) {
+      if (used.has(d) || !new RegExp(`(?<![\\w$])${d.name.replace(/\$/g, '\\$')}(?![\\w$])`).test(text)) continue;
+      used.add(d);
+      pending.push(d.text);
+    }
+  }
+  return used.size === 0 ? undefined : declared.filter(d => used.has(d)).map(d => d.text).join('\n');
 }
 
 const headLine = (s: string, at: number): string => (s.slice(at, at + 80).split('\n')[0] ?? '').trim();
@@ -275,7 +308,7 @@ function leadingComment(s: string, at: number): string | undefined {
  */
 export function parsePackage(packageName: string, source: string): ParsedPackage {
   assertPackageName(packageName);
-  assertStatelessTopLevel(source);
+  const types = assertStatelessTopLevel(source);
   const exports: PackageExport[] = [];
   const exportAt: number[] = [];
   let depth = 0;
@@ -303,7 +336,7 @@ export function parsePackage(packageName: string, source: string): ParsedPackage
     const end     = functionEnd(source, open);
     if (end === -1) throw new Error(`could not find the body of exported function "${head[2]}" — check that its braces balance.`);
     const fnSource = source.slice(fnStart, end + 1);
-    exports.push(deriveExport(packageName, head[2] as string, fnSource, leadingComment(source, i)));
+    exports.push(deriveExport(packageName, head[2] as string, fnSource, leadingComment(source, i), types));
     exportAt.push(i);
     i = end;
   }
@@ -317,7 +350,7 @@ export function parsePackage(packageName: string, source: string): ParsedPackage
   return { exports, exportAt };
 }
 
-function deriveExport(packageName: string, name: string, fnSource: string, description: string | undefined): PackageExport {
+function deriveExport(packageName: string, name: string, fnSource: string, description: string | undefined, types: readonly TypeDeclaration[]): PackageExport {
   if (!/^[A-Za-z]\w*$/.test(name) || name.includes(PACKAGE_SEPARATOR)) {
     throw new Error(`exported function "${name}" must start with a letter and contain no "${PACKAGE_SEPARATOR}" — its tool name is "${packageName}${PACKAGE_SEPARATOR}${name}", which must read back one way.`);
   }
@@ -337,6 +370,8 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
     throw new Error(`exported function "${name}" takes a ${String(schema.type)} — a tool's parameter must be an object, e.g. \`${name}(args: { value: ${param?.type ?? 'string'} })\`.`);
   }
   const resultType = unwrapPromise(sig.returnType);
+  const toolContract = `ToolContract<${resultType}, ${param?.type ?? '{}'}>`;
+  const toolContractTypes = typesReachedBy(toolContract, types);
   return {
     name, toolName,
     ...(description !== undefined ? { description } : {}),
@@ -344,7 +379,8 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
     ...(param !== undefined ? { param } : {}),
     resultType,
     inputSchema: { ...schema, type: 'object' },
-    toolContract: `ToolContract<${resultType}, ${param?.type ?? '{}'}>`,
+    toolContract,
+    ...(toolContractTypes !== undefined ? { toolContractTypes } : {}),
   };
 }
 

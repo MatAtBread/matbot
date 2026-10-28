@@ -20,6 +20,7 @@ export * from './provider-patch.js';
 export * from './session.js';
 export * from './invoke-tool.js';
 export * from './fetch-origin.js';
+export * from './contract-arms.js';
 
 // The plugin half of the machine: MatbotPlugin/MatbotServices/MatbotRuntime, the mount-table *consumer*
 // contract, and the API version a plugin declares. Host assembly is in ./host-machine.ts.
