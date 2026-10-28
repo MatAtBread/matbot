@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolEvent, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
-              PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
+              PluginToolContract, DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-plugin-api';
 import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
          getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
@@ -17,6 +17,7 @@ import { planProvision, applyProvision, discardProvision, removeProvisioned, loc
 import { readInstallRecord, writeInstallRecord, dropInstallRecord, declaredDependencies, isPackageName,
          type InstallRecord } from '../install-record.js';
 import { findDuplicateSingletons } from '../singletons.js';
+import { fingerprintDir, forgetLoaded, loadedFingerprint, pluginFingerprint } from '../fingerprint.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -571,6 +572,25 @@ async function* provisionRemoteDependencies(
     return { outcome: 'failed', reason: err instanceof Error ? err.message : String(err) };
   }
   return { outcome: 'installed', packages: plan.packages.length };
+}
+
+/**
+ * The question a reload must ask when the code it would import is not the code that was loaded: anything
+ * on disk may have been rewritten since (by `skills_compiler`, or by a script), and a refresh fetches
+ * whatever upstream now serves. Undefined when there is nothing to ask — the plugin was never loaded in
+ * this process (the `load` gate's question), or its code is unchanged. Code no digest could be taken of
+ * counts as changed.
+ */
+async function approveNewCode(ctx: ToolContext, entry: string, now: Promise<string | undefined>): Promise<PermissionDecision | undefined> {
+  const before = loadedFingerprint(entry);
+  if (before === undefined) return undefined;
+  const [was, is] = await Promise.all([before, now]);
+  if (was !== undefined && was === is) return undefined;
+  return ctx.gate({
+    gate: 'reload', subject: entry, fallback: false,
+    label: `The code of plugin **"${entry}"** has changed since it was loaded. Load the new code? It runs with matbot's full access.`,
+    standing: [{ subject: entry, label: `Always allow reloading "${entry}" when its code has changed` }],
+  });
 }
 
 // ── Input types ───────────────────────────────────────────────────────────────
@@ -1137,6 +1157,7 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         }
       }
       await dropInstallRecord(dotPlugins, entry);
+      forgetLoaded(entry);
 
       yield { type: 'result', value: { message: `"${entry}" removed and deactivated.` } };
     }
@@ -1148,6 +1169,26 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       const entry = toConfigSpecifier(specifier);
       yield { type: 'stdout', chunk: `Reloading "${entry}"...\n` };
 
+      // Default refresh=true: for a remote (github/http) plugin, reload means "pick up the latest
+      // upstream source" — the cross-source analog of how a local reload always reflects on-disk edits.
+      // Pass refresh:false to re-run setup() against the cached copy (e.g. to reset state, or offline).
+      const { refresh = true } = input as { refresh?: boolean };
+      const dotPlugins = path.join(projectDir, '.plugins');
+      // Only a fetched plugin has a refresh to undo: a local reload reflects on-disk edits and an npm one
+      // re-imports node_modules, neither of which this path writes to or evicts.
+      const refreshed = refresh && (await classifySpecifier(entry, projectDir)).kind === 'http';
+
+      // Code that is already on disk is checked before anything is unloaded, so a refusal leaves the
+      // plugin running as it was. A refresh is checked once fetched, below, where a refusal restores the
+      // cached copy instead.
+      if (!refreshed) {
+        const permit = await approveNewCode(ctx, entry, pluginFingerprint(entry, projectDir));
+        if (permit !== undefined && !permit.allowed) {
+          yield { type: 'result', value: { message: refusalMessage(permit, `Reloading "${entry}" with its changed code`) } };
+          return;
+        }
+      }
+
       let wasLoaded: boolean;
       try {
         wasLoaded = await ctx.unloadPlugin(entry);
@@ -1158,9 +1199,9 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
         wasLoaded = true;
       }
 
-      // Reloading a resident plugin needs no confirmation — the user already trusts it. But if
-      // nothing was unloaded, "reload" is really a first-time load of code they haven't consented
-      // to, so gate it with the same confirmation as add/remove.
+      // Reloading a resident plugin's unchanged code needs no confirmation — that code is what was approved
+      // (changed code was asked about above). But if nothing was unloaded, "reload" is really a first-time
+      // load of code they haven't consented to, so gate it with the same confirmation as add/remove.
       if (!wasLoaded) {
         const permit = await ctx.gate({ gate: 'load', subject: entry, fallback: false,
                                         label: `Plugin **"${entry}"** is not currently loaded — load it now?` });
@@ -1169,15 +1210,6 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
           return;
         }
       }
-
-      // Default refresh=true: for a remote (github/http) plugin, reload means "pick up the latest
-      // upstream source" — the cross-source analog of how a local reload always reflects on-disk edits.
-      // Pass refresh:false to re-run setup() against the cached copy (e.g. to reset state, or offline).
-      const { refresh = true } = input as { refresh?: boolean };
-      const dotPlugins = path.join(projectDir, '.plugins');
-      // Only a fetched plugin has a refresh to undo: a local reload reflects on-disk edits and an npm one
-      // re-imports node_modules, neither of which this path writes to or evicts.
-      const refreshed = refresh && (await classifySpecifier(entry, projectDir)).kind === 'http';
 
       // A refresh is fetched HERE, not inside the load, so that a dependency the new copy declares and the
       // cached one never had is offered before anything is loaded — not after a load that was always going to
@@ -1189,6 +1221,8 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       if (refreshed) {
         try {
           const m = await materializeRemote(entry, dotPlugins, projectDir, /* forceRefresh */ true);
+          const permit = await approveNewCode(ctx, entry, fingerprintDir(m.pkgRoot));
+          if (permit !== undefined && !permit.allowed) throw new Error(refusalMessage(permit, 'Loading its new upstream code'));
           const dep = yield* provisionRemoteDependencies(ctx, entry, m);
           switch (dep.outcome) {
             case 'installed':  installed = dep.packages; break;
@@ -1328,7 +1362,7 @@ export const pluginTool: Tool<ToolResultOf<'plugin'>> = {
       action: {
         type:        'string',
         enum:        ['list', 'add', 'remove', 'reload', 'discover_local', 'store-key'],
-        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister, delete a github/http plugin\'s cached copy, and offer back what add installed into the project. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band. Leaving that value blank removes the named key instead.',
+        description: 'list: show configured plugins. add: install and register a plugin. remove: deregister, delete a github/http plugin\'s cached copy, and offer back what add installed into the project. reload: unload and re-import (picks up code changes without restarting; for a remote plugin re-downloads the latest upstream source by default — see refresh). The user is asked first when the code has changed since it was loaded. discover_local: scan plugins and the .plugins cache for installable plugins (each result reports its source). store-key: supply a secret (e.g. an API key) that a plugin or provider reported missing — you provide only the key name; the value is entered out-of-band. Leaving that value blank removes the named key instead.',
       },
       refresh: {
         type:        'boolean',

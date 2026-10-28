@@ -27,7 +27,8 @@ import { EnvFileVault }                     from './env-vault.js';
 import { answerSelect, renderSelect }        from './select.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
-         findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
+         findDuplicateSingletons, describeDuplicateSingleton, pluginFingerprint, recordLoaded,
+         type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
 import { access, mkdir, readFile, writeFile }          from 'node:fs/promises';
 import { readFileSync, realpathSync }       from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
@@ -889,8 +890,11 @@ async function main(): Promise<void> {
         // (the file:// cache-bust only re-evaluates bytes, it can't refetch them). Default off: a
         // programmatic load stays cache-first and offline-tolerant. `plugin reload` opts in.
         const resolved = await resolvePluginSpecifiers([specifier], configDir, refresh);
+        // Taken before the import, so it describes the code that ran (see `recordLoaded`).
+        const fingerprint = pluginFingerprint(specifier, configDir);
         const plugin   = (await loadPluginsWithDescriptions(resolved, machine(), configDir, /* bustCache */ true, prompt, /* onLoadError */ 'throw'))[0];
         if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
+        recordLoaded(specifier, fingerprint);
         return plugin;
       },
       async unloadPlugin(specifier: string): Promise<boolean> {
@@ -933,7 +937,13 @@ async function main(): Promise<void> {
   };
   recordOrigPaths(providerModules);
 
+  // Not awaited: digests of every configured plugin are not worth holding boot for, and the first reload
+  // to need one waits for it.
+  const fingerprints = new Map(resolvedPluginMods.map(r => [r.spec, pluginFingerprint(r.spec, configDir)] as const));
   await loadPluginsWithDescriptions(resolvedPluginMods, services, configDir);
+  for (const [spec, fingerprint] of fingerprints) {
+    if (getPluginNameForSpecifier(spec) !== undefined) recordLoaded(spec, fingerprint);
+  }
   loaded();
 
   // Said once, now that the installed set is known and before anything uses it. A second copy of a host

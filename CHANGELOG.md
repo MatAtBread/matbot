@@ -198,6 +198,14 @@ churn and less likely to affect a consumer who doesn't use them.
   whole package's), so a redefinition asks again instead of inheriting what the reviewed version was
   granted. "Any function" answers and `#execute` are unchanged. Narrow standing answers stored before this
   no longer match and are asked once more.
+- **`tool-plugin`** — `plugin reload` asks before importing code that has changed since the plugin was
+  loaded (#111). A reload of a resident plugin was never asked about, but it imports whatever is on disk or
+  upstream now, which the model can change (`skills_compiler` writes a plugin; `refresh` re-fetches one).
+  The host records a digest of each plugin's own files as it loads it, boot included (in memory, so a
+  restart re-records what the configuration loads); gate `plugin.reload`, subject the config entry, with
+  `fallback: false`. Code already on disk is checked before anything is unloaded, so a refusal leaves the
+  plugin running; a refreshed copy is checked once fetched, and a refusal restores the cached one. A
+  recompiled skill is therefore asked about on its reload; a standing answer for that plugin covers it.
 
 ## 0.4.20
 
