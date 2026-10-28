@@ -269,6 +269,9 @@ churn and less likely to affect a consumer who doesn't use them.
   session keeps them when it later runs in a background job. Links are kept in the plugin's settings, never
   on the stored definition, so text written any other way starts a fresh lineage. Prompts name "function
   F" rather than "F as currently defined".
+- **`docker-bash`** — the project's `.env` is covered by `/dev/null` inside the container, so it reads as
+  empty (#111). The project is mounted read-only, which kept the file from being written but left every
+  secret in it readable to a script. Containers made without the cover are replaced on their next use.
 
 ## 0.4.20
 

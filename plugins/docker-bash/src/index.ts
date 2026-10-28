@@ -3,7 +3,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { streamProcess, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from '@matatbread/matbot-tool-bash/stream';
 import type { ChildProcess } from 'node:child_process';
 import { spawn, execFile } from 'node:child_process';
-import { mkdir, readdir } from 'node:fs/promises';
+import { mkdir, readdir, stat } from 'node:fs/promises';
 import { getServers } from 'node:dns';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -222,18 +222,32 @@ async function readOnlyPaths(dataPath: string): Promise<string[]> {
   return ['settings', ...(await readdir(dataPath)).filter(f => SQLITE_FILE.test(f))].sort();
 }
 
+/**
+ * Files in the project root a script may not read at all, relative to it. The project is mounted read-only,
+ * which kept `.env` from being written and left every secret in it readable — the vault's file, holding the
+ * keys the gates exist to keep a script from sending. Each is covered by `/dev/null`, so it reads as empty.
+ * Only one that exists, since a mount needs something to cover; that is why it is part of the label, so a
+ * container made before the file existed is replaced once it does.
+ */
+const HIDDEN_FILES = ['.env'];
+async function hiddenPaths(projectRoot: string): Promise<string[]> {
+  const present = await Promise.all(HIDDEN_FILES.map(f => stat(`${projectRoot}/${f}`).then(st => st.isFile(), () => false)));
+  return HIDDEN_FILES.filter((_, i) => present[i]);
+}
+
 async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
   const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
   await mkdir(dataPath, { recursive: true });
   const readOnly = await readOnlyPaths(dataPath);
-  const label = readOnly.join(',');
+  const hidden   = await hiddenPaths(cfg.projectRoot);
+  const label = `ro:${readOnly.join(',')};hidden:${hidden.join(',')}`;
 
   let state: string | undefined;
   try {
     state = await dockerExec(['inspect', '--format', `{{.State.Running}} {{index .Config.Labels "${READONLY_LABEL}"}}`, cfg.name]);
   } catch { /* no such container */ }
   // A container made with another set — including one from before any were protected — is replaced: its
-  // mounts are fixed at creation, and leaving it would leave the gate answers writable.
+  // mounts are fixed at creation, and leaving it would leave the gate answers writable or `.env` readable.
   if (state !== undefined && state.slice(state.indexOf(' ') + 1) !== label) {
     await removeContainer(cfg.name);
     state = undefined;
@@ -252,6 +266,7 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
       '-v', `${dataPath}:${cfg.mountPoint}/${cfg.dataSubdir}`,
       // Over the read-write mount above: a nested mount wins for its own path.
       ...readOnly.flatMap(p => ['-v', `${dataPath}/${p}:${cfg.mountPoint}/${cfg.dataSubdir}/${p}:ro`]),
+      ...hidden.flatMap(f => ['-v', `/dev/null:${cfg.mountPoint}/${f}:ro`]),
       cfg.image,
       'sleep', 'infinity',
     );
@@ -494,7 +509,7 @@ const TOOL_DESCRIPTION =
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'The container runs node:24-bookworm (Debian 12, Node 24 + npm preinstalled) with network access; ' +
   'install standard packages with apt freely. ' +
-  'The project root is mounted read-only at /app; /app/.data is read-write, except its settings and any SQLite database, which are read-only. ' +
+  'The project root is mounted read-only at /app, with its .env hidden (it reads as empty); /app/.data is read-write, except its settings and any SQLite database, which are read-only. ' +
   'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
   `The script and every process it spawns are killed after \`timeout\` milliseconds (default ${DEFAULT_TIMEOUT_MS}) ` +
   `or once combined stdout+stderr reaches \`maxOutputBytes\` (default ${DEFAULT_MAX_OUTPUT_BYTES}), whichever comes ` +

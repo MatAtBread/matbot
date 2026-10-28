@@ -112,8 +112,9 @@ replace it.
 
 - **`bash` grants everything** the user matbot runs as can do: files, network, processes, and the stored
   gate answers. Install it only where that is intended.
-- **`docker-bash`** runs scripts in a container. The project is mounted read-only; `.data` is read-write,
-  except its `settings` and any SQLite database, which hold the gate answers and are mounted read-only.
+- **`docker-bash`** runs scripts in a container. The project is mounted read-only, with its `.env` covered
+  so it reads as empty; `.data` is read-write, except its `settings` and any SQLite database, which hold the
+  gate answers and are mounted read-only.
   Its network is Docker's default bridge (see the web UI section).
 
 ## Secrets
