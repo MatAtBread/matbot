@@ -50,6 +50,8 @@ async function rig(seed: (r: Omit<Rig, 'call' | 'swap'>) => void = () => {}): Pr
     Notifier: { notify() {}, consume() {} },
     mounted: { observe(_o: unknown, h: () => void | Promise<void>) { observers.push(h); } },
     systemContext: { register() {} },
+    // function-tools keeps its permission lineage in its own settings.
+    settings: (() => { const m = new Map<string, unknown>(); const s = { get: async (k: string) => m.get(k), set: async (k: string, v: unknown) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); }, entries: async () => Object.fromEntries(m) }; return () => s; })(),
     createStore: (ns: string) => {
       const m = docs(ns) as unknown as Map<string, { version: string }>;
       const guard = (id: string) => { const e = refuse.get(id); if (e !== undefined) throw e(); };

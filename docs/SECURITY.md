@@ -43,11 +43,15 @@ the ones with no human behind them, and it can be withdrawn with `gate_action`.
 | `http.secret` | The `http` tool sends a vault key to an origin |
 | `tool_function.import` | A function body imports a module |
 | `tool_function.connect` | A function body's `fetch` or `WebSocket` reaches an origin, including by redirect |
+| `tool_function.edit` | A function or package that uses `import(`, `fetch` or `WebSocket` is redefined: may the new version keep the grants? |
 | `telegram_open_door.open` | The Telegram door is opened to new chats |
 | `tools.overwrite` | A plugin registers a tool another plugin owns |
 
-A function's own grants name its **version** as well as its name, so redefining it asks again. "Any
-function" answers do not, being the user's choice to extend a grant across versions.
+A function's own grants name its **lineage**: the version it descends from by edits the user permitted
+to keep them. An edit nobody permitted, or one made where nobody can be asked (another process, a job,
+an HTTP call), starts a lineage of its own, so its grants are asked for again. Permission to keep them is
+given per function and per session ("always, for edits to this function in this session"), while the
+grants themselves hold wherever the function runs. "Any function" answers name no lineage at all.
 
 A provider's credential does not follow its endpoint to another origin: `provider update` points the
 profile at a fresh, unset vault key instead, for the user to supply with `plugin store-key`.

@@ -261,6 +261,14 @@ churn and less likely to affect a consumer who doesn't use them.
   (`args: CheckArgs`) gets a real input schema: the name is read as what it declares (an interface's body,
   an alias's type), and a local union alias joins the union it appears in. It was `{}`, so
   `json-validation` — the browser's only validator — accepted anything. A generic declaration stays open.
+- **`function-tools`** — editing a function no longer re-asks for its imports and connections, when the
+  user permits it. A function's grants are filed under its lineage (the version it descends from by
+  permitted edits), not the digest of its current text, and a redefinition of one that uses `import(`,
+  `fetch` or `WebSocket` asks `tool_function.edit` whether the new version keeps them — offering "always,
+  for edits to this function in this session". The grants stay general, so a function developed in a
+  session keeps them when it later runs in a background job. Links are kept in the plugin's settings, never
+  on the stored definition, so text written any other way starts a fresh lineage. Prompts name "function
+  F" rather than "F as currently defined".
 
 ## 0.4.20
 

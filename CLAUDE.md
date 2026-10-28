@@ -955,12 +955,18 @@ runner's: a global that is shadowed but not rejected typechecks and fails at the
 one failure the check gate exists to prevent. The half that matters most is the half with no node types
 behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
 
-**A grant names the function's VERSION, not only its name** — `<name>@<digest>`, the digest of the text
+**A grant names the function's LINEAGE, not only its name** — `<name>@<digest>`, the digest of the text
 function-tools compiled (a package export's is the whole package's), computed by function-tools and never
-taken from the body (`Function.prototype.toString` is the body's to override). Redefinition is the one door
-the model controls, and keyed on the name it inherited what the reviewed version had been granted. The cost
-is a question per attempt while a model iterates; an answer spanning versions is the user's to give, as the
-"any function" standing answer, which is unversioned. `#execute` is unversioned too, having no identity,
+taken from the body (`Function.prototype.toString` is the body's to override), then resolved to the first
+version of the lineage it descends from. Redefinition is the one door the model controls, and keyed on the
+name it inherited what the reviewed version had been granted; keyed on the digest alone, a function under
+development asked for its imports and connections again at every edit. So the two questions are separate:
+the GRANTS are general (they hold wherever the function runs, a background job included), and whether an
+edit KEEPS them is its own gate, `tool_function.edit`, asked at a redefinition of a function that uses
+`import(`, `fetch` or `WebSocket`, with "always, for edits to this function in this session" among the
+answers. A permitted edit links the new digest to the lineage in function-tools' SETTINGS — never on the
+stored definition, which a `docker-bash` script can write while settings are read-only there — so text
+written any other way is a lineage of its own. The "any function" standing answer is unversioned. `#execute` is unversioned too, having no identity,
 and its label already says a standing answer covers every one-off body. The same subject keys a body's
 network gate (`tool_function.connect`).
 

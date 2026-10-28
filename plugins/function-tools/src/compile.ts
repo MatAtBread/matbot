@@ -241,13 +241,15 @@ async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: str
  * reports about itself (`Function.prototype.toString` is the body's to override). So any change to a
  * definition, by any route, is a different subject. `@` cannot appear in a function name.
  *
- * The prose says "as currently defined" because that is what a narrow standing answer now covers. An
- * `execute` body keeps its fixed `#execute`: it has no identity to version, and its label already says a
- * standing answer covers every one-off body.
+ * `resolve` maps that subject to the one its grants are filed under: the first version of the lineage it
+ * descends from by edits the user permitted to keep them (see `Lineage`), else itself. An `execute` body
+ * keeps its fixed `#execute`: it has no identity to version, and its label already says a standing answer
+ * covers every one-off body.
  */
-async function askerFor(label: { tool: string; compiled: string } | undefined): Promise<Asker> {
+async function askerFor(label: { tool: string; compiled: string; resolve?: (versioned: string) => Promise<string> } | undefined): Promise<Asker> {
   if (label === undefined) return { namespace: TOOL_NAME, fn: EXECUTE_SUBJECT, who: 'a one-off function body' };
-  return { namespace: TOOL_NAME, fn: await versionedSubject(label.tool, label.compiled), who: `function "${label.tool}" as currently defined` };
+  const versioned = await versionedSubject(label.tool, label.compiled);
+  return { namespace: TOOL_NAME, fn: label.resolve !== undefined ? await label.resolve(versioned) : versioned, who: `function "${label.tool}"` };
 }
 
 /** `<name>@<version>`: the version is the first 128 bits of the SHA-256 of `compiled`, enough that no body
@@ -302,7 +304,7 @@ export async function* runFunction(
   ctx:       ToolContext,
   fn:        CompiledFn,
   argValues: unknown[],
-  label?:    { tool: string; source: string; compiled?: string; gateSubject?: string },
+  label?:    { tool: string; source: string; compiled?: string; gateSubject?: string; resolve?: (versioned: string) => Promise<string> },
 ): AsyncIterable<ToolEvent> {
   const queue: ToolEvent[] = [];
   let wake: (() => void) | null = null;
@@ -341,7 +343,7 @@ export async function* runFunction(
   // throws has no listener to leave behind.
   // `gateSubject` marks an `execute` body, whose label is prose ("tool_function execute"), not a name.
   const asker = await askerFor(label === undefined || label.gateSubject !== undefined ? undefined
-                               : { tool: label.tool, compiled: label.compiled ?? label.source });
+                               : { tool: label.tool, compiled: label.compiled ?? label.source, ...(label.resolve !== undefined ? { resolve: label.resolve } : {}) });
   let settings: FunctionRunSettings | undefined;
   try { settings = await machine.FunctionRunner?.settings?.(); }
   catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
