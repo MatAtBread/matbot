@@ -206,6 +206,16 @@ churn and less likely to affect a consumer who doesn't use them.
   `fallback: false`. Code already on disk is checked before anything is unloaded, so a refusal leaves the
   plugin running; a refreshed copy is checked once fetched, and a refusal restores the cached one. A
   recompiled skill is therefore asked about on its reload; a standing answer for that plugin covers it.
+- **`cli`** — `.env`'s secrets are kept out of the process environment (#111). Every process matbot starts
+  inherits it (`bash`, an MCP server, `npm` running a fetched plugin's install scripts), so a secret there
+  went to all of them with no gate asked. The vault now reads `.env` itself, and its keys are removed from
+  the environment once it has, including when something else loaded the file (a systemd
+  `EnvironmentFile=`). `MATBOT_WEB_PORT` and `MATBOT_PRINCIPAL` are still applied from `.env`. **Breaking**
+  for anything that read a `.env` value from the environment directly, such as a local MCP server relying
+  on inheriting a token: name it in that server's `env:` as `${KEY}` instead (see `mcp`).
+- **`mcp`** — a local server's `env` values may name vault keys as `${KEY}`, read from the vault as the
+  process starts and stored as written, never resolved (#111). It is how a server gets a token now that
+  `.env` is not inherited; the spawn prompt names every key it will be given.
 
 ## 0.4.20
 

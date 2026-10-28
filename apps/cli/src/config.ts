@@ -84,19 +84,30 @@ function parseDotEnv(text: string): Record<string, string> {
   return out;
 }
 
-export async function loadDotEnv(dir: string): Promise<Set<string>> {
-  let text: string;
-  try {
-    text = await readFile(path.join(dir, '.env'), 'utf8');
-  } catch {
-    return new Set();
+/** matbot's own settings that are read from the environment, and so may come from `.env` too. Everything
+ *  else in `.env` is the vault's, and never reaches `process.env` (see {@link withholdDotEnv}). */
+const CONFIG_VARS = new Set(['MATBOT_WEB_PORT', 'MATBOT_PRINCIPAL']);
+
+export async function readDotEnv(dir: string): Promise<Record<string, string>> {
+  try { return parseDotEnv(await readFile(path.join(dir, '.env'), 'utf8')); } catch { return {}; }
+}
+
+/** Apply the matbot settings a `.env` carries, where the environment does not already say otherwise. The
+ *  secrets beside them are read into the vault, not here. */
+export async function loadDotEnv(dir: string): Promise<void> {
+  for (const [key, value] of Object.entries(await readDotEnv(dir))) {
+    if (CONFIG_VARS.has(key) && !(key in process.env)) process.env[key] = value;
   }
-  const applied = new Set<string>();
-  for (const [key, value] of Object.entries(parseDotEnv(text))) {
-    if (!(key in process.env)) {
-      process.env[key] = value;
-      applied.add(key);
-    }
-  }
-  return applied;
+}
+
+/**
+ * Take `.env`'s keys back out of `process.env`, once the vault holds them. Every process matbot starts
+ * inherits `process.env` — `bash`, an MCP server, `npm` installing a fetched plugin's dependencies and
+ * running their install scripts — so a secret left there is handed to all of them, and the vault's gates
+ * are not asked. They were copied in by matbot itself, and are put there by whatever starts it too (a
+ * systemd `EnvironmentFile=`), which is why this removes rather than merely not copying. A secret exported
+ * in the environment under a name `.env` does not use is not matbot's to know about, and stays.
+ */
+export function withholdDotEnv(dotEnv: Record<string, string>): void {
+  for (const key of Object.keys(dotEnv)) if (!CONFIG_VARS.has(key)) delete process.env[key];
 }

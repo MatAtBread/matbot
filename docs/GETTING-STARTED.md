@@ -292,6 +292,14 @@ own plugin. Either way:
 A missing secret throws `MissingSecretError`. Secrets are resolved on use and never
 written to session storage.
 
+The vault reads `.env` itself; its keys are not left in matbot's process environment, so
+no process matbot starts (`bash`, an MCP server, an `npm` install) inherits them. That
+holds even when something else loads the file into the environment, such as a systemd
+`EnvironmentFile=`: matbot removes `.env`'s keys from its environment once the vault has
+them. The exceptions are matbot's own settings, `MATBOT_WEB_PORT` and `MATBOT_PRINCIPAL`.
+A secret exported in the environment under a name `.env` does not use stays there, so keep
+secrets in `.env`.
+
 `.env` example:
 
 ```sh

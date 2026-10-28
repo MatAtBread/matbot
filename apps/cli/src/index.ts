@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
+import { loadConfig, loadConfigFromText, loadDotEnv, readDotEnv, withholdDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import { MemoryStore }                     from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
@@ -703,13 +703,10 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     // MATBOT_API_KEY_* whose value was that key's name.
     const wizardVault = new EnvFileVault(
       path.join(configDir, '.env'),
-      process.env as Record<string, string | undefined>,
+      { ...await readDotEnv(configDir), ...process.env },
     );
+    // Written to .env, which the boot vault reads after this.
     const keyName = apiKey ? await wizardVault.createSecret(varName, apiKey) : undefined;
-    // The boot vault is built from process.env, so carry the secret across. Resolve rather than
-    // reuse `apiKey`: where that was a reference, the string is a key name, and assigning it
-    // would overwrite the very key being referenced.
-    if (keyName !== undefined) process.env[keyName] = await wizardVault.resolve(`\${${keyName}}`);
 
     // Reference the provider by package name — the location-independent form. It resolves via
     // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'
@@ -874,11 +871,17 @@ async function main(): Promise<void> {
       + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
   }
 
+  // Read here, after a first-run wizard may have written to it. The environment wins over the file, as it
+  // always has; and once the vault holds the file's keys they are taken out of the environment.
+  const dotEnv = await readDotEnv(configDir);
+  const bootVault = new EnvFileVault(path.join(configDir, '.env'), { ...dotEnv, ...process.env });
+  withholdDotEnv(dotEnv);
+
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
     bootBackend:     new FilesystemStorageBackend(dotData),
     preScanned,
-    vault:           new EnvFileVault(path.join(configDir, '.env'), process.env as Record<string, string | undefined>),
+    vault:           bootVault,
     providers,
     gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
