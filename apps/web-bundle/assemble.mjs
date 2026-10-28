@@ -294,6 +294,13 @@ async function main() {
   // compiler pass didn't produce.
   let toolContracts = {};
   try {
+    // The CLI's resolve hook, registered before anything in this pass is imported and not at the top of
+    // this file: it remaps `*.js` specifiers onto the `*.ts` files matbot actually ships, which node's
+    // native stripper does not do. Each module here once had only type-only imports, therefore erased,
+    // so the missing hook stayed invisible until one grew a real import — build-dts.ts first, then
+    // tool-types.ts (`contractArms`). Reusing register.js rather than registering ts-hooks.js directly
+    // keeps its `exclude` plumbing in one place.
+    await import('../../apps/cli/register.js');
     const { extractToolContracts, collectContractAliases } = await import('../../plugins/browser/src/tool-types.ts');
     // Two passes: a tool whose contract is shared between the node and browser implementations names an
     // arm-union declared in plugin-api (see plugin-api/src/types/builtin-tools.ts), so the alias must be
@@ -302,13 +309,6 @@ async function main() {
     for (const src of Object.values(rawSources)) Object.assign(aliases, collectContractAliases(src));
     for (const src of Object.values(rawSources)) Object.assign(toolContracts, extractToolContracts(src, aliases));
 
-    // The CLI's resolve hook, registered before the compiler pass is imported and not at the top of
-    // this file: it remaps `*.js` specifiers onto the `*.ts` files matbot actually ships, which node's
-    // native stripper does not do. build-dts.ts had exactly one import for most of its life — a
-    // type-only one, therefore erased — so this call site had never resolved anything at runtime and
-    // the missing hook was invisible until it grew a real import. Reusing register.js rather than
-    // registering ts-hooks.js directly keeps its `exclude` plumbing in one place.
-    await import('../../apps/cli/register.js');
     const { buildMatbotToolsDts } = await import('../../plugins/tool-types/src/build-dts.ts');
     // Described for the browser: the bundle's own plugins (webllm, google-drive's `managedBy`) are in, and
     // a node-only declaration of a shared shape is out.
