@@ -39,7 +39,11 @@ async function run(input: Record<string, unknown>, decide: (req: PermissionReque
   vault.readSecret = async (name: string) => { reads.push(name); return readSecret(name); };
   const ctx = {
     callId: 'c1', session: createSession() as Session, signal: new AbortController().signal, vault,
-    gate: async (req: PermissionRequest) => { asked.push(req); return decide(req); },
+    // The origin gate is the other file's subject (http-origin-gate); here every origin is approved.
+    gate: async (req: PermissionRequest) => {
+      if (req.gate === 'request') return permitted('user');
+      asked.push(req); return decide(req);
+    },
   } as unknown as ToolContext;
   const events: ToolEvent[] = [];
   for await (const ev of httpTool.executor.execute(input, ctx)) events.push(ev);

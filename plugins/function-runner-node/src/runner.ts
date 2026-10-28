@@ -21,8 +21,9 @@ const PENDING = 'matbot.functionRunner.pending';
  * rather than keeping a copy that cannot be kept in step — a name shadowed but not rejected typechecks
  * and then fails at the first call.
  *
- * `console`, `fetch` and the timers are deliberately absent: a body legitimately logs, waits and makes
- * requests, and `fetch` means network access is NOT what this withholds.
+ * `console`, `fetch`, `WebSocket` and the timers are deliberately absent: a body legitimately logs, waits
+ * and makes requests. The two network globals are REPLACED instead, by the ones each call is handed, which
+ * put every origin to a gate.
  *
  * So is `Buffer`, which reaches no capability — it is a view over memory and does no IO — and is the one
  * way to base64 bytes on node 24, which has no `Uint8Array.fromBase64`. Withholding it only put a prompt
@@ -153,7 +154,9 @@ export function createVmFunctionRunner(
       // neither can be reassigned from it. The outer shadows the withheld globals — a parameter shadows a
       // global lexically for the whole body. The inner binds the loader this runner was handed to the
       // name its own rewrite used; that name is private to this file, which is why a body may have a
-      // parameter called the same thing.
+      // parameter called the same thing. It binds `fetch` and `WebSocket` too, to the gated pair the call
+      // is handed, so a body's own spelling reaches them; `globalThis.fetch` is out of reach with
+      // `globalThis`, and the constructor escape reaches everything regardless.
       //
       // The inner one is strict, so the body is: called with no receiver, a sloppy body's `this` is the
       // real global, and `this.process` would hand back everything the outer one shadows. Strictness goes
@@ -161,14 +164,14 @@ export function createVmFunctionRunner(
       // into every function the body declares. The newline keeps a trailing line comment in the body
       // from swallowing the closing parenthesis.
       const outer = vm.runInThisContext(
-        `(function (${SHADOWED.join(', ')}) { return function (${ROUTE}) { 'use strict'; return (${fnExpr}\n); }; })`,
+        `(function (${SHADOWED.join(', ')}) { return function (${ROUTE}, fetch, WebSocket) { 'use strict'; return (${fnExpr}\n); }; })`,
         { filename: 'tool_function' },
-      ) as (...shadows: undefined[]) => (route: unknown) => (...args: unknown[]) => Promise<unknown>;
+      ) as (...shadows: undefined[]) => (route: unknown, f: typeof fetch, ws: typeof WebSocket) => (...args: unknown[]) => Promise<unknown>;
       const bind = outer();
       return (call, ...args) => {
         // A fresh inner function per call, so interleaved calls cannot tread on one another — a body's
         // tool call can start another function before its first await, which a mutable slot would lose.
-        const fn = bind(call.importModule);
+        const fn = bind(call.importModule, call.fetch ?? fetch, call.WebSocket ?? WebSocket);
         // The bound this invocation read at its start. A value this runner did not produce — or none —
         // carries no `timeoutMs`, and gets the bound the runner was built with.
         const ms = (call.settings as Partial<VmRunSettings> | undefined)?.timeoutMs;

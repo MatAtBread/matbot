@@ -798,6 +798,8 @@ and do not reach for \`noTypeCheck\` to get past it.
 \`fetch\`, \`AbortSignal\`, \`WebSocket\`, \`console\` and the timers are ordinary globals in a body, which no
 runner here withholds (\`types\` lists any that are). An HTTP request inside a body is therefore
 \`await fetch(url, { signal: context.signal })\` — not a tool call, and never a reason to install one.
+Where a runner is loaded, the first request to each origin (scheme, host and port) asks the user, as an
+import does, and one that is refused rejects with the reason; a call with nobody to ask is refused.
 
 MODULES (node only). A body may reach the platform through a dynamic import —
 \`const fs = await import('node:fs/promises')\`. Import by NAME only — a node builtin or a package already

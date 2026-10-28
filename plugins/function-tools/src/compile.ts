@@ -1,5 +1,6 @@
 import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
+import { gatedNetwork } from './network.js';
 import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 /** The invocation's own part first — the gated loader and the settings read for it, which are the
@@ -219,10 +220,7 @@ async function decide(ctx: ToolContext, fnName: string, spec: string, permits: r
   // being loaded as host code: the runner does not compile it, so none of a body's withheld globals apply
   // to it, and its own imports are never gated, so one answer covers the whole closure. The label says so.
   const builtin = spec.startsWith('node:');
-  // Prose, not the subject. The subject names an `execute` body `#execute` so a function legitimately
-  // CALLED `execute` cannot share its answers — exactly the sort of thing nobody should need to know to
-  // answer a question about their own machine.
-  const who   = fnName === EXECUTE_SUBJECT ? 'a one-off function body' : `function "${fnName}"`;
+  const who   = whoIs(fnName);
   const label = builtin
     ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
     : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
@@ -236,6 +234,13 @@ async function decide(ctx: ToolContext, fnName: string, spec: string, permits: r
     // model wrote, where "not permitted" alone reads as something to be debugged or routed around.
     throw new Error(refusalMessage(permit, `Import of '${spec}'`));
   }
+}
+
+/** The function as prose, not as the subject. The subject names an `execute` body `#execute` so a function
+ *  legitimately CALLED `execute` cannot share its answers — exactly the sort of thing nobody should need to
+ *  know to answer a question about their own machine. */
+function whoIs(fnName: string): string {
+  return fnName === EXECUTE_SUBJECT ? 'a one-off function body' : `function "${fnName}"`;
 }
 
 /** The function part of a subject for an `execute` body, which has no name of its own. Not a bare
@@ -336,8 +341,10 @@ export async function* runFunction(
   ctx.signal.addEventListener('abort', onAbort, { once: true });
   // `gateSubject` rather than `tool`: a gate subject is split on a space, and an anonymous body's label
   // ("tool_function execute") is prose, not an identifier. A defined function's name IS one.
-  const importModule = gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT, settings);
-  void fn({ importModule, ...(settings !== undefined ? { settings } : {}) },
+  const subject = label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT;
+  const importModule = gatedImport(machine, ctx, subject, settings);
+  const network = gatedNetwork(ctx, { namespace: TOOL_NAME, fn: subject, who: whoIs(subject) });
+  void fn({ importModule, ...network, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
     .finally(() => { done = true; settle(); });

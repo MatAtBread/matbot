@@ -31,6 +31,13 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`ProviderAdapter.models?(config)`** — the model ids an adapter can run, for a person choosing one. The
   browser setup wizard offers them as a drop-down for a self-contained adapter; absent, or rejecting, it
   asks for a model name as before.
+- **`originGatedFetch(admit, input, init?)`** — `fetch`, with each URL a request reaches put to `admit`
+  first: the one asked for, and each one a redirect leads to (#111). A `follow` request is followed one hop
+  at a time as the platform would (303, and 301/302 after a POST, become a bodiless GET; 307/308 resend the
+  body; credentials are dropped on a change of origin). A gate on the first URL alone is a gate on nothing,
+  since an approved host that answers 302 forwards the request to one nobody was asked about.
+- **`FunctionCall.fetch` / `FunctionCall.WebSocket`** — what a body's own `fetch` and `WebSocket` should be,
+  handed to the runner per call beside `importModule`. Absent, the body has the platform's.
 
 ### Bug fixes
 
@@ -169,6 +176,16 @@ churn and less likely to affect a consumer who doesn't use them.
   whatever prompt is pending, a permission gate's included. Browsers and other processes are served as
   before. A process matbot starts (`curl` from `bash`) is not covered, and the README says so.
   `createWebServer` takes `refuseOwnProcess`, off by default so a test can drive the server with `fetch`.
+- **`http`** — asks before a request reaches an origin, and again for each origin a redirect leads to
+  (#111). The subject is the origin (scheme, host and port), the gate `http.request`, and a call with
+  nobody to ask is refused. **Breaking** for an installation that calls `http` from a trigger, a job or
+  `POST /tools/http`: give a standing answer for the origins it uses.
+- **`function-tools`** — a body's `fetch` and `WebSocket` ask about each origin, as its `import(…)` asks
+  about each module (#111): gate `tool_function.connect`, subject `<function> <origin>`, once per origin
+  per invocation, redirects asked about in their own right. A refused `WebSocket` closes with code 1006
+  and the refusal as its reason. Only where a runner binds them.
+- **`function-runner-node`** — binds the gated `fetch` and `WebSocket` each call is handed in place of the
+  globals. The constructor escape still reaches the real ones, as it reaches `process`.
 
 ## 0.4.20
 

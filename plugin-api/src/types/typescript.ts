@@ -79,6 +79,12 @@ export interface FunctionCall {
   /** What {@link FunctionRunner.settings} returned at the start of this invocation. Absent ⇒ the runner
    *  applies its own defaults, as it must for a value it did not produce. */
   readonly settings?: FunctionRunSettings;
+  /** What a body's own `fetch` and `WebSocket` should be: the consumer's, which put each origin they reach
+   *  to a {@link PermissionGate}, as `importModule` puts each module. A runner binds them in place of the
+   *  globals; absent, or a runner that does not, leaves the body the platform's. Their types are the
+   *  platform's own, so nothing a body is checked against changes. */
+  readonly fetch?: typeof fetch;
+  readonly WebSocket?: typeof WebSocket;
 }
 
 export interface FunctionRunner {
