@@ -186,6 +186,9 @@ churn and less likely to affect a consumer who doesn't use them.
   and the refusal as its reason. Only where a runner binds them.
 - **`function-runner-node`** — binds the gated `fetch` and `WebSocket` each call is handed in place of the
   globals. The constructor escape still reaches the real ones, as it reaches `process`.
+- **`frontend-telegram`** — `telegram_open_door` asks before it opens (#111). Whoever joins gets the owner's
+  access to this matbot, so admitting someone is the user's decision: gate `telegram_open_door.open`, and a
+  call with nobody to ask is refused.
 
 ## 0.4.20
 

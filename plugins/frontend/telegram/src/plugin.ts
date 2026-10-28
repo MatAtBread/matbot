@@ -1,8 +1,8 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle, Message, Marker, SessionRunner, SessionWrite,
-  ToolExecutor, ToolContract, NoParams, ToolResultOf, UserContent, MimeType,
+  ToolExecutor, ToolContract, ToolContext, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt, refusalMessage } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -330,10 +330,19 @@ export const plugin: MatbotPluginSpec = {
     },
     {
       name:        'telegram_open_door',
-      description: 'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first.',
+      description: 'Open the door for new chats to join the bot channel. The door remains open for 30 seconds or until the first message from a new user is received, whichever comes first. The user is asked first, and a call with nobody to ask is refused.',
       inputSchema: { type: 'object', properties: {} },
       executor: {
-        async *execute() {
+        async *execute(_input: unknown, ctx: ToolContext) {
+          // Whoever joins gets what the owner's chat has — this matbot, through the model — so admitting
+          // someone is the user's act, never the model's. Nothing is remembered about who it would be: the
+          // door admits whichever chat speaks first, which is why a standing answer covers the act itself.
+          const permit = await ctx.gate({
+            gate: 'open', subject: 'join', fallback: false,
+            label: 'Open the Telegram door for 30 seconds? The first new chat to message the bot in that time joins it, with the same access to this matbot as yours.',
+            standing: [{ subject: 'join', label: 'Always allow opening the door to new Telegram chats' }],
+          });
+          if (!permit.allowed) { yield { type: 'error' as const, message: refusalMessage(permit, 'Opening the door') }; return; }
           openDoor = Date.now();
           yield { type: 'result' as const, value: { open_until: new Date(openDoor + 30_000).toISOString() } };
         },
