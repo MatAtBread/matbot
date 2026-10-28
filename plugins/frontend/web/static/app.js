@@ -294,6 +294,32 @@ function escHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[c] ?? c));
 }
 
+// What a link or image may point at: the web, mail, or anywhere relative to this page. Anything else with
+// a scheme (`javascript:`, `data:`, `vbscript:`) runs or renders as content of ours when clicked; an image
+// may also be a raster `data:` URI, which an <img> cannot script. A relative path containing a colon after
+// a `/`, `?` or `#` is still relative.
+const SAFE_HREF = /^(?:https?:|mailto:|[^:]*$|[^:]*[/?#])/i;
+const SAFE_IMG  = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i;
+
+// Markdown is model output, and marked passes raw HTML through: a reply containing `<img onerror>` would run
+// as this page — which holds the prompt a gate is waiting on. So raw HTML is shown as text, block and inline
+// alike (both reach `renderer.html`), and a link keeps its text but loses an href it may not have.
+if (typeof marked !== 'undefined') {
+  marked.use({
+    renderer: { html({ text }) { return escHtml(text); } },
+    walkTokens(t) {
+      if (t.type !== 'link' && t.type !== 'image') return;
+      // Judged as the browser will read it: the attribute's entities decoded (`javascript&#58;`), and the
+      // tabs, newlines and controls a URL parser drops from a scheme (`java\tscript:`) removed.
+      const probe = document.createElement('textarea');
+      probe.innerHTML = t.href;
+      const url = probe.value.replace(/[\u0000- \u007f]/g, '');
+      if (SAFE_HREF.test(url) || (t.type === 'image' && SAFE_IMG.test(url))) return;
+      t.href = '#';
+    },
+  });
+}
+
 function md(text) {
   if (!text) return '';
   if (typeof marked === 'undefined') return '<p>' + escHtml(text) + '</p>';
@@ -367,9 +393,21 @@ const T = window.matbotTransport;
 // ── web_user_environment: run an LLM-supplied expression in a sandboxed Worker ──
 // The tool (server.ts) pushes a `web-env-eval` event; we evaluate the expression in a throwaway Web
 // Worker built from a blob URL — the only Worker construction that also works from a file:// bundle —
-// and post the JSON-serialisable result back. The Worker has no DOM/storage/cookies/sensors, so this
-// is read-only introspection of the standard web platform (Date, Intl, navigator.*), nothing more.
-const WEB_ENV_WORKER_SRC = `self.onmessage = async (e) => {
+// and post the JSON-serialisable result back. It is meant for read-only introspection of the standard web
+// platform (Date, Intl, navigator.*), nothing more.
+//
+// A Worker built from a blob URL has THIS page's origin, so it is not inert by default: its `fetch` is
+// same-origin, cookies and all, and reaches every route the UI does — including the answer to a gate
+// prompt — and in the in-browser build this origin's IndexedDB and OPFS are the machine's own storage. So
+// before the expression runs, every way it has to send a request, start another realm (a fresh one would
+// have them all back) or open this origin's storage is deleted, from the global and its prototypes alike.
+const WEB_ENV_WORKER_SRC = `(() => {
+  const gone = ['fetch', 'XMLHttpRequest', 'WebSocket', 'WebSocketStream', 'EventSource', 'WebTransport',
+                'importScripts', 'Worker', 'SharedWorker', 'BroadcastChannel', 'indexedDB', 'caches'];
+  for (let o = self; o; o = Object.getPrototypeOf(o)) for (const n of gone) { try { delete o[n]; } catch (_) {} }
+  for (let o = self.navigator; o; o = Object.getPrototypeOf(o)) for (const n of ['storage', 'locks', 'serviceWorker']) { try { delete o[n]; } catch (_) {} }
+})();
+self.onmessage = async (e) => {
   let out;
   try { out = { ok: true, value: await (0, eval)(e.data) }; }
   catch (err) { out = { ok: false, error: (err && err.message) ? String(err.message) : String(err) }; }

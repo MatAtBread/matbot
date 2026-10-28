@@ -149,6 +149,19 @@ churn and less likely to affect a consumer who doesn't use them.
   - Every POST must be sent as `Content-Type: application/json`, and anything else is refused with 415
     before its body is read. A cross-origin page can send a `text/plain` or form POST without a preflight,
     and every body was parsed as JSON whatever it claimed to be.
+- **`frontend-web`** — model output can no longer run script in the UI (#111). The page renders the prompt a
+  gate is waiting on, so script there could answer it.
+  - Raw HTML in rendered markdown is shown as text, block and inline alike. A link or image whose URL is not
+    web, mail or relative (`javascript:`, `data:` other than a raster image) keeps its text and loses the
+    URL, judged after the entities and controls a browser would decode or drop.
+  - `marked` and `tiny-markdown-editor` are loaded at exact versions with integrity hashes. Both were
+    unpinned, so whoever controlled those CDN URLs controlled the page. The versions are the ones the
+    unpinned URLs served (`marked` 15.0.12) or the release before (`tiny-markdown-editor` 0.2.34).
+  - `web_user_environment`'s Worker has the page's origin, so its expression could `fetch` any route the UI
+    can, and in the in-browser build open the machine's IndexedDB and OPFS storage. Every way it had to send
+    a request, start another realm or open that storage is now deleted before the expression runs, and the
+    tool's description says so.
+- **`frontend-dom`** — the same markdown rules, and `marked` pinned to 14.1.4 (it was `marked@14`).
 
 ## 0.4.20
 

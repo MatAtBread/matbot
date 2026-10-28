@@ -15,7 +15,7 @@ const DESCRIPTION = `Read a fact about the user's browser environment by evaluat
 
 The expression runs in a sandboxed Web Worker, so this is read-only introspection of the standard web platform:
 - **Available**: \`Date\`, \`Intl\` (e.g. timezone via \`Intl.DateTimeFormat().resolvedOptions().timeZone\`), \`navigator.language\` / \`navigator.languages\`, \`navigator.userAgent\` / \`navigator.userAgentData\`, and other Worker-global APIs.
-- **Not available**: the DOM (no \`document\` / \`window\` / \`screen\`), page or app state, \`localStorage\` / cookies, and permission-gated sensors such as geolocation. Reaching for these throws.
+- **Not available**: the DOM (no \`document\` / \`window\` / \`screen\`), page or app state, \`localStorage\` / cookies, the network (\`fetch\`, \`XMLHttpRequest\`, \`WebSocket\`), the origin's storage (\`indexedDB\`, \`caches\`, \`navigator.storage\`), and permission-gated sensors such as geolocation. Reaching for these throws.
 
 ## Input
 \`{ "expression": string }\` — a single JavaScript expression that evaluates to the value you want. It may be an async expression (a returned Promise is awaited) or an IIFE for multi-step logic; do not use a bare \`return\` at the top level. The result must be JSON-serialisable (no functions, DOM nodes, or cyclic objects).
