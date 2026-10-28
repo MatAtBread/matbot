@@ -9,6 +9,18 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.22
+
+### Optional
+
+- **`triggers`** — a fire whose tool yields no result (`remember_fact`) leaves a `silent-fired` marker
+  (`surface: 'user' | 'agent'`), carrying each trigger's `matched` conditions and the classifier's `why`.
+  Such a fire delivers nothing, so it was the one kind with no fire marker: what it did was traced by the
+  tool's own markers, but which rule fired it, and why, was not recorded — the question a false positive
+  raises. A fire whose tool fails carries `matched` on its error marker instead.
+  - A silent fire now counts towards the trigger's `cooldown`, which reads fire markers. A silent trigger
+    with a `maxPerTurn` or `quietTurns` was never held back by them, and now is.
+
 ## 0.4.21
 
 ### Breaking changes

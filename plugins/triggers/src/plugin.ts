@@ -3,7 +3,7 @@ import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, S
 import { TriggerManager } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
-import type { Trigger, Triggers, FiredCondition, TriggerCooldown } from './types.js';
+import type { Trigger, Triggers, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
 
 /** A firing trigger's id plus the specific condition(s) that matched — the unit markers trace, so a
  *  post-mortem can see not just that a trigger fired but which rubric the classifier judged true and
@@ -16,14 +16,18 @@ interface FiredSource {
 /** The outcome of the concurrent user-phase evaluation (see the racing note in {@link setupTriggers}):
  *  the rendered result bodies split by delivery — `ephemeral` (a `ephemeral`-kind fire, informs one
  *  answer) vs `durable` (a `contextual`-kind fire, folds onto the user turn and persists) — plus the
- *  firing sources and any markers (a silent side-effect's tool markers, or a trace). All empty ⇒
- *  nothing fired / nothing to do. */
+ *  firing sources, the silent fires (already traced in `markers`, kept apart only so the cool-down can
+ *  count them before those markers are persisted) and any markers. All empty ⇒ nothing fired / nothing
+ *  to do. */
 interface UserPhaseOutcome {
   ephemeralBodies: string[];
   durableBodies:   string[];
   sources:         FiredSource[];
+  silent:          FiredSource[];
   markers:         MessageContent[];
 }
+
+const NO_USER_PHASE = (): UserPhaseOutcome => ({ ephemeralBodies: [], durableBodies: [], sources: [], silent: [], markers: [] });
 
 /** A user-phase evaluation in flight for one turn, shared between the three places that may deliver its
  *  correction: the runner's in-situ restart (via the `DeferredScreen.claim()` the screen hook returns),
@@ -161,6 +165,14 @@ function followupFiredMarker(triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'followup-fired', surface: 'agent', triggers } };
 }
 
+// A fire whose tool completed without a result (remember_fact, say) delivers nothing, so no other
+// marker carries its `matched` — and a silent side-effect is exactly where a false positive goes
+// unnoticed, writing a fact or a file nobody asked for. The tool's own markers say what it did; this
+// says which rule fired it and why. A failed fire is traced by its error marker instead.
+function silentFiredMarker(surface: TriggerSurface, triggers: FiredSource[]): MessageContent {
+  return { type: 'marker', creator: 'triggers', data: { event: 'silent-fired', surface, triggers } };
+}
+
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
 // (non-robo) user message — i.e. this user message was already processed on the original attempt, so
 // user-phase (ephemeral/contextual) triggers and their side effects already fired. Re-firing them on the
@@ -201,9 +213,10 @@ function retractActiveLastTurn(messages: Message[]): Set<string> {
 }
 
 // Every marker event that records a trigger ACTUALLY firing (as opposed to being held off), across both
-// surfaces and all three delivery paths. This is the durable fire log the cool-down is counted from —
-// there is no in-memory counter, so a cool-down holds across restart, reload and a backend swap.
-const FIRE_EVENTS = new Set(['retract-fired', 'followup-fired', 'user-insitu-fired', 'user-retract-fired']);
+// surfaces, all three delivery paths and the silent side-effect. This is the durable fire log the
+// cool-down is counted from — there is no in-memory counter, so a cool-down holds across restart, reload
+// and a backend swap.
+const FIRE_EVENTS = new Set(['retract-fired', 'followup-fired', 'user-insitu-fired', 'user-retract-fired', 'silent-fired']);
 
 /** Per-trigger firing history, in turns. `thisTurn` counts fires inside the current turn region (since
  *  the last genuine user message; a redo or robo resubmit belongs to that same turn). `since` is how
@@ -364,13 +377,15 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
     const ephemeralBodies: string[]         = [];
     const durableBodies:   string[]         = [];
     const sources:         FiredSource[]    = [];
+    const silent:          FiredSource[]    = [];
     const markers:         MessageContent[] = [];
     // A per-trigger cool-down applies to both surfaces: matching says the trigger is relevant, the
     // cool-down says whether it may act again this soon. Held-off triggers are traced, never silent.
     const cooled = applyCooldown(fired, fireHistory(ctx.session.messages));
     markers.push(...cooled.markers);
     for (const { trigger, kinds, matched } of cooled.kept) {
-      const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
+      const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) }, matched);
+      if (!out.hadResult && !out.failed) silent.push({ id: trigger.id, matched });
       if (out.hadResult) {
         // Contextual dominates: a trigger carrying both kinds folds durable (a superset of ephemeral —
         // it persists AND informs this answer), mirroring the agent surface's retract-over-followup.
@@ -380,7 +395,8 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       }
       markers.push(...out.markers);
     }
-    return { ephemeralBodies, durableBodies, sources, markers };
+    if (silent.length > 0) markers.push(silentFiredMarker('user', silent));
+    return { ephemeralBodies, durableBodies, sources, silent, markers };
   };
 
   // user phase — kicked off pre-response, NOT awaited. Judging the user message concurrently with the
@@ -421,7 +437,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       const rec: UserPhaseInFlight = { verdict: undefined as unknown as Promise<UserPhaseOutcome>, ready: false, correction: {}, claimed: false };
       rec.verdict = runUserPhase({ session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) })
         .then(out => { rec.ready = true; rec.correction = fenceCorrection(out); return out; })
-        .catch((): UserPhaseOutcome => { rec.ready = true; return { ephemeralBodies: [], durableBodies: [], sources: [], markers: [] }; });
+        .catch((): UserPhaseOutcome => { rec.ready = true; return NO_USER_PHASE(); });
       pendingUserPhase.set(traceId, rec);
 
       // Optional grace: wait up to `classifierGraceMs` for the verdict before racing. If it lands with a
@@ -473,7 +489,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
 
       if (ctx.resubmitDepth > 0) return;
 
-      const userOut: UserPhaseOutcome = rec ? await rec.verdict : { ephemeralBodies: [], durableBodies: [], sources: [], markers: [] };
+      const userOut: UserPhaseOutcome = rec ? await rec.verdict : NO_USER_PHASE();
       // `claimed` ⇒ the correction was already delivered on the clean path (the runner's in-situ restart
       // or the screen grace inject), so it must NOT also enter the retract context below.
       const insitu = rec?.claimed ?? false;
@@ -503,13 +519,14 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       const retractSources:  FiredSource[]    = [];
       const followupBodies:  string[]         = [];
       const followupSources: FiredSource[]    = [];
+      const silentSources:   FiredSource[]    = [];
       const suppressed:      FiredSource[]    = [];
       const markers:         MessageContent[] = [...userOut.markers];
       // The raced user-phase fires belong to THIS turn but aren't in the committed messages yet (their
       // markers ride out on this hook's return), so fold them in before counting — otherwise a trigger
       // that fired on the user surface would look untouched to its own per-turn cap.
       const hist = fireHistory(ctx.session.messages);
-      for (const s of userOut.sources) {
+      for (const s of [...userOut.sources, ...userOut.silent]) {
         hist.thisTurn.set(s.id, (hist.thisTurn.get(s.id) ?? 0) + 1);
         hist.since.set(s.id, 0);
       }
@@ -520,7 +537,8 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
           suppressed.push({ id: trigger.id, matched: matched.filter(m => m.kind === 'retract') });
           continue;
         }
-        const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) });
+        const out = await dispatchTrigger(services, trigger, { session: ctx.session, signal: ctx.signal, provider: ctx.config.provider, ...(ctx.prompt !== undefined ? { prompt: ctx.prompt } : {}) }, matched);
+        if (!out.hadResult && !out.failed) silentSources.push({ id: trigger.id, matched });
         if (out.hadResult) {
           if (kinds.includes('retract')) {
             retractBodies.push(renderResult(out.result));
@@ -532,6 +550,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         }
         markers.push(...out.markers);
       }
+      if (silentSources.length > 0) markers.push(silentFiredMarker('agent', silentSources));
       // Suppression is never silent — record which rules were held off and why.
       if (suppressed.length > 0) {
         markers.push(suppressedMarker('retract-convergence', 'retract held off: this rule was active on the previous turn and is still matching (non-converging)', suppressed));

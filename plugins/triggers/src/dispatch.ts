@@ -1,12 +1,14 @@
 import type { MatbotMachine, Session, PromptFn, MessageContent } from '@matatbread/matbot-plugin-api';
 import { invokeTool } from '@matatbread/matbot-plugin-api';
-import type { Trigger, TriggerInvoke } from './types.js';
+import type { Trigger, TriggerInvoke, FiredCondition } from './types.js';
 
 export interface DispatchOutcome {
   /** Whether the tool yielded a result — i.e. whether the model should be woken with it (inject). */
   hadResult: boolean;
   /** The yielded result (meaningful only when `hadResult`). */
   result:    unknown;
+  /** The tool did not complete — absent, errored, threw, or was cut off — and an error marker says so. */
+  failed:    boolean;
   /** Durable markers to persist: any the tool emitted, plus a synthesised error marker if it failed.
    *  These outlive the silent firing, so a post-mortem can see what each trigger actually did. */
   markers:   MessageContent[];
@@ -48,14 +50,17 @@ export async function checkInvocation(services: MatbotMachine, invoke: TriggerIn
  * caller injects it); a tool that yields none is a silent side-effect (the model never wakes). Any
  * `marker` events the tool emits are collected for the caller to persist, and a tool that errors or
  * throws — or names an absent tool — is recorded as an error marker rather than vanishing into a log;
- * one cut off by an abort is recorded as interrupted, not as a failure.
+ * one cut off by an abort is recorded as interrupted, not as a failure. `matched` rides on that marker,
+ * since a failed fire leaves no fire marker of its own to say why it fired.
  */
 export async function dispatchTrigger(
   services: MatbotMachine,
   trigger:  Trigger,
   ctx:      { session: Session; signal: AbortSignal; provider: string; prompt?: PromptFn },
+  matched?: FiredCondition[],
 ): Promise<DispatchOutcome> {
   const markers: MessageContent[] = [];
+  let failed = false;
   // An aborted signal (a mid-turn steer, a user cancel) means the tool was cut off, not that it faulted:
   // the raw abort reason is an internal token ("steer") that reads as a real failure in a durable marker.
   // The runner reframes this for the tools it runs itself (INTERRUPTED_TOOL_RESULT); a trigger's tool runs
@@ -63,9 +68,11 @@ export async function dispatchTrigger(
   // that was interrupted did nothing, and a post-mortem wants to know that — just not as an error.
   // `code` rides along so the next turn can tell a malformed invocation from an ordinary tool failure.
   const fail = (error: string, code?: number): void => {
+    failed = true;
+    const why  = matched !== undefined ? { matched } : {};
     const data = ctx.signal.aborted
-      ? { triggerId: trigger.id, tool: trigger.invoke.tool, interrupted: true }
-      : { triggerId: trigger.id, tool: trigger.invoke.tool, error, ...(code !== undefined ? { code } : {}) };
+      ? { triggerId: trigger.id, tool: trigger.invoke.tool, interrupted: true, ...why }
+      : { triggerId: trigger.id, tool: trigger.invoke.tool, error, ...(code !== undefined ? { code } : {}), ...why };
     markers.push({ type: 'marker', creator: 'triggers', data });
   };
 
@@ -79,7 +86,7 @@ export async function dispatchTrigger(
     if (services.tools.resolve(trigger.invoke.tool) === null) {
       console.warn(`[triggers] trigger ${trigger.id} invokes unknown tool "${trigger.invoke.tool}"; skipped.`);
       fail(`tool "${trigger.invoke.tool}" not registered`);
-      return { hadResult: false, result: undefined, markers };
+      return { hadResult: false, result: undefined, failed, markers };
     }
 
     // The prompt (when the firing hook carries one — a live interactive session behind this turn) is
@@ -105,7 +112,7 @@ export async function dispatchTrigger(
     fail(e instanceof Error ? e.message : String(e));
   }
 
-  return { hadResult, result, markers };
+  return { hadResult, result, failed, markers };
 }
 
 /**
