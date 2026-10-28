@@ -315,3 +315,29 @@ export async function count(args: { n: number }): Promise<number> {
     "interface HubReport { hubs: Hub[]; mode: Mode }\ninterface Hub { name: string; up: boolean }\ntype Mode = 'quick' | 'full'");
   assert.equal(exports.find(e => e.name === 'count')!.toolContractTypes, undefined, 'a contract naming none carries none');
 });
+
+test("an export's schema follows the package's own named types, so json-validation checks it too", () => {
+  // json-validation is the browser's only validator, and it checks the schema — which a parameter typed by
+  // a local name (`args: CheckArgs`) used to leave as `{}`, accepting anything.
+  const { exports } = parsePackage('Hubs', `
+type Mode = 'quick' | 'full'
+interface Base { verbose: boolean }
+interface CheckArgs extends Base { mode: Mode; limit?: Mode | number; tags: Tag[] }
+type Tag = string
+type Box<T> = { value: T }
+
+export async function check(args: CheckArgs): Promise<number> { return 1; }
+export async function wrap(args: { b: Box<string> }): Promise<number> { return 1; }
+`);
+  assert.deepEqual(exports.find(e => e.name === 'check')!.inputSchema, {
+    type: 'object',
+    properties: {
+      mode:  { type: 'string', enum: ['quick', 'full'] },
+      limit: { type: ['string', 'number'] },       // the alias's arms join the union, rather than opening it
+      tags:  { type: 'array', items: { type: 'string' } },
+    },
+    required: ['mode', 'tags'],
+  });
+  // A generic one stands for nothing until it has arguments, so it stays open rather than being guessed.
+  assert.deepEqual(exports.find(e => e.name === 'wrap')!.inputSchema, { type: 'object', properties: { b: {} }, required: ['b'] });
+});

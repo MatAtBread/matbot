@@ -1,6 +1,6 @@
 import type { FunctionCall, JSONSchema } from '@matatbread/matbot-plugin-api';
 import { INJECTED, compileUnder, erase, type CompileHost, type CompiledFn } from './compile.js';
-import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type ParsedParam } from './signature.js';
+import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type LocalTypes, type ParsedParam } from './signature.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
  *  Anthropic and OpenAI reject in a tool name, and not `-`, which is not an identifier character: the name
@@ -93,6 +93,29 @@ function assertStatelessTopLevel(source: string): TypeDeclaration[] {
 
 /** A top-level `interface` or `type` of a package, which its exports' contracts may name. */
 interface TypeDeclaration { name: string; text: string }
+
+/**
+ * What each declaration stands for, as type text a schema can be derived from: an alias's right-hand side,
+ * an interface's `{ … }` body. A generic one is left out — what it stands for depends on its arguments —
+ * and so is an interface's `extends`, which only means its inherited members go unchecked: a schema here
+ * never rejects a property it does not list.
+ */
+function localTypes(declared: readonly TypeDeclaration[]): LocalTypes {
+  const out = new Map<string, string>();
+  for (const d of declared) {
+    const head = new RegExp(`^(interface|type)\\s+${d.name.replace(/\$/g, '\\$')}\\s*(<)?`).exec(d.text);
+    if (head === null || head[2] !== undefined) continue;
+    if (head[1] === 'type') {
+      const eq = d.text.indexOf('=', head[0].length);
+      if (eq !== -1) out.set(d.name, d.text.slice(eq + 1).replace(/;\s*$/, '').trim());
+    } else {
+      const open = d.text.indexOf('{', head[0].length);
+      const close = open === -1 ? -1 : matchBrace(d.text, open);
+      if (close !== -1) out.set(d.name, d.text.slice(open, close + 1));
+    }
+  }
+  return out;
+}
 
 /**
  * The declarations `contract` reaches: those it names, then those they name, and so on. A contract is
@@ -365,7 +388,7 @@ function deriveExport(packageName: string, name: string, fnSource: string, descr
   if (param !== undefined && param.type === undefined) throw new Error(`exported function "${name}" must declare its parameter's type — it becomes the tool's input contract.`);
   if (sig.returnType === undefined) throw new Error(`exported function "${name}" must declare a return type — it becomes the tool's result contract (\`Promise<void>\` for a side effect).`);
 
-  const schema = param === undefined ? { properties: {} } : tsTypeToSchema(param.type);
+  const schema = param === undefined ? { properties: {} } : tsTypeToSchema(param.type, 0, localTypes(types));
   if (schema.type !== undefined && schema.type !== 'object') {
     throw new Error(`exported function "${name}" takes a ${String(schema.type)} — a tool's parameter must be an object, e.g. \`${name}(args: { value: ${param?.type ?? 'string'} })\`.`);
   }

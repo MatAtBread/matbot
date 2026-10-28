@@ -257,6 +257,10 @@ churn and less likely to affect a consumer who doesn't use them.
   (`toolContractTypes`); they were missing from the program that types contract strings, so
   `ts-validation` refused the tool ("Cannot find name 'HubReport'") and the dts named a type it never
   declared. A declaration that does not resolve refuses only the tools that carry it.
+- **`function-tools`** — a package export whose parameter is typed by one of the package's own names
+  (`args: CheckArgs`) gets a real input schema: the name is read as what it declares (an interface's body,
+  an alias's type), and a local union alias joins the union it appears in. It was `{}`, so
+  `json-validation` — the browser's only validator — accepted anything. A generic declaration stays open.
 
 ## 0.4.20
 
