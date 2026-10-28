@@ -129,7 +129,6 @@ async function innerVoiceStatus(services: MatbotMachine | undefined): Promise<st
 
 export function createCognitionPlugin(): MatbotPluginSpec {
   let captured: MatbotMachine | undefined;   // captured in setup() so installationMessage() can probe
-  const lifecycle = new AbortController();    // ends the SkillManager mount subscription on teardown
 
   return {
     apiVersion: PLUGIN_API_VERSION,
@@ -211,17 +210,20 @@ it is purely a data maintenance function.
       services.tools.register(createCognitionConfigTool(services));
 
       // Seed once the SkillManager is present — now if a skills provider is already loaded (replay),
-      // else on the first mount when one is. Re-seed on each remount is a no-op (importIfAbsent). The
-      // Triggers service is seeded opportunistically in the same pass when present. Order-independent
-      // and self-healing, with no resident hook.
-      services.mounted.observe(
-        { key: 'SkillManager', replay: true, signal: lifecycle.signal },
-        m => seedCognition(m),
-      );
-    },
-
-    async teardown() {
-      lifecycle.abort();
+      // else on the first mount when one is. Re-seed on each remount is a no-op (importIfAbsent).
+      //
+      // Triggers are seeded in the same pass, so a pass must also run when THEY arrive: reading
+      // `Triggers` once, inside the SkillManager mount, meant a `triggers` listed after this plugin was
+      // never seeded — at that boot or any later one, the order being the same each time. Passes are
+      // chained because importIfAbsent is check-then-write: two at once could each find a skill absent.
+      let seeding = Promise.resolve();
+      const seed = (m: MatbotMachine): void => {
+        seeding = seeding.then(() => seedCognition(m)).catch((e: unknown) => console.warn('[cognition] seeding failed:', e));
+      };
+      // No `signal`: the host ends both with this plugin's load. One controller per factory call was
+      // aborted by the first teardown, so any later setup of this same instance observed nothing.
+      services.mounted.observe({ key: 'SkillManager', replay: true }, seed);
+      services.mounted.observe({ key: 'Triggers',     replay: true }, seed);
     },
   };
 }

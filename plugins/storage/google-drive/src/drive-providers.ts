@@ -1,5 +1,5 @@
 import type { Store, MatbotMachine, ProviderConfig, ProviderPatch } from '@matatbread/matbot-plugin-api';
-import { applyProviderPatch } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, movedCredentialKeys } from '@matatbread/matbot-plugin-api';
 import type { ProviderDraft, ProviderSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
@@ -92,18 +92,19 @@ export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotM
     },
     // `driveSet.add` is an upsert keyed on name, so persisting a patched profile is the same write as
     // adding one. The credential placeholder rides through untouched with everything else the patch
-    // does not name, which is the point: nothing here goes near the vault.
-    async update(name: string, patch: ProviderPatch): Promise<boolean> {
+    // does not name — unless the endpoint moves origin, when the vault is asked only for a fresh key name.
+    async update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined> {
       const cur = services.providers.get(name);
-      if (cur === undefined) return false;
-      const next = applyProviderPatch(cur, patch);
+      if (cur === undefined) return undefined;
+      const next = applyProviderPatch(cur, patch, services.Vault);
       await driveSet.add(next);
       services.providers.register(next);
-      return true;
+      return movedCredentialKeys(cur, next);
     },
     async remove(name: string): Promise<boolean> {
       await driveSet.remove(name);
       return services.providers.remove(name);
     },
+    get: name => services.providers.get(name),
   };
 }

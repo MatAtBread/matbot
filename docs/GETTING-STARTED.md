@@ -292,6 +292,14 @@ own plugin. Either way:
 A missing secret throws `MissingSecretError`. Secrets are resolved on use and never
 written to session storage.
 
+The vault reads `.env` itself; its keys are not left in matbot's process environment, so
+no process matbot starts (`bash`, an MCP server, an `npm` install) inherits them. That
+holds even when something else loads the file into the environment, such as a systemd
+`EnvironmentFile=`: matbot removes `.env`'s keys from its environment once the vault has
+them. The exceptions are matbot's own settings, `MATBOT_WEB_PORT` and `MATBOT_PRINCIPAL`.
+A secret exported in the environment under a name `.env` does not use stays there, so keep
+secrets in `.env`.
+
 `.env` example:
 
 ```sh
@@ -396,8 +404,8 @@ simply not reported; pass a `gate` to ask about one by name.
 
 The gate ids are `tools.overwrite` (subject: the tool name), `plugin.add` /
 `plugin.provision-deps` / `plugin.remove` / `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load`,
-`provider.add` / `provider.add-unverified` / `provider.update` / `provider.update-unverified` /
-`provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the
+`provider.add` / `provider.add-unverified` / `provider.add-unlisted` / `provider.update` /
+`provider.update-unverified` / `provider.update-unlisted` / `provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the
 name it is *registered* under, so one answer covers both the node and browser implementations of a
 tool. The list is open: a plugin can declare ids of its own, and an id the policy does not recognise
 is asked about rather than allowed.

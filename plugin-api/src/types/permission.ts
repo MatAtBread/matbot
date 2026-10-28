@@ -120,7 +120,7 @@ export function refusalMessage(decision: PermissionDecision, act?: string): stri
  * means **no human is reachable**; a policy that wants to behave differently then simply checks it.
  *
  * A gate that wants "my rules, else the previous behaviour" captures the gate it displaces and
- * delegates to it (the `ToolCallValidator` idiom), so a pair composes in either load order.
+ * delegates to it, so a pair composes in either load order.
  */
 export interface PermissionGate {
   decide(req: PermissionRequest, ask: PromptFn | undefined): Promise<PermissionDecision>;

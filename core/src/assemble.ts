@@ -194,12 +194,19 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     }),
   };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));
-  // The validator lookup is late-bound and read per call: one is registered by a plugin long after the
-  // builtins are seeded, and may be unloaded again. It wraps the executor, so every door — the runner,
-  // `POST /tools/:name`, `invokeTool` — is covered by one wrapper rather than a hook on the model's path.
-  const tools = new ToolRegistryImpl(opts.builtinTools, notifier,
-    () => serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined);
+  // Validation wraps the executor, so every door — the runner, `POST /tools/:name`, `invokeTool` — is
+  // covered by one wrapper. It asks the `validate` hooks per call: validators arrive long after the
+  // builtins are seeded, and may be unloaded again.
   const hooks = new HookRegistry();
+  // The `ToolCallValidator` service is its predecessor, still honoured: consulted as one more hook, so a
+  // validator registered there is combined with the rest by the same rule. Host-owned (no `pluginName`),
+  // so no plugin's unload removes it; the key is read per call.
+  hooks.register({
+    on: 'validate',
+    handler: ctx => (serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined)?.validateToolCall(ctx.tool, ctx.parameters),
+  });
+  const tools = new ToolRegistryImpl(opts.builtinTools, notifier,
+    (tool, parameters, signal) => hooks.runValidate({ tool, parameters, signal }));
   const systemContext = new SystemContextRegistryImpl();
 
   // The installation's permission policy. Deliberately NOT behind a forwardingProxy: the documented way

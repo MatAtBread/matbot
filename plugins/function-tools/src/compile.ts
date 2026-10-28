@@ -1,5 +1,6 @@
 import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { stripLeadingTrivia } from './signature.js';
+import { gatedNetwork, type Asker } from './network.js';
 import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 /** The invocation's own part first — the gated loader and the settings read for it, which are the
@@ -43,6 +44,18 @@ export async function buildAsyncFn(host: CompileHost, definition: string, paramN
   const wrapped = `(async function ${stripLeadingTrivia(definition).replace(LEADING, '')}\n)`;
   return compileUnder(host, [...INJECTED, ...paramNames], await erase(host, wrapped),
                       code => `return ${code}(${paramNames.join(', ')});`) as CompiledFn;
+}
+
+/**
+ * Defer a compile to the first call: what a reload hands the registry for a definition that was already
+ * compiled when it was defined. Boot cost was all compile — the strip, the runner's parse, and the
+ * runner's first `require('typescript')`, measured at ~0.2s for one stored function and ~2.5s for 200
+ * large ones — for functions most turns never call. A failed build is not kept, so a later call (under a
+ * runner registered since, say) tries again.
+ */
+export function onFirstCall<A extends unknown[]>(build: () => Promise<(...args: A) => Promise<unknown>>): (...args: A) => Promise<unknown> {
+  let built: Promise<(...args: A) => Promise<unknown>> | undefined;
+  return (...args) => (built ??= build().catch((e: unknown) => { built = undefined; throw e; })).then(fn => fn(...args));
 }
 
 /**
@@ -145,17 +158,17 @@ export function compileUnder(
  * The loader a rewritten `import(…)` lands on: one {@link PermissionGate} decision per specifier per
  * function, then the host's own way of turning a specifier into a module.
  *
- * `label.tool` names the function in the subject, because the decision is two-dimensional and the
+ * The subject names the function as well as the module, because the decision is two-dimensional and the
  * specifier alone throws away the signal that matters — a brand-new function would inherit every grant
  * an older, reviewed one had earned, and "why is THIS function asking for `node:fs`?" is the question a
- * human is being asked. An `execute` body has no name to key on, so it keys as `execute`: a standing
+ * human is being asked. An `execute` body has no name to key on, so it keys as `#execute`: a standing
  * answer there covers every one-off body, which the label says outright rather than implying narrowness
  * it cannot deliver.
  *
- * The grant is keyed on the function's NAME, so redefining it under the same name inherits the grant.
- * Accepted knowingly: a model commonly needs two or three attempts to write a working body, and keying
- * the body would re-ask on each, pushing a human towards the broadest standing answer on offer. It is
- * the weakest link here and is the thing to revisit first.
+ * A defined function is named by name AND version ({@link versionedSubject}), so redefining it — the one
+ * door the model controls — asks again rather than inheriting what the reviewed version was granted. The
+ * cost is a question per attempt while a model iterates on a body; the grant that spans versions is the
+ * user's to give, as the "any function" standing answer.
  *
  * Only a builtin or an installed package is ever asked about ({@link importableByName}): a path or a URL
  * is refused without a prompt, because downloading or placing code is a plugin install's job, not a
@@ -164,7 +177,7 @@ export function compileUnder(
  * is the default, every specifier reaches the gate: a restriction that defaulted to empty would refuse
  * before anyone could be asked, which is the behaviour a permission prompt exists to replace.
  */
-function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string, settings: FunctionRunSettings | undefined): ImportFn {
+function gatedImport(machine: MatbotMachine, ctx: ToolContext, asker: Asker, settings: FunctionRunSettings | undefined): ImportFn {
   // One decision per specifier per invocation. A body that imports inside a loop would otherwise ask —
   // and read the policy's settings document — once per iteration, and a DENIED one would re-prompt a
   // human on every pass. Scoped to this closure, which `runFunction` builds per call, so a standing
@@ -177,7 +190,7 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string, s
     const spec = machine.FunctionRunner?.canonicalImport?.(written) ?? written;
     let decision = decided.get(spec);
     if (decision === undefined) {
-      decision = decide(ctx, fnName, spec, settings?.permittedImports);
+      decision = decide(ctx, asker, spec, settings?.permittedImports);
       decided.set(spec, decision);
     }
     await decision;
@@ -186,7 +199,7 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, fnName: string, s
   };
 }
 
-async function decide(ctx: ToolContext, fnName: string, spec: string, permits: readonly string[] | undefined): Promise<void> {
+async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: string, permits: readonly string[] | undefined): Promise<void> {
   if (!importableByName(spec)) {
     throw new Error(
       `Cannot import '${spec}': a function body imports only node builtins ('node:fs') and packages already ` +
@@ -207,23 +220,43 @@ async function decide(ctx: ToolContext, fnName: string, spec: string, permits: r
   // being loaded as host code: the runner does not compile it, so none of a body's withheld globals apply
   // to it, and its own imports are never gated, so one answer covers the whole closure. The label says so.
   const builtin = spec.startsWith('node:');
-  // Prose, not the subject. The subject names an `execute` body `#execute` so a function legitimately
-  // CALLED `execute` cannot share its answers — exactly the sort of thing nobody should need to know to
-  // answer a question about their own machine.
-  const who   = fnName === EXECUTE_SUBJECT ? 'a one-off function body' : `function "${fnName}"`;
   const label = builtin
     ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
     : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
   // Asked under `tool_function`, not the function's own name: that name is the MODEL's, so a gate qualified
   // by it would mint a fresh id per definition, and a standing answer for "any function" filed under one
   // would never be read by another. Which function asked lives in the subject instead.
-  const permit = await ctx.gate({ namespace: TOOL_NAME, gate: 'import', subject: `${fnName} ${spec}`, label, fallback: false,
-                                  standing: standingAnswers(fnName, who, spec) });
+  const permit = await ctx.gate({ namespace, gate: 'import', subject: `${fn} ${spec}`, label, fallback: false,
+                                  standing: standingAnswers(fn, who, spec) });
   if (!permit.allowed) {
     // The source rides in the message because this one surfaces as a thrown error inside a body the
     // model wrote, where "not permitted" alone reads as something to be debugged or routed around.
     throw new Error(refusalMessage(permit, `Import of '${spec}'`));
   }
+}
+
+/**
+ * Who is asking, for every gate a body reaches. The subject is `<name>@<version>`, the version a digest of
+ * the text that was COMPILED — computed here, from what this layer holds, never from anything the body
+ * reports about itself (`Function.prototype.toString` is the body's to override). So any change to a
+ * definition, by any route, is a different subject. `@` cannot appear in a function name.
+ *
+ * `resolve` maps that subject to the one its grants are filed under: the first version of the lineage it
+ * descends from by edits the user permitted to keep them (see `Lineage`), else itself. An `execute` body
+ * keeps its fixed `#execute`: it has no identity to version, and its label already says a standing answer
+ * covers every one-off body.
+ */
+async function askerFor(label: { tool: string; compiled: string; resolve?: (versioned: string) => Promise<string> } | undefined): Promise<Asker> {
+  if (label === undefined) return { namespace: TOOL_NAME, fn: EXECUTE_SUBJECT, who: 'a one-off function body' };
+  const versioned = await versionedSubject(label.tool, label.compiled);
+  return { namespace: TOOL_NAME, fn: label.resolve !== undefined ? await label.resolve(versioned) : versioned, who: `function "${label.tool}"` };
+}
+
+/** `<name>@<version>`: the version is the first 128 bits of the SHA-256 of `compiled`, enough that no body
+ *  can be searched for that collides with an approved one. */
+export async function versionedSubject(name: string, compiled: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(compiled)));
+  return `${name}@${[...digest.subarray(0, 16)].map(b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
 /** The function part of a subject for an `execute` body, which has no name of its own. Not a bare
@@ -271,7 +304,7 @@ export async function* runFunction(
   ctx:       ToolContext,
   fn:        CompiledFn,
   argValues: unknown[],
-  label?:    { tool: string; source: string; gateSubject?: string },
+  label?:    { tool: string; source: string; compiled?: string; gateSubject?: string; resolve?: (versioned: string) => Promise<string> },
 ): AsyncIterable<ToolEvent> {
   const queue: ToolEvent[] = [];
   let wake: (() => void) | null = null;
@@ -308,6 +341,9 @@ export async function* runFunction(
   // by principal or not at all — and the next invocation may be someone else's. Read ahead of the abort
   // check and the listener, so an abort during the read still stops the body starting, and a read that
   // throws has no listener to leave behind.
+  // `gateSubject` marks an `execute` body, whose label is prose ("tool_function execute"), not a name.
+  const asker = await askerFor(label === undefined || label.gateSubject !== undefined ? undefined
+                               : { tool: label.tool, compiled: label.compiled ?? label.source, ...(label.resolve !== undefined ? { resolve: label.resolve } : {}) });
   let settings: FunctionRunSettings | undefined;
   try { settings = await machine.FunctionRunner?.settings?.(); }
   catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
@@ -322,10 +358,9 @@ export async function* runFunction(
   // is not interruptible — but its tool calls now refuse to start, and nothing waits on it any longer.
   const onAbort = (): void => { cancelled = true; settle(); };
   ctx.signal.addEventListener('abort', onAbort, { once: true });
-  // `gateSubject` rather than `tool`: a gate subject is split on a space, and an anonymous body's label
-  // ("tool_function execute") is prose, not an identifier. A defined function's name IS one.
-  const importModule = gatedImport(machine, ctx, label?.gateSubject ?? label?.tool ?? EXECUTE_SUBJECT, settings);
-  void fn({ importModule, ...(settings !== undefined ? { settings } : {}) },
+  const importModule = gatedImport(machine, ctx, asker, settings);
+  const network = gatedNetwork(ctx, asker);
+  void fn({ importModule, ...network, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
     .finally(() => { done = true; settle(); });

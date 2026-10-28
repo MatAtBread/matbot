@@ -297,6 +297,10 @@ type MediaStore   = FileStore;      // session media; see Media
 
 **Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: the filesystem backend; the browser: IndexedDB + OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
+**A plugin's unload withdraws its own registration, not the key.** The registry holds one value per key, but core remembers each plugin's registration in order, for every key. Withdrawing the current one reinstates the one it displaced; withdrawing a displaced one changes nothing; only the last one out reverts to the host (above). It was `unregister(key)`, which removed whatever was current, so where plugins stack by capturing what they displace (`ts-validation` over `json-validation`, a gate over a gate), unloading the one underneath took the one on top with it. `StorageBackend` is the exception on one side only: a displaced backend was closed by the swap, so withdrawing the live one reverts to the host's — but withdrawing a displaced one still leaves the live one alone.
+
+**A reference captured from the registry is hard.** Unloading its provider changes what the registry resolves, not what a plugin already holds, so an object that outlives its plugin is that provider's to answer for — by failing with "service no longer active", not by working on half-torn-down state. Resolution through the registry is dynamic, so the removal of a dependency can only be relied on dynamically; nothing static can see it coming. A dependency that must hold is a real `package.json` import, which loads and unloads the two as a unit (*Discovery vs. direct dependency*).
+
 ### Context switch & the deferred StorageBackend swap
 
 `StorageBackend` is the system of record: swapping it under a running turn would split a compare-and-swap across two backends. So `register('StorageBackend', …)` (and its `unregister` revert) is **deferred**, not immediate — it stages a last-write-wins pending slot and applies it at the next **quiescent edge** (nothing holding the machine — in practice, the pump's queue drained). The other swap-members (`KnowledgeIndex`, `Vault`) repoint immediately.
@@ -516,12 +520,13 @@ A throwing handler is isolated (caught, logged, skipped) — never propagated. A
 | `toolcall`   | before each tool exec | read-only | `rejectTool` and/or `abort` |
 | `toolresult` | after each tool exec | read-only | replace `result` (redaction) or observe |
 | `followup`   | once, post-commit | read + durable-marker | `resubmit` robo turn, `retractAndRerun` (pop committed turn, re-run with context), append durable `markers` |
+| `validate`   | before each tool exec, **at the executor** (every door, not only the runner) | none | return `ToolInputError[]` to refuse, `[]` for valid, nothing for no opinion — see *Tool-call validation* |
 
 `screen` and `followup` are the durable-mutate points (once per turn). `contribute` is the in-harness cousin of a wrapping provider — mind prompt caching: inject at the tail or as stable prefix.
 
 ### Turn-scoped tools
 
-`screen`'s `tools` is a **source**, `(session) => Tool[]`, that the runner asks at the top of every round — not a list — because a turn's own tool calls change the session it derives from, and a tool defined in round 2 must be callable in round 3. Its tools are never registered: advertised *after* the `ToolPresenter` (whose search reads the registry, so a tool it windowed out could never come back), resolved *after* the registry, and carried to nested calls on `ToolContext.turnTools`, which `invokeTool` consults — so `tool.x()` inside a composed function reaches them exactly as the model does, and a sessionless door (`POST /tools/:name`) cannot. A name the registry holds is dropped: shadowing a registered tool is a gated decision (`tools.overwrite`) and a hook is not a way round it. A `ToolCallValidator` finds tools by registry name, so it has nothing to say about these; a source validates its own tools' input.
+`screen`'s `tools` is a **source**, `(session) => Tool[]`, that the runner asks at the top of every round — not a list — because a turn's own tool calls change the session it derives from, and a tool defined in round 2 must be callable in round 3. Its tools are never registered: advertised *after* the `ToolPresenter` (whose search reads the registry, so a tool it windowed out could never come back), resolved *after* the registry, and carried to nested calls on `ToolContext.turnTools`, which `invokeTool` consults — so `tool.x()` inside a composed function reaches them exactly as the model does, and a sessionless door (`POST /tools/:name`) cannot. A name the registry holds is dropped: shadowing a registered tool is a gated decision (`tools.overwrite`) and a hook is not a way round it. A `validate` hook is dispatched by the registry's executor wrapper, which these never get, so it has nothing to say about them; a source validates its own tools' input.
 
 The one consumer is `function-tools`' `define { scope: 'session' }`, which stores each definition as a marker in its session (so fork/cut/compact carry it) and types `tool.<session fn>()` by appending a `ToolContracts` augmentation **after** the snippet it checks — built from `turnTools`, never from the markers, so what passes the check is exactly what resolves at run time.
 
@@ -581,17 +586,24 @@ The user-surface kinds were one kind named `augment` (= today's `ephemeral`); st
 
 That string is also **typed**, for validation (below): the emitter needs a `ts.Type` and a string is not one, so the live set of them is rendered into a virtual augmentation file and resolved by a small second `ts.Program` — that file plus `plugin-api`, never a second workspace scan. It is a second Program because the `import type` list must be **exact**, and that is only knowable from plugin-api's resolved exports, i.e. from the first Program's checker; the cheaper trick of rewriting every capitalised bare name to an inline `import(...)` needs a denylist of TypeScript's own utility types, and the first thing it breaks is `Record<string, never>` — which is `NoParams`, the commonest synthetic params type there is. Each string is screened alone before the batch is rendered (they become properties of one interface, where a stray brace swallows every arm after it), and the file must then typecheck **cleanly**: an unresolved reference is `any`, which validates everything, so any diagnostic in it becomes a stated refusal for that tool rather than a validator that reports success and checks nothing. The dts arm and wire text stay spliced verbatim from the string — that is what the model already reads, and re-deriving them from the resolved type would expand an alias the author wrote deliberately.
 
+A string may name types that exist nowhere else — a function package's own `interface HubReport` — and
+then carries their declarations on **`toolContractTypes`**. Every consumer (the dts, the validator's
+Program, a turn's own tools appended to a snippet, the browser's index) writes the pair out with one
+helper, `contractArms` in plugin-api: the declarations go in a namespace of their own with an alias per
+tool beside them, so the contract stays exactly as written and still resolves, and two packages' types of
+one name never merge. A diagnostic inside such a namespace refuses the tools it serves and no others.
+
 There are **no** `paramsType`/`resultType` fields — they are fully retired. A foreign tool (e.g. an MCP proxy) that carries neither an augmentation nor a `toolContract` falls back to its loose `inputSchema`, and the registry block emits `ToolContract<unknown, unknown>` so it stays in `keyof ToolContracts` (hence callable, loosely, through `ToolProxy`). Unregistered ⇒ `unknown`.
 
 **A scanned root supplies a tool's *contract*; only the live registry says the tool *exists*.** The dts scan roots at each loaded plugin's `resolvedUrl` and then UNIONs a glob of the monorepo `plugins/` tree onto it — not a fallback, but the only way to reach host-constructed builtins (`plugin`, `provider`) that have no `resolvedUrl` — so the roots are a **superset** of the loaded set by construction, reaching plugins for other runtimes and plugins nobody loaded. `buildMatbotToolsDts` therefore emits only the keys in `tools.list()`. A declared-but-unloaded tool is worse than an absent one: `await tool.telegram_send({ text })` typechecks clean against it and throws `not registered` at runtime — the one failure the check gate exists to prevent, and one the repair loop cannot repair, because the code is correct against the types it was shown. Contrast `MatbotServices`, which takes no such filter: absence there is already a type (the `?:` *is* the "may not be loaded" signal), whereas a `ToolContracts` key carries no such qualifier — declared means callable. What the filter cannot settle is two roots declaring one *live* name (`bash`, by `plugins/bash` and `plugins/docker-bash`): that still merges by Program file order, and is reported via `conflicts` rather than resolved.
 
 ### Tool-call validation
 
-The contract above is also **enforced**, by an optional `ToolCallValidator` (`MatbotServices`) that core consults **at the executor** — wrapped once per tool at *registration*, so there is one wrapper per tool and `resolve(x) === resolve(x)` still holds. Core declares the key even though core implements nothing, because core is what reads it and two plugins declaring one key must declare it identically or the merge is a TS2717 in a file neither owns. With none registered, nothing is checked: core **mandates** no validation, it only honours what is registered.
+The contract above is also **enforced**, by `validate` hooks that core dispatches **at the executor** — wrapped once per tool at *registration*, so there is one wrapper per tool and `resolve(x) === resolve(x)` still holds. `tools.validate(name, params)` asks the same hooks without running the tool, for a caller storing a call to make later (a trigger's `invoke`). With none registered, nothing is checked: core **mandates** no validation, it only honours what is registered.
 
-**Not a `toolcall` hook**, though that channel still exists and is still the place to reject a call by *policy*. It is a **runner** channel, so a validator installed there guards the model's path and nothing else — `POST /tools/:name` and `invokeTool` call `tool.executor.execute` directly and fire no hooks at all. The executor is the one place every door already passes through: one check rather than one per door, and nothing to drift. The accepted cost is that an *internal* call is validated too, though a statically-typed call site should already be sound — not pure waste, since `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed `object`) and a compiled skill's payload are all internal callers no compiler has checked.
+**Dispatched at the executor, not by the runner.** `toolcall` still exists and is still the place to reject a call by *policy*, but it is a **runner** channel, so a validator installed there guards the model's path and nothing else — `POST /tools/:name` and `invokeTool` call `tool.executor.execute` directly and fire no runner hooks at all. The executor is the one place every door already passes through: one check rather than one per door, and nothing to drift. That is why `validate` carries no session. The accepted cost is that an *internal* call is validated too, though a statically-typed call site should already be sound — not pure waste, since `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed `object`) and a compiled skill's payload are all internal callers no compiler has checked.
 
-**`undefined` means NO OPINION, never "valid"** — no contract for this tool, or one that cannot be honestly validated. The registry holds one value per key, so exactly one validator is active; one that loads over another **captures the one it displaces and delegates** when it has nothing to say. That is what makes the two compose along the line the type system already draws — the typed contract first, the loose `inputSchema` behind — in either load order, instead of the later plugin silently shadowing the earlier. Two suppliers exist: `ts-validation` (the `ToolContract` params *type*, via `tool-types`, node-only) and `json-validation` (the `inputSchema` projection, cross-runtime, and therefore the browser's only option).
+**`undefined` means NO OPINION, never "valid"** — no contract for this tool, or one that cannot be honestly validated (a throw counts the same, logged). **Every** `validate` hook is asked, and the call is refused if **any** refuses it, with each refusal's errors reported (one two validators share is said once). So validators co-exist with no reference to one another, neither the verdict nor the message depends on load order, and unloading one removes its opinion and nothing else. This was a single-valued `ToolCallValidator` service, which forced the second validator to capture the first and delegate to it: the pair depended on load order and on each other, and unloading the one underneath took the other with it. The key is `@deprecated` and still consulted, as one more opinion beside the hooks; **it is removed in 0.5.0**. Two suppliers exist: `ts-validation` (the `ToolContract` params *type*, via `tool-types`, node-only) and `json-validation` (the `inputSchema` projection, cross-runtime, and therefore the browser's only option).
 
 **Fail-open is worse than absent, everywhere in this path.** A validator that accepts everything while reporting success is indistinguishable from one that works, so an unvalidatable contract is a *stated refusal* that defers to the schema, and a diagnostic in generated type text condemns that tool rather than being ignored. The mirror of that rule is that failing **closed** is not the safe default it appears to be: `ts-validation` used to reject every call it could not verify, which bricked a live machine the moment `tool-types` was unloaded — every tool failed, including the `plugin` tool needed to put it back and the calls the web UI makes to draw itself, leaving a restart as the only way out. A dependency a plugin can simply re-create was never an unverifiable call.
 
@@ -656,10 +668,9 @@ correct (different trust root, different decision), but a policy author is keyin
 
 **`PermissionGate` is a swap-member, not an optional service.** Absence is not a sensible state, so
 the host captures a boot default and `unregister` reverts to it — "unload the policy ⇒ back to
-asking", with no revert rule of its own. (A do-nothing always-present default *would* be the
+asking", with no revert rule of its own. (Back to the policy it displaced, if a plugin supplied one.) (A do-nothing always-present default *would* be the
 fail-open shape; a default that *asks* is not.) A gate wanting "my rules, else the previous
-behaviour" captures the gate it displaces and delegates — the `ToolCallValidator` idiom, so a pair
-composes in either load order — and it is the reason this key is the one swap-member the hosts do
+behaviour" captures the gate it displaces and delegates, so a pair composes in either load order — and it is the reason this key is the one swap-member the hosts do
 **not** put behind `forwardingProxy`. A capture-safe proxy resolves to whatever is current, so a gate
 that captured `services.PermissionGate` and then registered itself would delegate *to itself*, for
 ever; the hosts expose a getter instead, and every consumer resolves per call. Gate ids are open at
@@ -740,8 +751,10 @@ no human behind them — `invokeTool`, a trigger, `POST /tools/:name`. "Always a
 therefore means anything that can reach the HTTP endpoint (the model itself, through its own `http`
 or `bash` tool) can install any specifier with nobody asked. That is what the answer *says*, and it is
 why the per-subject form is offered first and is the one to reach for. Two other things a policy
-author should be told rather than discover: the provider path **chains two gates**
-(`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
+author should be told rather than discover: the provider path **chains gates**
+(`add-unverified` → `add` → `add-unlisted`), so one user-visible operation can cost up to three
+decisions — `add-unlisted` last because listing the endpoint's models sends the profile's credential,
+which nothing has agreed may go there until `add` is answered; and a collision
 raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
 
 ---
@@ -762,7 +775,7 @@ The gate, the runner and `IMPORT-GATE` each apply the rule.
 
 Within that, three parts, and only the first two enforce anything:
 
-1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function> <specifier>"`. The pair, not the
+1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function>@<version> <specifier>"`. The pair, not the
    specifier alone: *why is THIS function asking for `node:fs`* is the question being put, and a
    specifier-only key would let a brand-new function inherit every grant a reviewed one earned.
    `standing` carries the answers it may be remembered as (the exact pair, the module's directory, any
@@ -926,20 +939,38 @@ says it carries matbot's full access, and a package's also says it covers everyt
 
 **What this is not.** `vm` is not a capability boundary — a body runs in this context, and
 `(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
-`process`/`globalThis`/`global`/`Buffer`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
+`process`/`globalThis`/`global`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
 node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
 documented API" to "know a published trick", and makes the intended path gated and revocable. A real
 boundary is another process.
+
+**The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
+and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of
+`import('node:buffer')` describing it as full access, which teaches a human to click "always". What it
+does expose is memory (`.buffer` of a small one is the shared allocation pool; `allocUnsafe` is not
+zeroed), equally reachable after the import. Each name still on the list reaches all the others —
+`process.getBuiltinModule`, `globalThis.process`, `Function('return process')()` — which is why there is
+no per-name setting to re-enable one: it would be a single switch spelled as a list.
 
 The withheld set and `ENV-GATE`'s list are **one list in two places**, and the checker's must track the
 runner's: a global that is shadowed but not rejected typechecks and fails at the first call, which is the
 one failure the check gate exists to prevent. The half that matters most is the half with no node types
 behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
 
-**Known weakness, accepted knowingly:** the grant keys on the function's NAME, so redefining a function
-under the same name inherits it — and redefinition is the one door the model controls. Keying the body
-instead would re-ask on each of the two or three attempts a model commonly needs, pushing a human towards
-the broadest standing answer on offer. It is the thing to revisit first.
+**A grant names the function's LINEAGE, not only its name** — `<name>@<digest>`, the digest of the text
+function-tools compiled (a package export's is the whole package's), computed by function-tools and never
+taken from the body (`Function.prototype.toString` is the body's to override), then resolved to the first
+version of the lineage it descends from. Redefinition is the one door the model controls, and keyed on the
+name it inherited what the reviewed version had been granted; keyed on the digest alone, a function under
+development asked for its imports and connections again at every edit. So the two questions are separate:
+the GRANTS are general (they hold wherever the function runs, a background job included), and whether an
+edit KEEPS them is its own gate, `tool_function.edit`, asked at a redefinition of a function that uses
+`import(`, `fetch` or `WebSocket`, with "always, for edits to this function in this session" among the
+answers. A permitted edit links the new digest to the lineage in function-tools' SETTINGS — never on the
+stored definition, which a `docker-bash` script can write while settings are read-only there — so text
+written any other way is a lineage of its own. The "any function" standing answer is unversioned. `#execute` is unversioned too, having no identity,
+and its label already says a standing answer covers every one-off body. The same subject keys a body's
+network gate (`tool_function.connect`).
 
 **Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`. With no
 restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,

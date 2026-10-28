@@ -2,6 +2,8 @@
 // taken from the package because the package is never installed: the library is several MB, matters only
 // to someone who chooses this provider, and is imported from a CDN at the moment it is first needed.
 
+import { closestIds } from '@matatbread/matbot-plugin-api';
+
 export interface InitProgressReport { progress: number; timeElapsed: number; text: string }
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
@@ -163,22 +165,14 @@ export function toolModels(lib: WebLLM): ModelRecord[] {
   return chatModels(lib).filter(r => callsTools(r.model_id));
 }
 
-// Ranked by shared name segments (family, size, quantisation), so `qwen3-4b` finds the Qwen3-4B builds and
-// a near-miss spelling still lands among its siblings.
+// Smallest first: on a GPU in a page, memory decides what runs at all.
+export function offeredModels(lib: WebLLM): ModelRecord[] {
+  return toolModels(lib).sort((a, b) =>
+    (a.vram_required_MB ?? Infinity) - (b.vram_required_MB ?? Infinity) || a.model_id.localeCompare(b.model_id));
+}
+
 export function closestModels(id: string, records: readonly ModelRecord[], n = 5): string[] {
-  const parts = (s: string): string[] => s.toLowerCase().split(/[-_.\s]+/).filter(Boolean);
-  const want = parts(id);
-  return records
-    .map(r => {
-      const have = parts(r.model_id);
-      const score = want.filter(w => have.some(h => h === w)).length * 2
-        + want.filter(w => have.some(h => h !== w && (h.includes(w) || w.includes(h)))).length;
-      return { id: r.model_id, score };
-    })
-    .filter(x => x.score > 0)
-    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
-    .slice(0, n)
-    .map(x => x.id);
+  return closestIds(id, records.map(r => r.model_id), n);
 }
 
 // Refused before anything downloads or loads: an unknown id would otherwise surface as a library error

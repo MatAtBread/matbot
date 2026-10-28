@@ -16,7 +16,7 @@ declare module '@matatbread/matbot-plugin-api' {
 // failed hard — models hallucinate params). Eviction is FREE: the presenter simply stops including a tool; no
 // transcript rewrite. Working set = {tools called this session} ∪ {the LATEST search's candidates}; a new
 // search REPLACES the candidate floor (previous un-called drop), called tools PERSIST → the set is
-// byte-stable between search/call events so the tools prefix caches. EAGER_FILL additionally pre-ranks the
+// byte-stable between search/call events so the tools prefix caches. `eagerFill` additionally pre-ranks the
 // current message into the working set (A/B). "Pins" are wide/low-Q fallbacks a ranker can't surface; they
 // ride along in every tool_search result as a floor, DERIVED per tool from description + inputSchema, never
 // name-listed.
@@ -24,26 +24,74 @@ declare module '@matatbread/matbot-plugin-api' {
 const TAG = '[tool-router]';
 const SEARCH = 'tool_search';
 
-// ── Windowing config (tweak with experience) ────────────────────────────────────────
-// If the WHOLE library plus tool_search fits in this many, present all of it — no windowing.
-// Above it we window: tool_search + the working set. Raise/lower freely as the library grows.
-const TARGET_WINDOW = 20;
-// Threshold cull (priority 2 — bound the AVAILABLE set, not total context). The working set accumulates
-// {called} ∪ {latest search's candidates}; left unchecked it drifts into the >30-50 zone where selection
-// degrades. So when it exceeds CULL_TRIGGER, cut it HARD to CULL_TARGET (≈ half — "pay once, then continue")
-// by turn-distance recency. A THRESHOLD (not continuous trimming) is the trigger, so between culls the set
-// is stable and the tools prefix keeps caching; a cull is a rare, amortized prefix invalidation. Recency
-// keeps the freshest reference of each tool (a call, or the latest search that revealed it), with the latest
-// search's own rank order as the fine-grained tiebreak, so a broad search keeps its BEST matches and sheds
-// the tail (low-rank matches + trailing fallbacks — all re-reachable by another search).
-const CULL_TRIGGER = 20;
-const CULL_TARGET  = 12;
-// EAGER_FILL — false (default, Option A): the working set is purely search/call-driven; the model must
+// ── Windowing config — plugin settings, read per presentation (so a change applies from the next call) ──
+// targetWindow: if the WHOLE library plus tool_search fits in this many, present all of it — no windowing.
+// Above it we window: tool_search + the working set. It also caps how many matches one search reveals. A
+// small model (Qwen3-1.7B) selects badly from 20; set it low there.
+// cullTrigger / cullTarget: threshold cull (bound the AVAILABLE set, not total context). The working set
+// accumulates {called} ∪ {latest search's candidates}; left unchecked it drifts into the >30-50 zone where
+// selection degrades. So when it exceeds cullTrigger, cut it HARD to cullTarget (≈ half — "pay once, then
+// continue") by turn-distance recency. A THRESHOLD (not continuous trimming) is the trigger, so between culls
+// the set is stable and the tools prefix keeps caching; a cull is a rare, amortized prefix invalidation.
+// Recency keeps the freshest reference of each tool (a call, or the latest search that revealed it), with the
+// latest search's own rank order as the fine-grained tiebreak, so a broad search keeps its BEST matches and
+// sheds the tail (low-rank matches + trailing fallbacks — all re-reachable by another search). Both default
+// FROM targetWindow, so lowering that one setting shrinks the whole window rather than leaving a working set
+// that may still grow to 20.
+// eagerFill — false (default, Option A): the working set is purely search/call-driven; the model must
 // search to surface a specialist. true: ALSO pre-rank the current user message and fold the BM25-top NEW
 // tools into the working set, so an obvious tool needs no search round-trip (full specs still come from the
-// registry, so it composes with lean search). Annotated `boolean` (not the literal) so the checker keeps
-// both branches live. Flip to A/B the two.
-const EAGER_FILL: boolean = false;
+// registry, so it composes with lean search).
+const DEFAULT_TARGET_WINDOW = 20;
+const CULL_TARGET_RATIO     = 0.6;
+const CONFIG_KEYS = ['targetWindow', 'cullTrigger', 'cullTarget', 'eagerFill'] as const;
+type ConfigKey = typeof CONFIG_KEYS[number];
+interface WindowConfig { targetWindow: number; cullTrigger: number; cullTarget: number; eagerFill: boolean }
+function configProblem(key: ConfigKey, v: unknown): string | undefined {
+  if (key === 'eagerFill') return typeof v === 'boolean' ? undefined : 'must be true or false';
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 ? undefined : 'must be an integer ≥ 1';
+}
+// `set` refuses all of these; they are checked here too because `default_settings:` and a hand-edited
+// document never pass through the tool. There a bad value falls back and says so, rather than silently
+// windowing to something else. `problems` are values unusable alone; `conflicts` are usable values that
+// defeat one another — a cull target above its trigger, or a trigger below the window, which culls every
+// search's matches the moment they arrive.
+function windowConfig(raw: Record<string, unknown>): WindowConfig & { problems: string[]; conflicts: string[] } {
+  const problems: string[] = [];
+  const conflicts: string[] = [];
+  const pick = <T>(key: ConfigKey, fallback: T): T => {
+    const v = raw[key];
+    if (v === undefined || v === null) return fallback;
+    const why = configProblem(key, v);
+    if (why === undefined) return v as T;
+    problems.push(`${key} ${why}, but is ${JSON.stringify(v)}; using ${JSON.stringify(fallback)}.`);
+    return fallback;
+  };
+  const targetWindow = pick('targetWindow', DEFAULT_TARGET_WINDOW);
+  let   cullTrigger  = pick('cullTrigger', targetWindow);
+  if (cullTrigger < targetWindow) {
+    conflicts.push(`cullTrigger (${cullTrigger}) is below targetWindow (${targetWindow}); using ${targetWindow}.`);
+    cullTrigger = targetWindow;
+  }
+  let   cullTarget   = pick('cullTarget', Math.max(1, Math.round(cullTrigger * CULL_TARGET_RATIO)));
+  if (cullTarget > cullTrigger) {
+    conflicts.push(`cullTarget (${cullTarget}) is above cullTrigger (${cullTrigger}); using ${cullTrigger}.`);
+    cullTarget = cullTrigger;
+  }
+  const eagerFill    = pick('eagerFill', false);
+  return { targetWindow, cullTrigger, cullTarget, eagerFill, problems, conflicts };
+}
+
+const CONFIG = 'tool_router_config';
+type ConfigResult = WindowConfig & { libraryTools: number; problems?: string[] };
+declare module '@matatbread/matbot-plugin-api' {
+  interface ToolContracts {
+    tool_router_config:
+      | ToolContract<ConfigResult, { action: 'get' }>
+      | ToolContract<ConfigResult, { action: 'set'; targetWindow?: number | null; cullTrigger?: number | null; cullTarget?: number | null; eagerFill?: boolean | null }>
+      | ToolContract<ConfigResult, { action: 'clear' }>;
+  }
+}
 // There is deliberately NO hard-coded list of "wide"/pinned tool NAMES. A name like `http` or `find_fact`
 // is not a stable identifier of function — the implementing plugin may be absent, or another plugin may
 // register the same name with a different meaning. So which tools are "wide" (pinned) is DERIVED per tool
@@ -53,7 +101,10 @@ const EAGER_FILL: boolean = false;
 // The same reasoning is why there is no set of tools declared internal. Presentation is this presenter's
 // judgement, made from what a tool says about itself; a name handed in from outside is a fact this file
 // cannot re-derive, check, or keep in step with a registry that changes under it. A function with only
-// internal value is better not registered as a tool at all than registered and then suppressed here.
+// internal value is better not registered as a tool at all than registered and then suppressed here. The
+// router's OWN tools are the exception, being facts this file does know: `tool_router_config` is kept out of
+// the catalogue line, since it is about the window rather than a domain the model works in, but stays
+// searchable and is never pinned (its `action` enum makes it narrow by schema).
 
 function textOf(content: readonly MessageContent[]): string {
   return content
@@ -282,7 +333,14 @@ export const plugin: MatbotPluginSpec = {
     };
     const rankNames = (query: string, candidates: readonly Tool[]): string[] => rankScored(query, candidates).map(r => r.name);
 
-    console.warn(`${TAG} active — windowed (target ${TARGET_WINDOW}); pins derived per-tool from descriptions.`);
+    const settings = services.settings();
+    const warned   = new Set<string>();                                  // read per call: warn once, not per call
+    const config   = async (): Promise<ReturnType<typeof windowConfig>> => {
+      const cfg = windowConfig(await settings.entries().catch(() => ({})));
+      for (const p of [...cfg.problems, ...cfg.conflicts]) if (!warned.has(p)) { warned.add(p); console.warn(`${TAG} setting ${p}`); }
+      return cfg;
+    };
+    console.warn(`${TAG} active — windowed (target ${(await config()).targetWindow}); pins derived per-tool from descriptions.`);
 
     // Nouns of every non-pinned tool, de-duped, form the tool_search catalogue line — priming
     // the model on what the (possibly deferred) tail can be searched for. Rebuilt as extraction fills in.
@@ -291,7 +349,7 @@ export const plugin: MatbotPluginSpec = {
     const rebuildCatalog = (): void => {
       const uniq = new Map<string, string>();
       for (const [name, nouns] of nounsByTool) {
-        if (name === SEARCH || isPin(name)) continue;
+        if (name === SEARCH || name === CONFIG || isPin(name)) continue;
         for (const raw of nouns.split(',')) {
           const n = raw.trim();
           if (n && !uniq.has(n.toLowerCase())) uniq.set(n.toLowerCase(), n);
@@ -323,6 +381,7 @@ searching over declining or improvising.`,
       executor: {
         async *execute(input) {
           const query   = queryOf(input);
+          const { targetWindow } = await config();
           const all     = services.tools.list().filter(t => t.name !== SEARCH);
           // Rank the whole library; keep the specialists that actually matched (score > 0 — drop the duds),
           // then ALWAYS append the derived-wide pins as a fallback floor. A pin has near-zero lexical overlap
@@ -330,8 +389,8 @@ searching over declining or improvising.`,
           // it — yet it's the right answer when no specialist fits. Matched specialists lead so the model
           // prefers them; the pins trail as the general-purpose backstop. Empty query → offer the library.
           const matched = query
-            ? rankScored(query, all).filter(r => r.score > 0).slice(0, TARGET_WINDOW).map(r => r.name)
-            : all.map(t => t.name).slice(0, TARGET_WINDOW);
+            ? rankScored(query, all).filter(r => r.score > 0).slice(0, targetWindow).map(r => r.name)
+            : all.map(t => t.name).slice(0, targetWindow);
           const pins    = all.filter(t => isPin(t.name)).map(t => t.name);
           const names   = [...new Set([...matched, ...pins])];
           // LEAN discovery record — names ONLY, never full specs. The presenter reads these back from the
@@ -349,13 +408,85 @@ searching over declining or improvising.`,
     };
     services.tools.register(toolSearch);
 
+    // tool_router_config: the settings above, for an install with no `default_settings:` to author them in
+    // (the browser). Not gated — the window decides what is SHOWN, never what may be called. Nothing is
+    // rebuilt on `set`: the presenter and tool_search read the settings per call.
+    const currentConfig = async (): Promise<ConfigResult> => {
+      const { problems, conflicts, ...cfg } = await config();
+      const all = [...problems, ...conflicts];
+      return { ...cfg, libraryTools: services.tools.list().length, ...(all.length ? { problems: all } : {}) };
+    };
+    const configTool: Tool = {
+      name: CONFIG,
+      description:
+`Read or change how many tools the tool router shows the model at once. A smaller window suits a small model.
+\`targetWindow\`: if the whole library fits in this many tools it is all shown; otherwise the model sees
+tool_search plus a working set, and one search reveals at most this many matches. \`cullTrigger\`: when the
+working set grows past this it is cut back to \`cullTarget\`, keeping the most recently used. Both default
+from targetWindow (100% and 60%); cullTrigger may not be below targetWindow, nor cullTarget above cullTrigger. \`eagerFill\`: also add the best matches for the current message without a
+search. \`get\` reports what is in effect, and \`libraryTools\`, the count compared with targetWindow; \`set\` takes any of them, null reverting one to its default;
+\`clear\` reverts all. A change applies from the next model call.`,
+      inputSchema: {
+        type: 'object',
+        required: ['action'],
+        properties: {
+          action:       { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
+          targetWindow: { type: ['integer', 'null'], minimum: 1, description: 'For "set": the window size, or null for the default (20).' },
+          cullTrigger:  { type: ['integer', 'null'], minimum: 1, description: 'For "set": the working-set size that triggers a cull, or null for the default.' },
+          cullTarget:   { type: ['integer', 'null'], minimum: 1, description: 'For "set": the size a cull cuts to, or null for the default.' },
+          eagerFill:    { type: ['boolean', 'null'], description: 'For "set": pre-rank the current message into the window, or null for the default (false).' },
+        },
+      },
+      executor: {
+        async *execute(input) {
+          const args = (input ?? {}) as Partial<Record<'action' | ConfigKey, unknown>>;
+          switch (args.action) {
+            case 'get':
+              yield { type: 'result', value: await currentConfig() };
+              return;
+            case 'set': {
+              const writes = CONFIG_KEYS.filter(k => args[k] !== undefined);
+              if (!writes.length) {
+                yield { type: 'error', message: `action "set" requires at least one of ${CONFIG_KEYS.join(', ')}. Use "clear" to revert all to their defaults.` };
+                return;
+              }
+              for (const k of writes) {
+                const why = args[k] === null ? undefined : configProblem(k, args[k]);
+                if (why !== undefined) { yield { type: 'error', message: `"${k}" ${why}, or null to revert to its default. Nothing was changed.` }; return; }
+              }
+              // Judged on the RESULT, stored values included: `targetWindow: 6` over a stored `cullTarget: 12`
+              // is as contradictory as setting both in one call. Nothing is written unless all of it holds.
+              const merged: Record<string, unknown> = await settings.entries().catch(() => ({}));
+              for (const k of writes) { if (args[k] === null) delete merged[k]; else merged[k] = args[k]; }
+              const { conflicts } = windowConfig(merged);
+              if (conflicts.length) {
+                yield { type: 'error', message: `${conflicts.map(c => c.replace(/; using \d+\.$/, '.')).join(' ')} Nothing was changed. Set the other value in the same call, or pass null for it to revert to its default.` };
+                return;
+              }
+              for (const k of writes) { const v = args[k]; if (v === null) await settings.delete(k); else await settings.set(k, v); }
+              yield { type: 'result', value: await currentConfig() };
+              return;
+            }
+            case 'clear':
+              for (const k of CONFIG_KEYS) await settings.delete(k);
+              yield { type: 'result', value: await currentConfig() };
+              return;
+            default:
+              yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: get, set, clear.` };
+          }
+        },
+      } satisfies ToolExecutor<ToolResultOf<'tool_router_config'>>,
+    };
+    services.tools.register(configTool);
+
     // Presenter — build the per-iteration window: `tool_search` + the WORKING SET (full specs, TS already
     // folded by session-runner). The working set = {tools called this session} ∪ {the latest search's
     // candidates}, both read back from the transcript. Hidden tools never appear. When the whole library
     // fits the budget, present all of it.
     const presenter: ToolPresenter = {
-      present(tools: readonly Tool[], ctx: PresentContext): readonly Tool[] {
+      async present(tools: readonly Tool[], ctx: PresentContext): Promise<readonly Tool[]> {
         try {
+          const { targetWindow, cullTrigger, cullTarget, eagerFill } = await config();
           const msgs = ctx.session.messages;
           const byName = new Map(tools.map(t => [t.name, t]));
           const searchRaw = byName.get(SEARCH);
@@ -363,25 +494,25 @@ searching over declining or improvising.`,
           const candidates = tools.filter(t => t.name !== SEARCH);
 
           let window: Tool[];
-          if (candidates.length + (searchTool ? 1 : 0) <= TARGET_WINDOW) {
+          if (candidates.length + (searchTool ? 1 : 0) <= targetWindow) {
             window = searchTool ? [searchTool, ...candidates] : [...candidates];   // whole library fits → present all
           } else {
             // Working set from the transcript: called tools persist, the latest search's candidates form the
             // (replaceable) floor. Full specs come from the live `tools` param (byName), never the transcript.
             const wsNames = new Set<string>([...usedTools(msgs), ...latestCandidates(msgs)]);
-            // Threshold cull: over CULL_TRIGGER, cut HARD to CULL_TARGET by turn-distance recency. A threshold
+            // Threshold cull: over cullTrigger, cut HARD to cullTarget by turn-distance recency. A threshold
             // (not per-call trimming) triggers it, so the set is stable — hence cache-friendly — between culls.
-            const keep = wsNames.size > CULL_TRIGGER ? keepByRecency(msgs, wsNames, CULL_TARGET) : wsNames;
+            const keep = wsNames.size > cullTrigger ? keepByRecency(msgs, wsNames, cullTarget) : wsNames;
             // Order by adoption (first-seen), NOT registry order: growth then appends, so discovering a new
             // tool leaves the already-presented prefix byte-identical and it keeps caching. Registry order
             // would insert an early-loaded tool mid-block and shift the tail, busting the prefix every turn.
             const seen = firstSeenOrder(msgs);
             let ws = candidates.filter(t => keep.has(t.name))
               .sort((a, b) => (seen.get(a.name) ?? Number.MAX_SAFE_INTEGER) - (seen.get(b.name) ?? Number.MAX_SAFE_INTEGER));
-            if (EAGER_FILL) {
+            if (eagerFill) {
               // A/B: also pre-rank THIS message and fold in the BM25-top NEW tools, so an obvious tool needs
               // no search round-trip. Full specs come from the registry, so it composes with lean search.
-              const budget = Math.max(0, TARGET_WINDOW - ws.length - (searchTool ? 1 : 0));
+              const budget = Math.max(0, targetWindow - ws.length - (searchTool ? 1 : 0));
               const fill   = rankNames(lastUserText(msgs), candidates.filter(t => !keep.has(t.name)))
                 .slice(0, budget)
                 .map(n => byName.get(n)).filter((t): t is Tool => !!t);
@@ -402,8 +533,7 @@ searching over declining or improvising.`,
     // turns). Content-hash key ⇒ a changed description re-derives; identical ones reuse across hot-reloads.
     // A blank/parse-fail is not cached, so it retries on the next full (non-sub-agent) boot.
     const nounStore = services.createStore<NounRec>('tool_router_nouns');
-    const settings  = services.settings();
-    const isSub     = services.isSubAgent();
+    const isSub    = services.isSubAgent();
     const provider  = async (): Promise<string | undefined> =>
       (await settings.get<string>('nounProvider').catch(() => undefined)) ?? [...services.providers.keys()][0];
     const applyWidth = (name: string, spec: string | undefined): void => {
@@ -412,17 +542,42 @@ searching over declining or improvising.`,
     const seen  = new Set<string>();
     const queue: string[] = [];
     let pumping = false;
-    const extractOne = async (name: string): Promise<void> => {
+    const keyOf = (tool: Tool): string => hash(`${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema ?? {})}`);
+    // One store read per BATCH, not per tool (#109): boot enqueues every tool, and on a remote backend each
+    // `get` is a network round trip that held a connection for the whole warm-up. `undefined` means the
+    // query failed, so `extractOne` falls back to per-key `get` — never to "uncached", which would be an LLM
+    // call per tool. A key absent from a SUCCESSFUL result is a genuine miss and is not read again.
+    const prime = async (names: string[]): Promise<Map<string, NounRec> | undefined> => {
+      const keys = new Set<string>();
+      for (const n of names) {
+        const tool = services.tools.resolve(n);
+        if (!tool || tool.name === SEARCH) continue;
+        const key = keyOf(tool);
+        if (!seen.has(key)) keys.add(key);
+      }
+      const found = new Map<string, NounRec>();
+      if (!keys.size) return found;
+      try {
+        let cursor: string | undefined;
+        do {
+          const page = await nounStore.query({ where: { op: 'in', field: 'id', value: [...keys] }, immutable: true, cursor });
+          for (const r of page.items) found.set(r.id, r);
+          cursor = page.cursor;
+        } while (cursor !== undefined);
+        return found;
+      } catch { return undefined; }
+    };
+    const extractOne = async (name: string, primed: Map<string, NounRec> | undefined): Promise<void> => {
       const tool = services.tools.resolve(name);
       if (!tool || tool.name === SEARCH) return;
       // Content hash over EVERYTHING the derivation reads — name, description AND inputSchema — so any
       // rewrite (including a schema-only change) yields a new key and re-derives. A cache HIT therefore
       // guarantees every stored field is still valid; nouns and width are both persisted and stay fixed
       // until the next write. The store is thus the complete, always-fresh source of truth.
-      const key = hash(`${tool.name}\n${tool.description}\n${JSON.stringify(tool.inputSchema ?? {})}`);
+      const key = keyOf(tool);
       if (seen.has(key)) return;
       seen.add(key);
-      const cached    = await nounStore.get(key).catch(() => null);
+      const cached    = primed ? primed.get(key) ?? null : await nounStore.get(key).catch(() => null);
       let nouns       = cached?.nouns;
       let specificity = cached?.specificity;
       let widthBy     = cached?.widthBy;
@@ -452,12 +607,17 @@ searching over declining or improvising.`,
       if (pumping) return;
       pumping = true;
       try {
-        while (queue.length) { const n = queue.shift(); if (n) await extractOne(n).catch(() => {}); }
+        // Whatever is queued is one batch; registrations arriving while it is read or derived form the next.
+        while (queue.length) {
+          const batch  = queue.splice(0);
+          const primed = await prime(batch);
+          for (const n of batch) await extractOne(n, primed).catch(() => {});
+        }
         console.warn(`${TAG} derived wide/pinned (${derivedWide.size}): ${[...derivedWide].sort().join(', ') || '(none yet)'}`);
       } finally { pumping = false; }
     };
-    const enqueue = (name: string): void => { queue.push(name); void pump(); };
-    for (const t of services.tools.list()) enqueue(t.name);
+    const enqueue = (...names: string[]): void => { queue.push(...names); void pump(); };
+    enqueue(...services.tools.list().map(t => t.name));
     services.Notifier.consume(n => {
       if (n.kind !== RegistryChangeKind) return;
       idx = null;                                                        // tool set changed → rebuild BM25 index lazily

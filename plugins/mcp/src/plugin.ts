@@ -50,6 +50,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
   let settings: PluginSettings | undefined;
   let remote:   RemoteMcpManager | undefined;
   let registry: MatbotMachine['tools'] | undefined;
+  let vault:    MatbotMachine['Vault'] | undefined;
   // Set by teardown so a backgrounded reconnect (below) that is still in flight stops and cleans up
   // rather than registering tools / spawning a process that outlive the plugin.
   let disposed = false;
@@ -57,7 +58,12 @@ export function createMCPPlugin(): MatbotPluginSpec {
   const resolveLocalClient = (name: string): MCPClient | undefined => localActive.get(name)?.client;
 
   async function connectLocal(config: MCPServerConfigLocal): Promise<MCPToolDef[]> {
-    const client = await createStdioClient(config.command, config.args ?? [], config.env);
+    // `${NAME}` in a value is read from the vault as the process starts, so a server's token is named in its
+    // config rather than written there. It no longer reaches the server by inheritance: matbot's own
+    // environment does not carry what `.env` holds.
+    const env = config.env === undefined ? undefined
+      : Object.fromEntries(await Promise.all(Object.entries(config.env).map(async ([k, v]) => [k, await vault!.resolve(v)] as const)));
+    const client = await createStdioClient(config.command, config.args ?? [], env);
     const tools  = await client.listTools();
     localActive.set(config.name, {
       config, client, tools,
@@ -145,11 +151,13 @@ export function createMCPPlugin(): MatbotPluginSpec {
     }
 
     if (!raw.command) { yield { type: 'error', message: 'Local MCP servers require a "command".' }; return; }
-    // Sharper than the remote case: this spawns a child process on the host, and (see #65) that child
-    // currently inherits the full environment. Name the command line so the answer is an informed one.
+    // Sharper than the remote case: this spawns a child process on the host. Name the command line, and
+    // every vault key its environment names, so the answer is an informed one.
     const cmdline = [raw.command, ...(raw.args ?? [])].join(' ');
+    const keys = [...new Set(Object.values(raw.env ?? {}).flatMap(v => [...v.matchAll(/\$\{([^}]*)\}/g)].map(m => m[1] ?? '')))];
+    const given = keys.length > 0 ? `\n\nIt is given the vault key${keys.length > 1 ? 's' : ''} ${keys.map(k => `**${k}**`).join(', ')}.` : '';
     const permit = await ctx.gate({ gate: 'add', subject: raw.name, fallback: false,
-                                    label: `Spawn local MCP server **"${raw.name}"**?\n\n\`${cmdline}\`\n\n_It runs as a child process, and its tools are registered and callable until you remove it._` });
+                                    label: `Spawn local MCP server **"${raw.name}"**?\n\n\`${cmdline}\`${given}\n\n_It runs as a child process, and its tools are registered and callable until you remove it._` });
     if (!permit.allowed) {
       yield { type: 'result', value: { message: refusalMessage(permit) } };
       return;
@@ -239,7 +247,7 @@ ACTIONS
         type:     { type: 'string', enum: ['local', 'remote'], description: 'add only: "local" spawns a process via stdio; "remote" connects to an HTTP endpoint.' },
         command:  { type: 'string', description: 'add, local only: command to run (quoted segments respected).' },
         args:     { type: 'array', items: { type: 'string' }, description: 'add, local only: extra arguments appended after the command.' },
-        env:      { type: 'object', additionalProperties: { type: 'string' }, description: 'add, local only: environment variables for the server process.' },
+        env:      { type: 'object', additionalProperties: { type: 'string' }, description: 'add, local only: environment variables for the server process. Write a secret as ${KEY_NAME} to pass a vault key; it does not inherit them.' },
         endpoint: { type: 'string', description: 'add, remote only: the MCP HTTP endpoint URL.' },
         headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add, remote only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
@@ -267,6 +275,7 @@ ACTIONS
     async setup(services) {
       disposed = false;
       registry = services.tools;
+      vault    = services.Vault;
       settings = services.settings();
 
       // Embed the remote client directly (hard dependency, satisfied by this package's node_modules).

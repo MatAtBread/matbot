@@ -20,7 +20,8 @@ const state = {
   toolRegistry:    undefined as ToolRegistry | undefined,
   frontendPlugins:  new Map<string, FrontendInfo>(),  // pluginName → info, written by services.registerFrontend()
   serviceKeys:     new Map<string, string[]>(),  // pluginName → MatbotMachine keys it registered
-  hookPlugins:        new Set<string>(),         // plugins that registered at least one hook
+  serviceLayers:   new Map<string, { owner: string; value: unknown }[]>(),  // key → plugin registrations, oldest first
+  hookPlugins:       new Set<string>(),         // plugins that registered at least one hook
   systemContextPlugins: new Set<string>(),       // plugins that registered a system-context contributor
   lifecycles:      new Map<string, AbortController>(),  // pluginName → "this plugin is loaded" signal, aborted on unload
   failedPlugins:   [] as FailedPlugin[],         // plugins the loader skipped, keyed by specifier (last failure wins)
@@ -122,6 +123,8 @@ export function registerPlugin(plugin: MatbotPlugin): void {
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 
+const adapterLoads = new Map<string, Promise<MatbotPlugin>>();
+
 export function tryResolveProviderFactory(module: string): ProviderAdapterFactory | undefined {
   return state.providers.get(module);
 }
@@ -156,9 +159,18 @@ export async function instantiateProvider(services: MatbotRuntime, config: Provi
 
   // Not loaded yet — force-load the adapter module on demand (a runtime-contributed profile, or a disabled
   // pre-scan). Warn and return null rather than throw, so one unusable profile can't abort a turn. The next
-  // resolution hits the fast path above via specifier→name, so this loads at most once per adapter module.
+  // resolution hits the fast path above via specifier→name, so this loads at most once per adapter module —
+  // once SETTLED. Calls that arrive while the load is in flight share it: each starting its own lost to
+  // the first on "already registered", and boot is exactly when they arrive together (a skills reindex
+  // analyses every skill at once, all through one provider whose module `plugins:` does not list).
+  const loadKey = name ?? config.module;
+  let loading = adapterLoads.get(loadKey);
+  if (loading === undefined) {
+    loading = services.loadPlugin(config.module).finally(() => adapterLoads.delete(loadKey));
+    adapterLoads.set(loadKey, loading);
+  }
   try {
-    const plugin = await services.loadPlugin(config.module);
+    const plugin = await loading;
     if (plugin.provider === undefined) {
       console.warn(`[matbot] provider "${config.name}": module "${config.module}" loaded but registered no adapter.`);
       return null;
@@ -215,10 +227,46 @@ export function getRegisteredServiceKeys(pluginName: string): readonly string[] 
  * register() that would normally record the key. Recording it makes the boot-opened backend unload-equal
  * to a runtime register(): unloadPlugin() then calls unregister() for it, reverting to the host base.
  */
-export function recordServiceKey(pluginName: string, key: string): void {
+export function recordServiceKey(pluginName: string, key: string, value?: unknown): void {
   const keys = state.serviceKeys.get(pluginName) ?? [];
   if (!keys.includes(key)) keys.push(key);
   state.serviceKeys.set(pluginName, keys);
+  // Out of band means it was in place before anything the loader registered, so it goes underneath.
+  const layers = state.serviceLayers.get(key) ?? [];
+  if (value !== undefined && !layers.some(l => l.owner === pluginName)) state.serviceLayers.set(key, [{ owner: pluginName, value }, ...layers]);
+}
+
+// A displaced StorageBackend is closed by the swap, so there is nothing beneath to reinstate.
+const CLOSED_WHEN_DISPLACED = new Set(['StorageBackend']);
+
+function pushServiceLayer(owner: string, key: string, value: unknown): void {
+  const layers = (state.serviceLayers.get(key) ?? []).filter(l => l.owner !== owner);
+  layers.push({ owner, value });
+  state.serviceLayers.set(key, layers);
+}
+
+/**
+ * Withdraw one plugin's registration of `key`. The registry holds one value per key, so this used to
+ * be a plain `unregister`, which removed whatever was CURRENT — not necessarily this plugin's. Where
+ * plugins stack on a key (a validator or gate that captures the one it displaces and delegates to it),
+ * unloading the one underneath took the one on top with it, and unloading the one on top reverted past
+ * the one it had displaced. Now: withdrawing the current registration reinstates the one it displaced,
+ * withdrawing a displaced one changes nothing visible, and only the last one out reverts to the host.
+ */
+function releaseServiceLayer(services: MatbotMachine, owner: string, key: string): void {
+  const layers = state.serviceLayers.get(key) ?? [];
+  const idx    = layers.findIndex(l => l.owner === owner);
+  if (idx === -1) { services.unregister(key); return; }
+  const wasCurrent = idx === layers.length - 1;
+  layers.splice(idx, 1);
+  if (wasCurrent && CLOSED_WHEN_DISPLACED.has(key)) layers.length = 0;
+  if (layers.length === 0) state.serviceLayers.delete(key);
+  if (!wasCurrent) return;
+  const beneath = layers[layers.length - 1];
+  if (beneath === undefined) { services.unregister(key); return; }
+  // The base register applies its value synchronously, before its returned promise settles.
+  void services.register(key as never, beneath.value as never).catch((e: unknown) =>
+    console.error(`[matbot] Could not reinstate "${key}" from "${beneath.owner}":`, e instanceof Error ? e.message : e));
 }
 
 /** Plugins that registered at least one hook in setup(). */
@@ -353,6 +401,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
+      validate:      async (name: string, parameters: unknown) => services.tools.validate?.(name, parameters),
     },
     hooks: {
       register(hook: Hook) {
@@ -376,6 +425,12 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     async register(key, svc) {
       await services.register(key, svc);
       recordServiceKey(plugin.name, key as string);
+      pushServiceLayer(plugin.name, key as string, svc);
+    },
+    unregister(key: string) {
+      releaseServiceLayer(services, plugin.name, key);
+      const keys = state.serviceKeys.get(plugin.name);
+      if (keys !== undefined) state.serviceKeys.set(plugin.name, keys.filter(k => k !== key));
     },
     registerFrontend(info) {
       state.frontendPlugins.set(plugin.name, info);
@@ -405,7 +460,7 @@ export async function unloadPlugin(pluginName: string, services: MatbotMachine):
   state.lifecycles.delete(pluginName);
 
   for (const key of state.serviceKeys.get(pluginName) ?? []) {
-    services.unregister(key);
+    releaseServiceLayer(services, pluginName, key);
   }
   state.serviceKeys.delete(pluginName);
   state.hookPlugins.delete(pluginName);

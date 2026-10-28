@@ -1,6 +1,5 @@
 import { PLUGIN_API_VERSION, ItemChangeKind, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
-import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import type { ToolInputValidator } from '@matatbread/matbot-core';
+import type { MatbotPluginSpec, MatbotMachine, ToolInputError } from '@matatbread/matbot-plugin-api';
 // A HARD dependency, and a direct one — a `dependencies` entry, the same relationship `mcp` has to
 // `mcp-http`. tool-types SUPPLIES validation (it does the type formation and analysis — the dts, the
 // wire contracts, the JSON Schemas, and a validator emitted from each tool's resolved params type);
@@ -21,10 +20,10 @@ import type { ToolValidatorSupplier } from '@matatbread/matbot-tool-types';
 // `session_action`'s schema requires only `action` and every per-arm requirement is lost. That is why
 // such tools hand-write their own checks today.
 //
-// It is NOT a hook. A `toolcall` hook is a runner channel, so it guards the model's path and nothing
-// else — `POST /tools/:name` and `invokeTool` call `tool.executor.execute` directly and fire no hooks.
-// Core consults `ToolCallValidator` at the executor instead, which every door already passes through:
-// one check rather than one per door, and nothing to drift.
+// A `validate` hook, which core dispatches at the executor — every door passes through it, the runner,
+// `POST /tools/:name` and `invokeTool` alike. Not a `toolcall` hook: that is a runner channel and guards
+// the model's path alone. It sits beside `json-validation` with no reference to it; a call is refused if
+// either refuses it, so where this one has no opinion the schema check still stands.
 
 const PLUGIN_NAME = '@matatbread/matbot-tool-ts-validation';
 
@@ -87,15 +86,10 @@ async function supplyFor(services: MatbotMachine): Promise<ToolValidatorSupplier
   try { return await installing; } finally { installing = undefined; }
 }
 
-function makeValidator(services: MatbotMachine, signal: AbortSignal): ToolInputValidator {
+function makeValidator(services: MatbotMachine, signal: AbortSignal): (name: string, parameters: unknown) => Promise<ToolInputError[] | undefined> {
   // Reported once per tool, not per call: a refusal or caveat is a property of the CONTRACT, so
   // repeating it on every invocation would bury the turn's real output.
   const noted = new Set<string>();
-  // Whatever held the key before us — typically `json-validation`. Delegated to whenever this plugin
-  // has no opinion, so the two compose along the line the type system already draws: typed contracts
-  // here, loose `inputSchema` there. Without this the later-loading plugin would simply shadow the
-  // earlier one.
-  const previous = services.ToolCallValidator;
 
   // `enforce` is read on every tool call through every door, and `PluginSettings.get` is a store read —
   // on the filesystem backend, a disk read — to re-learn a value that changes approximately never. So it
@@ -132,50 +126,47 @@ function makeValidator(services: MatbotMachine, signal: AbortSignal): ToolInputV
     return resolved;
   };
 
-  return {
-    async validateToolCall(name, parameters) {
-      const enforce = await enforcement();
-      if (enforce === 'off') return previous?.validateToolCall(name, parameters);
+  return async (name, parameters) => {
+    const enforce = await enforcement();
+    if (enforce === 'off') return undefined;
 
-      // Resolved per call rather than captured, so an unload/reload of tool-types is followed rather
-      // than pinned — and re-created if it went away entirely, which is why nothing here can be
-      // "unverifiable".
-      const supplier: ToolValidatorSupplier = await supplyFor(services);
-      const entry = (await supplier.toolValidators())[name];
+    // Resolved per call rather than captured, so an unload/reload of tool-types is followed rather
+    // than pinned — and re-created if it went away entirely, which is why nothing here can be
+    // "unverifiable".
+    const supplier: ToolValidatorSupplier = await supplyFor(services);
+    const entry = (await supplier.toolValidators())[name];
 
-      // No contract for this tool, or one that could not be honestly validated as JSON. Either way this
-      // plugin has NO OPINION — never "valid" — so hand over to whoever came before (json-validation
-      // checks its `inputSchema`) and say once that the typed path did not cover it.
-      if (entry === undefined || 'refused' in entry) {
-        if (!noted.has(name)) {
-          noted.add(name);
-          console.warn(entry === undefined
-            ? `[ts-validation] Tool "${name}" has no typed contract; not validated here${previous ? ' (deferring to the validator this displaced)' : ''}.`
-            : `[ts-validation] Tool "${name}" has a contract that cannot be validated as JSON: ${entry.refused}. Not validated here.`);
-        }
-        return previous?.validateToolCall(name, parameters);
-      }
-
-      // A validator that WAS generated may still accept more than it appears to — an `any` member, a
-      // bare `object`, a `Map` that reaches the wire as `{}`. Surfaced once per tool for the same
-      // reason: "validated" should not be read as "fully constrained".
+    // No contract for this tool, or one that could not be honestly validated as JSON. Either way this
+    // plugin has NO OPINION — never "valid" — and says once that the typed path did not cover it.
+    if (entry === undefined || 'refused' in entry) {
       if (!noted.has(name)) {
         noted.add(name);
-        if (entry.warnings.length) {
-          console.warn(`[ts-validation] Tool "${name}" is validated, with unconstrained field(s): ${[...new Set(entry.warnings)].join('; ')}`);
-        }
+        console.warn(entry === undefined
+          ? `[ts-validation] Tool "${name}" has no typed contract; not validated here.`
+          : `[ts-validation] Tool "${name}" has a contract that cannot be validated as JSON: ${entry.refused}. Not validated here.`);
       }
+      return undefined;
+    }
 
-      const errs = entry.validate(parameters);
-      if (errs.length === 0) return [];
-      if (enforce === 'warn') {
-        console.warn(`[ts-validation] Would reject "${name}": ${errs.map(e => `${e.path}: ${e.message}`).join('; ')} (enforce: 'warn' — the call proceeded)`);
-        return [];
+    // A validator that WAS generated may still accept more than it appears to — an `any` member, a
+    // bare `object`, a `Map` that reaches the wire as `{}`. Surfaced once per tool for the same
+    // reason: "validated" should not be read as "fully constrained".
+    if (!noted.has(name)) {
+      noted.add(name);
+      if (entry.warnings.length) {
+        console.warn(`[ts-validation] Tool "${name}" is validated, with unconstrained field(s): ${[...new Set(entry.warnings)].join('; ')}`);
       }
-      // Returned verbatim: core turns these into the error the model reads and self-corrects against,
-      // and a transport can answer 422, so the JSON Pointer paths must survive intact.
-      return errs;
-    },
+    }
+
+    const errs = entry.validate(parameters);
+    if (errs.length === 0) return [];
+    if (enforce === 'warn') {
+      console.warn(`[ts-validation] Would reject "${name}": ${errs.map(e => `${e.path}: ${e.message}`).join('; ')} (enforce: 'warn' — the call proceeded)`);
+      return [];
+    }
+    // Returned verbatim: core turns these into the error the model reads and self-corrects against,
+    // and a transport can answer 422, so the JSON Pointer paths must survive intact.
+    return errs;
   };
 }
 
@@ -184,7 +175,7 @@ let invalidation: AbortController | undefined;
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
-  manifest: { description: 'Enforces each tool\'s ToolContract params type at the executor, via core\'s ToolCallValidator seam — so the model\'s path, HTTP tool routes and invokeTool are all checked by one validator.' },
+  manifest: { description: 'Enforces each tool\'s ToolContract params type at the executor, as a `validate` hook — so the model\'s path, HTTP tool routes and invokeTool are all checked.' },
 
   async setup(services) {
     // Stand the supply up now if nothing else has, so a first tool call does not pay for it and a
@@ -193,7 +184,8 @@ export const plugin: MatbotPluginSpec = {
     // resolves to theirs — but it is no longer a requirement.
     await supplyFor(services);
     invalidation = new AbortController();
-    await services.register('ToolCallValidator', makeValidator(services, invalidation.signal));
+    const judge = makeValidator(services, invalidation.signal);
+    services.hooks.register({ on: 'validate', handler: ctx => judge(ctx.tool, ctx.parameters) });
   },
 
   // Only ever closes an index this plugin installed itself. One that tool-types registered is

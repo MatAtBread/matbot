@@ -47,13 +47,13 @@ export class HttpMCPClient implements MCPClient {
 
   // Best-effort: stateless HTTP MCP servers serve tools/call without an init handshake, so a server
   // that rejects initialize must not block the connection. We only want the `instructions` if offered.
-  async initialize(): Promise<void> {
+  async initialize(signal?: AbortSignal): Promise<void> {
     try {
       const result = await this.post('initialize', {
         protocolVersion: DEFAULT_PROTOCOL_VERSION,
         capabilities:    {},
         clientInfo:      CLIENT_INFO,
-      }) as { protocolVersion?: unknown; instructions?: unknown };
+      }, signal) as { protocolVersion?: unknown; instructions?: unknown };
       if (typeof result?.protocolVersion === 'string') this.negotiatedVersion = result.protocolVersion;
       if (typeof result?.instructions === 'string') this.instructions = result.instructions;
       // If we send the header at all, carry the version the server just negotiated (not the one the
@@ -125,8 +125,8 @@ export class HttpMCPClient implements MCPClient {
     return data.result;
   }
 
-  async listTools(): Promise<MCPToolDef[]> {
-    const result = await this.post('tools/list') as { tools?: MCPToolDef[] };
+  async listTools(signal?: AbortSignal): Promise<MCPToolDef[]> {
+    const result = await this.post('tools/list', {}, signal) as { tools?: MCPToolDef[] };
     return result.tools ?? [];
   }
 
@@ -137,8 +137,8 @@ export class HttpMCPClient implements MCPClient {
   close(): void { /* HTTP is stateless */ }
 }
 
-export async function createHttpClient(config: MCPRemoteConfig): Promise<HttpMCPClient> {
+export async function createHttpClient(config: MCPRemoteConfig, signal?: AbortSignal): Promise<HttpMCPClient> {
   const client = new HttpMCPClient(config.endpoint, config.headers, config.protocolVersion);
-  await client.initialize();
+  await client.initialize(signal);
   return client;
 }

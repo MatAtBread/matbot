@@ -1,4 +1,4 @@
-import type { Hook } from './hooks.js';
+import type { Hook, ToolInputError } from './hooks.js';
 import type { Session } from './messages.js';
 import type { ProviderConfig } from './provider.js';
 import type { Tool } from './tools.js';
@@ -34,6 +34,11 @@ export interface ToolRegistry {
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
   removeByPlugin(pluginName: string): void;
+  /** Judge `parameters` for the tool `name` exactly as its executor will before running it: every
+   *  `validate` hook. Errors refuse, `[]` is valid, `undefined` means nothing had an opinion. For a
+   *  caller that stores a call to make later (a trigger's `invoke`), so it can be refused while its
+   *  author is present. Optional: a registry stood up by hand need not validate. */
+  validate?(name: string, parameters: unknown): Promise<ToolInputError[] | undefined>;
 }
 
 /** What the runner tells a {@link ToolPresenter} about the call it's about to make. */

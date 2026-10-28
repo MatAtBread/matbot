@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { askPermissionGate, bindGate, createSession, HookRegistry, installSettingsDefaults, makePluginSettings,
+import { CONFIRM_NO, askPermissionGate, bindGate, createSession, HookRegistry, installSettingsDefaults, makePluginSettings,
          optionValue, optionLabel, permitted, refused, refusalMessage } from '@matatbread/matbot-core';
 import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store, Tool } from '@matatbread/matbot-core';
 import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
@@ -47,6 +47,27 @@ test('no channel means no human is reachable, and the SITE says what happens the
 // `source` names which test in the cascade produced the answer — a human, a standing answer out of
 // configuration, or the site's own fallback. It exists for the REPORT, not the control flow: a refusal
 // that says only "Cancelled." reads to a model as a malfunction, so it hunts for a workaround or a bug.
+
+test('a refusal with nobody to ask is logged for someone to act on, once per gate and subject', async () => {
+  // A background job or a trigger has no human behind it, and the model is the only one told it was
+  // refused. The log is the record a person sees.
+  const logged: string[] = [];
+  const orig = console.error;
+  console.error = (m: unknown) => { logged.push(String(m)); };
+  try {
+    const { gate } = bindGate(undefined, 'unattended_probe', undefined);
+    await gate({ gate: 'connect', subject: 'https://a.example', label: 'x', fallback: false });
+    await gate({ gate: 'connect', subject: 'https://a.example', label: 'x', fallback: false });
+    await gate({ gate: 'connect', subject: 'https://b.example', label: 'x', fallback: false });
+    await gate({ gate: 'connect', subject: 'https://c.example', label: 'x', fallback: true });   // allowed: nothing to report
+    // A human who said no is not a fault to fix.
+    const refusing = bindGate(undefined, 'unattended_probe', (async () => CONFIRM_NO) as PromptFn);
+    await refusing.gate({ gate: 'connect', subject: 'https://d.example', label: 'x', fallback: false });
+  } finally { console.error = orig; }
+  assert.equal(logged.length, 2, logged.join('\n'));
+  assert.match(logged[0]!, /Refused unattended_probe\.connect for "https:\/\/a\.example" \(tool unattended_probe\): nobody was there to ask/);
+  assert.match(logged[1]!, /"https:\/\/b\.example"/);
+});
 
 test('the boot default distinguishes a human answering from nobody being there', async () => {
   assert.deepEqual(await askPermissionGate.decide(req(), recorder('yes').ask), permitted('user'));
@@ -313,7 +334,7 @@ test('the options separate what is shown from what is answered', async () => {
 });
 
 test('with nobody to ask, the policy delegates to the gate it displaced', async () => {
-  // Composition is the ToolCallValidator idiom: the pair composes in either load order, because the
+  // Composition is capture-and-delegate: the pair composes in either load order, because the
   // displaced gate is captured rather than shadowed.
   const seen: PermissionRequest[] = [];
   const previous: PermissionGate = { async decide(r) { seen.push(r); return permitted('user'); } };

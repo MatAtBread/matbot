@@ -58,9 +58,29 @@ export function bindGate(
           && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
         throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
       }
-      return (gate ?? askPermissionGate).decide({ ...req, gate: `${namespace ?? name}.${req.gate}` }, ask);
+      const qualified = { ...req, gate: `${namespace ?? name}.${req.gate}` };
+      const decision = await (gate ?? askPermissionGate).decide(qualified, ask);
+      if (!decision.allowed && decision.source === 'fallback') reportUnattended(name, qualified.gate, qualified.subject);
+      return decision;
     },
   };
+}
+
+// When nobody can be asked (a background job, a trigger, `POST /tools/:name`), a gate refuses, and the model
+// is told so. Nobody else would be: the operation simply did not happen, in a process nobody is watching. So
+// it is logged, naming what a standing answer would have to say to allow it. At error level, because a
+// background job's process keeps only errors (its output is its result); and at most once an hour per gate
+// and subject, because a dashboard polling a gated tool would otherwise log every poll.
+const UNATTENDED_REPORT_MS = 60 * 60 * 1000;
+const unattendedReported = new Map<string, number>();
+function reportUnattended(tool: string, gate: string, subject: string): void {
+  const key = `${gate}\0${subject}`;
+  const now = Date.now();
+  if (now - (unattendedReported.get(key) ?? -Infinity) < UNATTENDED_REPORT_MS) return;
+  unattendedReported.set(key, now);
+  console.error(`[gate] Refused ${gate} for "${subject}" (tool ${tool}): nobody was there to ask. ` +
+                `To allow it unattended, give a standing answer for that gate and subject (e.g. answer "Always" ` +
+                `when it is next asked in the UI, or configure the permission policy).`);
 }
 
 /**

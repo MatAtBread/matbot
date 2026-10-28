@@ -191,6 +191,8 @@ async function boot(tools: Tool[], data: Map<string, Map<string, never>>): Promi
     Notifier: { notify() {} },
     mounted: { observe() {} },
     systemContext: { register() {} },
+    // function-tools keeps its permission lineage in its own settings.
+    settings: (() => { const m = new Map<string, unknown>(); const s = { get: async (k: string) => m.get(k), set: async (k: string, v: unknown) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); }, entries: async () => Object.fromEntries(m) }; return () => s; })(),
     hooks: { register() {} },
     createStore: (ns: string) => {
       if (!data.has(ns)) data.set(ns, new Map());
@@ -289,4 +291,55 @@ test('a defined function or package runs under the runner current at each call, 
     for (const name of ['hello', 'P__hello']) assert.equal(resultOf(await run(machine, name, {})), expected, `${name} under ${runner ? 'a runner' : 'none'}`);
   }
   await teardown();
+});
+
+test("an export carries the package's own types its contract reaches, and no others", () => {
+  // Its contract is spliced into files that have never seen the package (the dts, the validator's program),
+  // so a type it names but does not carry is unresolved there, and the tool goes unvalidated.
+  const { exports } = parsePackage('Hubs', `
+interface HubReport { hubs: Hub[]; mode: Mode }
+interface Hub { name: string; up: boolean }
+type Mode = 'quick' | 'full'
+interface Unrelated { never: string }
+const LIMIT = 3
+
+export async function check(args: { mode: Mode }): Promise<HubReport> {
+  return { hubs: [], mode: args.mode };
+}
+
+export async function count(args: { n: number }): Promise<number> {
+  return args.n + LIMIT;
+}
+`);
+  const check = exports.find(e => e.name === 'check')!;
+  assert.equal(check.toolContract, 'ToolContract<HubReport, { mode: Mode }>');
+  assert.equal(check.toolContractTypes,
+    "interface HubReport { hubs: Hub[]; mode: Mode }\ninterface Hub { name: string; up: boolean }\ntype Mode = 'quick' | 'full'");
+  assert.equal(exports.find(e => e.name === 'count')!.toolContractTypes, undefined, 'a contract naming none carries none');
+});
+
+test("an export's schema follows the package's own named types, so json-validation checks it too", () => {
+  // json-validation is the browser's only validator, and it checks the schema — which a parameter typed by
+  // a local name (`args: CheckArgs`) used to leave as `{}`, accepting anything.
+  const { exports } = parsePackage('Hubs', `
+type Mode = 'quick' | 'full'
+interface Base { verbose: boolean }
+interface CheckArgs extends Base { mode: Mode; limit?: Mode | number; tags: Tag[] }
+type Tag = string
+type Box<T> = { value: T }
+
+export async function check(args: CheckArgs): Promise<number> { return 1; }
+export async function wrap(args: { b: Box<string> }): Promise<number> { return 1; }
+`);
+  assert.deepEqual(exports.find(e => e.name === 'check')!.inputSchema, {
+    type: 'object',
+    properties: {
+      mode:  { type: 'string', enum: ['quick', 'full'] },
+      limit: { type: ['string', 'number'] },       // the alias's arms join the union, rather than opening it
+      tags:  { type: 'array', items: { type: 'string' } },
+    },
+    required: ['mode', 'tags'],
+  });
+  // A generic one stands for nothing until it has arguments, so it stays open rather than being guessed.
+  assert.deepEqual(exports.find(e => e.name === 'wrap')!.inputSchema, { type: 'object', properties: { b: {} }, required: ['b'] });
 });

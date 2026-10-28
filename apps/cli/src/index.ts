@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { loadConfig, loadConfigFromText, loadDotEnv } from './config.js';
+import { loadConfig, loadConfigFromText, loadDotEnv, readDotEnv, withholdDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import { MemoryStore }                     from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
-import type { Principal, ProviderConfig, Session,
+import type { Principal, ProviderConfig, MatbotPluginSpec, Session,
               Store,
               MessageContent, UserContent, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
@@ -21,13 +21,15 @@ import { appendMessage, createMessage,
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
 import { defaultGate }                     from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
+import { checkProviderModel }              from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
 import { answerSelect, renderSelect }        from './select.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
-         findDuplicateSingletons, describeDuplicateSingleton, type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
+         findDuplicateSingletons, describeDuplicateSingleton, pluginFingerprint, recordLoaded,
+         type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
 import { access, mkdir, readFile, writeFile }          from 'node:fs/promises';
 import { readFileSync, realpathSync }       from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';
@@ -462,7 +464,7 @@ async function runTurn(
   run:          SessionRunner,
   providerName: string,
   principal:    Principal,
-  promptFn:     PromptFn,
+  promptFn:     PromptFn | undefined,
 ): Promise<Session> {
   const ac       = new AbortController();
   // Ctrl-C aborts the running turn (and drops anything queued) through the runner.
@@ -489,7 +491,7 @@ async function runTurn(
       content:   contentArr,
       provider:  providerName,
       principal,
-      prompt:    promptFn,
+      ...(promptFn !== undefined ? { prompt: promptFn } : {}),
     });
     turnTraceId = view.traceId;
     for await (const ev of view.events) {
@@ -542,7 +544,8 @@ async function runTurn(
                 // The FIELD, not a label + a hand-built hint: passing a synthesised string took the
                 // free-text branch of the prompt, so a form's select answer came back as whatever was
                 // typed — unresolved, and never the option's value. One resolver, every path.
-                values[field.name] = await promptFn(field);
+                // With nobody to ask (a background job), each field takes its own default.
+                values[field.name] = promptFn !== undefined ? await promptFn(field) : String(field.default ?? '');
               }
               process.removeListener('SIGINT', onSigint);
               ac.abort();
@@ -676,10 +679,17 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       process.stderr.write(yellow('Model name is required.\n'));
     }
 
-    let endpoint = await ask('Endpoint URL');
+    // Blank is the adapter's own default, and is left out of the profile: written as `endpoint:` it reads
+    // back as a value, and an empty one is a URL nothing can fetch.
+    let endpoint = '';
+    for (;;) {
+      endpoint = await ask('Endpoint URL (blank for the adapter\'s default)');
+      if (!endpoint || /^https?:$/.test(URL.parse(endpoint)?.protocol ?? '')) break;
+      process.stderr.write(yellow('An endpoint is an http:// or https:// URL.\n'));
+    }
     let apiKey = await ask('API key');
 
-    if (endpoint && !endpoint.startsWith('http')) {
+    if (endpoint) {
       process.stderr.write(yellow(`\nTesting ${endpoint}… `));
       const reachable = await testEndpointReachable(endpoint);
       if (!reachable) {
@@ -702,13 +712,31 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     // MATBOT_API_KEY_* whose value was that key's name.
     const wizardVault = new EnvFileVault(
       path.join(configDir, '.env'),
-      process.env as Record<string, string | undefined>,
+      { ...await readDotEnv(configDir), ...process.env },
     );
+    // Written to .env, which the boot vault reads after this.
     const keyName = apiKey ? await wizardVault.createSecret(varName, apiKey) : undefined;
-    // The boot vault is built from process.env, so carry the secret across. Resolve rather than
-    // reuse `apiKey`: where that was a reference, the string is a key name, and assigning it
-    // would overwrite the very key being referenced.
-    if (keyName !== undefined) process.env[keyName] = await wizardVault.resolve(`\${${keyName}}`);
+
+    // The model was typed before the endpoint and key it can be checked with, so it is checked here. An
+    // unlisted name may still be right (an alias, a deployment), so Enter keeps it.
+    const spec = (await import(chosen.name).catch(() => undefined) as { plugin?: MatbotPluginSpec } | undefined)?.plugin;
+    for (;;) {
+      const cfg: ProviderConfig = {
+        name: providerName, module: chosen.name, model,
+        ...(endpoint ? { endpoint } : {}),
+        ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
+      };
+      const adapter = spec?.provider?.(cfg);
+      if (adapter?.models === undefined) break;
+      const check = await checkProviderModel(adapter, cfg, wizardVault);
+      if (check.kind === 'unchecked') process.stderr.write(yellow(`Could not list the endpoint's models (${check.reason}); "${model}" is not checked.\n`));
+      if (check.kind !== 'unlisted') break;
+      process.stderr.write(yellow(`"${model}" is not among the ${check.count} models this endpoint lists.`
+        + (check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '') + '\n'));
+      const again = await ask(`Model name (Enter keeps "${model}")`);
+      if (!again || again === model) break;
+      model = again;
+    }
 
     // Reference the provider by package name — the location-independent form. It resolves via
     // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'
@@ -720,7 +748,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       'providers:',
       `  ${providerName}:`,
       `    module: ${moduleSpec}`,
-      `    endpoint: ${endpoint}`,
+      ...(endpoint ? [`    endpoint: ${endpoint}`] : []),
       `    model: ${model}`,
       ...(keyName !== undefined ? ['    credentials:', `      apiKey: \${${keyName}}`] : []),
     ].join('\n') + '\n';
@@ -738,7 +766,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         // The placeholder, not the typed string: this run must resolve the same key the written
         // config names, or a reference would be posted to the endpoint as if it were the secret.
         ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
-        endpoint,
+        ...(endpoint ? { endpoint } : {}),
       }]]),
     };
   } finally {
@@ -873,11 +901,17 @@ async function main(): Promise<void> {
       + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
   }
 
+  // Read here, after a first-run wizard may have written to it. The environment wins over the file, as it
+  // always has; and once the vault holds the file's keys they are taken out of the environment.
+  const dotEnv = await readDotEnv(configDir);
+  const bootVault = new EnvFileVault(path.join(configDir, '.env'), { ...dotEnv, ...process.env });
+  withholdDotEnv(dotEnv);
+
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
     bootBackend:     new FilesystemStorageBackend(dotData),
     preScanned,
-    vault:           new EnvFileVault(path.join(configDir, '.env'), process.env as Record<string, string | undefined>),
+    vault:           bootVault,
     providers,
     gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
@@ -889,8 +923,11 @@ async function main(): Promise<void> {
         // (the file:// cache-bust only re-evaluates bytes, it can't refetch them). Default off: a
         // programmatic load stays cache-first and offline-tolerant. `plugin reload` opts in.
         const resolved = await resolvePluginSpecifiers([specifier], configDir, refresh);
+        // Taken before the import, so it describes the code that ran (see `recordLoaded`).
+        const fingerprint = pluginFingerprint(specifier, configDir);
         const plugin   = (await loadPluginsWithDescriptions(resolved, machine(), configDir, /* bustCache */ true, prompt, /* onLoadError */ 'throw'))[0];
         if (plugin === undefined) throw new Error(`No plugin loaded for specifier "${specifier}"`);
+        recordLoaded(specifier, fingerprint);
         return plugin;
       },
       async unloadPlugin(specifier: string): Promise<boolean> {
@@ -933,7 +970,13 @@ async function main(): Promise<void> {
   };
   recordOrigPaths(providerModules);
 
+  // Not awaited: digests of every configured plugin are not worth holding boot for, and the first reload
+  // to need one waits for it.
+  const fingerprints = new Map(resolvedPluginMods.map(r => [r.spec, pluginFingerprint(r.spec, configDir)] as const));
   await loadPluginsWithDescriptions(resolvedPluginMods, services, configDir);
+  for (const [spec, fingerprint] of fingerprints) {
+    if (getPluginNameForSpecifier(spec) !== undefined) recordLoaded(spec, fingerprint);
+  }
   loaded();
 
   // Said once, now that the installed set is known and before anything uses it. A second copy of a host
@@ -1108,10 +1151,17 @@ async function main(): Promise<void> {
     return answer.trim() || defaultValue || '';
   }) as PromptFn;
 
+  // A background job has nobody at its terminal: its stdin was the config it was handed, and what it writes
+  // is a log. So its turns get no prompt at all, which is what tells a permission gate that nobody can be
+  // asked — it refuses, as at any other unattended door, and the refusal is logged for someone to act on.
+  // Handing it the terminal prompt instead printed the question into the log and read the answer from a
+  // closed pipe.
+  const turnPrompt = isBackground ? undefined : stdinPrompt;
+
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
     try {
-      await runTurn(session, argPrompt, cliRun, providerConfig.name, principal, stdinPrompt);
+      await runTurn(session, argPrompt, cliRun, providerConfig.name, principal, turnPrompt);
     } finally {
       rl.close();
       await teardownPlugins();
@@ -1133,7 +1183,7 @@ async function main(): Promise<void> {
       endInput();
       if (!line.trim()) continue;
       process.stderr.write(cyanErr('assistant: '));
-      session = await runTurn(session, line, cliRun, providerConfig.name, principal, stdinPrompt);
+      session = await runTurn(session, line, cliRun, providerConfig.name, principal, turnPrompt);
     }
   } finally {
     rl.close();

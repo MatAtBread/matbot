@@ -1,10 +1,20 @@
 import type {
-  ProviderAdapter, ProviderConfig, Message, MessageContent,
+  ProviderAdapter, ProviderConfig, Message,
   Tool, CompletionEvent, HealthStatus,
 } from '@matatbread/matbot-plugin-api';
+import { parseReply, type Piece } from './format.js';
+import { DEFAULT_CONTEXT, REPLY_RESERVE, fitToWindow, size } from './window.js';
 
 const DEFAULT_ENDPOINT = 'https://chatjimmy.ai/api/chat';
 const DEFAULT_MODEL    = 'llama3.1-8B';
+
+// The endpoint sends no CORS headers, so a page's every call fails as a bare TypeError ("Failed to fetch")
+// that names no cause. A CORS-unblocking extension is the only way through from a browser.
+function explained(e: unknown): unknown {
+  return e instanceof TypeError && 'document' in globalThis
+    ? new Error(`ChatJimmy: ${e.message}. The endpoint sends no CORS headers, so a browser blocks it unless a CORS-unblocking extension is enabled for this page.`, { cause: e })
+    : e;
+}
 
 interface ChatJimmyStats {
   decode_rate:    number;
@@ -18,13 +28,6 @@ interface ChatJimmyStats {
   done_reason:    string;
 }
 
-function extractText(content: Message['content']): string {
-  return content
-    .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
-}
-
 export class ChatJimmyAdapter implements ProviderAdapter {
   readonly name: string;
 
@@ -35,19 +38,24 @@ export class ChatJimmyAdapter implements ProviderAdapter {
   complete(
     messages: Message[],
     config:   ProviderConfig,
-    _tools:   readonly Tool[],
+    tools:    readonly Tool[],
     signal:   AbortSignal,
   ): AsyncIterable<CompletionEvent> {
-    return this.infer(messages, config, signal);
+    return this.infer(messages, config, tools, signal);
   }
 
   private async *infer(
     messages: Message[],
     config:   ProviderConfig,
+    tools:    readonly Tool[],
     signal:   AbortSignal,
   ): AsyncIterable<CompletionEvent> {
     const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
     const model    = config.model    ?? DEFAULT_MODEL;
+    const params   = config.parameters ?? {};
+    // `tools: false` turns it off: a profile kept for latency tests may not want an 8B model calling tools
+    // from a prompt, which fumbles often enough (see format.ts) to skew what it measures.
+    const offered  = params['tools'] === false ? [] : tools;
 
     // System text has nowhere to go in the message array: the endpoint takes it out of band, in
     // chatOptions.systemPrompt (verified honoured — a systemPrompt demanding a specific first word
@@ -55,23 +63,10 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     // one got a silently different model back, answering the user's words as a plain assistant.
     // That matters most for the inner voice, whose whole framing IS a system prompt — stripped, it
     // stops critiquing and starts paraphrasing, with no error anywhere.
-    const systemText: string[] = [];
-    const chatMessages: Array<{ role: string; content: string }> = [];
-    for (const m of messages) {
-      if (m.role === 'system') {
-        const text = extractText(m.content);
-        if (text) systemText.push(text);
-      } else if (m.role === 'user') {
-        const text = extractText(m.content);
-        if (text) chatMessages.push({ role: 'user', content: text });
-      } else if (m.role === 'assistant') {
-        const text = extractText(m.content);
-        if (text) chatMessages.push({ role: 'assistant', content: text });
-      }
-    }
-    // Several system messages are possible (a caller's own plus one the harness prepends), and the
-    // endpoint takes a single string, so join in arrival order rather than silently keeping one.
-    const systemPrompt = systemText.join('\n\n');
+    const contextWindow = typeof params['contextWindow'] === 'number' ? params['contextWindow'] : DEFAULT_CONTEXT;
+    const reserve       = typeof params.maxTokens === 'number' ? params.maxTokens : REPLY_RESERVE;
+    const { systemPrompt, messages: chatMessages, cuts } = fitToWindow(messages, offered, Math.max(0, contextWindow - reserve));
+    if (cuts.length > 0) console.warn(`[chatjimmy] to fit the ${contextWindow}-token context window: ${cuts.join('; ')}. The session is unchanged.`);
 
     if (chatMessages.length === 0) {
       throw new Error('ChatJimmy requires at least one user message');
@@ -82,7 +77,10 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       chatOptions: {
         selectedModel: model,
         systemPrompt,
-        topK: config.parameters?.topK ?? 8,
+        // Greedy when tools are offered: measured on matbot's first round, top-k 4 talked about tools,
+        // invented one, or searched on a greeting about a third of the time, where top-k 1 called
+        // `tool_search` with a sensible query every time. A profile's own `topK` still wins.
+        topK: params.topK ?? (offered.length > 0 ? 1 : 8),
       },
       attachment: null,
     });
@@ -90,13 +88,16 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: {
-        'content-type': 'application/json',
+        // The endpoint parses JSON whatever the type says, and text/plain keeps this a CORS "simple" request:
+        // no preflight, so a CORS-unblocking extension need only add a header to the response. JSON forced a
+        // preflight, which the endpoint answers without CORS headers and extensions often fail to patch.
+        'content-type': 'text/plain;charset=UTF-8',
         'origin':       'https://chatjimmy.ai',
         'referer':      'https://chatjimmy.ai/',
       },
       body,
       signal,
-    });
+    }).catch((e: unknown) => { throw explained(e); });
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
@@ -104,6 +105,15 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     }
 
     const text = await res.text();
+    // `debug` logs every exchange whole, for tuning against real turns: what the model saw and wrote.
+    if (params['debug'] === true) console.debug('[chatjimmy] exchange', { systemPrompt, messages: chatMessages, reply: text });
+
+    // An empty body — no reply, no stats — is how the endpoint refuses a request too long for its window.
+    if (!text.trim()) {
+      throw new Error(`ChatJimmy returned an empty response, which it does when a request is too long for its context window `
+        + `(this one was ${size({ systemPrompt, messages: chatMessages })} characters). If that keeps happening, lower `
+        + '`parameters.contextWindow` on this profile.');
+    }
 
     // Strip stats block
     const statsStart = text.lastIndexOf('<|stats|>');
@@ -115,8 +125,15 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       try { stats = JSON.parse(text.slice(statsStart + 9, statsEnd)) as ChatJimmyStats; } catch {}
     }
 
-    if (responseText) {
-      yield { type: 'text-delta', delta: responseText };
+    if (offered.length === 0) {
+      if (responseText) yield { type: 'text-delta', delta: responseText };
+    } else {
+      const { pieces, dropped } = parseReply(responseText, {
+        maxCalls:  typeof params['maxCalls'] === 'number' ? params['maxCalls'] : 1,
+        bareCalls: params['lenientCalls'] !== false,
+      });
+      if (dropped) console.warn('[chatjimmy] reply continued past its tool call — dropped', { dropped });
+      yield* events(pieces, stats.done_reason);
     }
 
     if (stats.total_tokens != null) {
@@ -127,6 +144,7 @@ export class ChatJimmyAdapter implements ProviderAdapter {
       };
     }
 
+    if (stats.done_reason === 'length') yield { type: 'truncated', reason: 'max-tokens', raw: stats.done_reason };
     yield { type: 'done' };
   }
 
@@ -140,7 +158,26 @@ export class ChatJimmyAdapter implements ProviderAdapter {
         ? { status: 'ok' }
         : { status: 'degraded', reason: `models endpoint returned ${res.status}` };
     } catch (e) {
-      return { status: 'down', reason: e instanceof Error ? e.message : String(e) };
+      const err = explained(e);
+      return { status: 'down', reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
+
+function* events(pieces: Piece[], doneReason: string | undefined): Generator<CompletionEvent> {
+  for (const p of pieces) {
+    switch (p.kind) {
+      case 'text': yield { type: 'text-delta', delta: p.text }; break;
+      case 'call': yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: p.arguments }; break;
+      case 'cut-call':
+        yield { type: 'tool-call', id: `call_${crypto.randomUUID()}`, name: p.name, input: {},
+          truncated: { bytes: p.bytes, ...(doneReason ? { stopReason: doneReason } : {}) } };
+        break;
+      case 'unparsed-call':
+        // Not run (see Piece). What the model wrote is shown instead, and it meets it again in history.
+        console.warn('[chatjimmy] unreadable tool call — not run', { name: p.name, body: p.body });
+        yield { type: 'text-delta', delta: `<tool_call>\n${p.body}\n</tool_call>` };
+        break;
     }
   }
 }

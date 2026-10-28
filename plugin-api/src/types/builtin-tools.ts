@@ -184,7 +184,8 @@ export interface ProviderActionResult {
  * `provider list` does not report back (it projects to `hasCredentials`, and a secret must not ride the
  * transcript) — so a caller cannot read-modify-write it, and an `update` that accepted it would have to
  * guess between rewriting a `${NAME}` reference and replacing a literal. Credentials are
- * `plugin store-key`'s, which addresses the vault name directly. And **`module`**, because changing the
+ * `plugin store-key`'s, which addresses the vault name directly. (An `endpoint` moved to another origin does
+ * change them, by policy — see `applyProviderPatch`.) And **`module`**, because changing the
  * adapter re-opens every resolution question `add` answers (is it loaded, does it resolve by package
  * name, is it even a provider adapter); `remove` + `add` is the honest route for that.
  *

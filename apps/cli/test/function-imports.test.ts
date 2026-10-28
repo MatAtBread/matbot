@@ -18,11 +18,21 @@ const machine = (runner: ReturnType<typeof createVmFunctionRunner>): MatbotMachi
   FunctionRunner: runner,
 } as unknown as MatbotMachine);
 
+// A defined function's subject carries its version (`probe@<digest>`), which every definition below
+// changes; these tests are about the module half, so they read it with the version taken off. The
+// versioning itself is pinned on its own, further down.
+const unversioned = (s: string): string => s.replace(/^([^ @]+)@[0-9a-f]{32}(?= )/, '$1');
+const versionedRaw: (PermissionRequest & { namespace?: string })[] = [];
 const asked: (PermissionRequest & { namespace?: string })[] = [];
 const ctxFor = (allow: boolean): ToolContext => ({
   callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
-  gate: (req: PermissionRequest & { namespace?: string }) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
+  gate: (req: PermissionRequest & { namespace?: string }) => {
+    versionedRaw.push(req);
+    asked.push({ ...req, subject: unversioned(req.subject),
+                 ...(req.standing !== undefined ? { standing: req.standing.map(o => ({ ...o, subject: unversioned(o.subject) })) } : {}) });
+    return Promise.resolve(allow ? permitted('user') : refused('user'));
+  },
 }) as unknown as ToolContext;
 
 async function result(events: AsyncIterable<ToolEvent>): Promise<ToolEvent | undefined> {
@@ -282,10 +292,31 @@ test('a function NAMED execute does not share a one-off body\'s standing answers
   assert.equal(asked[0]?.subject, '#execute node:os');
 });
 
+test('a redefinition is a new subject: the version is a digest of what was compiled', async () => {
+  const runner = createVmFunctionRunner(2000);
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  const subjectOf = async (def: string, compiled?: string): Promise<string> => {
+    versionedRaw.length = 0;
+    const fn = await buildAsyncFn(host, def, []);
+    await result(runFunction(machine(runner), ctxFor(true), fn, [], { tool: 'probe', source: def, ...(compiled !== undefined ? { compiled } : {}) }));
+    return versionedRaw[0]!.subject;
+  };
+  const one = `probe() { return import('node:os').then(() => 1); }`;
+  const two = `probe() { return import('node:os').then(() => 2); }`;
+  const a = await subjectOf(one);
+  assert.match(a, /^probe@[0-9a-f]{32} node:os$/);
+  assert.equal(await subjectOf(one), a, 'the same text is the same subject, across calls and restarts');
+  assert.notEqual(await subjectOf(two), a, 'an edit, however small, asks again');
+  // A package export's version is the whole package's: a helper it calls can change what it does.
+  assert.notEqual(await subjectOf(one, `${one}\nconst helper = 1;`), a);
+  // Narrow answers carry the version; the any-function one does not, being the user's to give across versions.
+  assert.deepEqual(versionedRaw[0]!.standing?.map(o => o.subject.replace(/@[0-9a-f]{32}/, '@V')), ['probe@V node:os', 'probe@V node:', '* node:os']);
+});
+
 test('the withheld globals are undefined, and a real import() is inert', async () => {
   const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
   const typeofs = runner.compile(`(async function () { return [typeof process, typeof globalThis, typeof Buffer, typeof require, typeof eval].join(','); })`);
-  assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined,undefined');
+  assert.equal(await typeofs(noLoader), 'undefined,undefined,function,undefined,undefined', 'Buffer is memory, not a capability');
   assert.deepEqual([...runner.withheldGlobals ?? []].slice(0, 2), ['process', 'globalThis'],
                    'and the list is published, so a checker need not keep its own');
 
@@ -323,7 +354,7 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
   assert.deepEqual([...(await unbounded.settings!()).permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
 
-  const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof Buffer, typeof eval, typeof require].join(','); })`);
+  const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof globalThis, typeof eval, typeof require].join(','); })`);
   assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
 
   const escaped = unbounded.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);

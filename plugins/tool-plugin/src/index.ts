@@ -27,6 +27,9 @@ export type { ProvisionPlan } from './provision.js';
 // A second copy of a host singleton: reported by `plugin list`, and once at boot by a host that has
 // somewhere to print it.
 export { findDuplicateSingletons, describeDuplicateSingleton } from './singletons.js';
+// What each plugin was loaded from, so `plugin reload` asks before importing code that has changed since.
+// The host records every load it makes, boot included; the tool reads it.
+export { pluginFingerprint, recordLoaded } from './fingerprint.js';
 
 import { pluginTool } from './tools/plugin.js';
 

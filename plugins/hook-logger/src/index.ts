@@ -1,7 +1,7 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, Message, MessageContent } from '@matatbread/matbot-plugin-api';
 
-// A diagnostic plugin that registers one hook on each of the five channels and logs when it fires.
+// A diagnostic plugin that registers one hook on each of the six channels and logs when it fires.
 // Most handlers are pure observers (return nothing). The `screen` hook additionally demonstrates a
 // durable injection: when the latest user message contains "fnarr", it appends a prompt *fragment*
 // to that user turn (a distinct block, leaving the user's typed text intact) and returns the mutated
@@ -119,6 +119,14 @@ export const plugin: MatbotPluginSpec = {
 
         console.warn(`${TAG} followup    "42" detected — resubmitting robo-turn`);
         return { resubmit: { content: [{ type: 'text', text: 'Ah, the meaning of life!' }] } };
+      },
+    });
+
+    services.hooks.register({
+      on: 'validate',
+      handler(ctx) {
+        // Observe only: returning nothing is NO OPINION, so this never decides a call.
+        console.warn(`${TAG} validate    tool=${ctx.tool}`);
       },
     });
   },

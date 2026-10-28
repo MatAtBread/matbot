@@ -1,5 +1,5 @@
 import type { Tool, ToolEvent, ToolContext, ToolContract, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, REFERENCEABLE_KEY_RULE, refusalMessage, unreferenceableKey } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, REFERENCEABLE_KEY_RULE, originGatedFetch, refusalMessage, unreferenceableKey } from '@matatbread/matbot-plugin-api';
 
 // Single arm: the request params paired with `unknown` (the body is parsed text or arbitrary JSON). The
 // params are inlined structurally (not a `HttpInput` reference) so the derived wire text shows real fields.
@@ -125,9 +125,41 @@ async function resolveHeaders(
   };
 }
 
+const NETWORK = new Set(['http:', 'https:']);
+
+/**
+ * One decision per ORIGIN a request reaches — scheme, host and port exactly — before anything is sent
+ * there, and again for each origin a redirect leads to ({@link originGatedFetch}): an approved host that
+ * answers 302 would otherwise forward the request to one nobody was asked about. A request can carry
+ * whatever the conversation holds, so where it goes is the question. A `data:` URL reaches no network.
+ */
+function originGate(ctx: ToolContext): (url: URL) => Promise<void> {
+  const decided = new Map<string, Promise<void>>();
+  const decide = async (origin: string): Promise<void> => {
+    const permit = await ctx.gate({
+      gate: 'request', subject: origin, label: `Send an HTTP request to **${origin}**?`, fallback: false,
+      standing: [{ subject: origin, label: `Always allow requests to ${origin}` }],
+    });
+    if (!permit.allowed) throw new Error(refusalMessage(permit, `A request to ${origin}`));
+  };
+  return async (url) => {
+    if (!NETWORK.has(url.protocol)) return;
+    let decision = decided.get(url.origin);
+    if (decision === undefined) { decision = decide(url.origin); decided.set(url.origin, decision); }
+    await decision;
+  };
+}
+
 const executor = {
   async *execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
     const { url, method = 'GET', headers = {}, body, responseType = 'text' } = input as HttpInput;
+    const admit = originGate(ctx);
+
+    // Where it goes is asked before which keys go with it: refusing the origin then reads no secret.
+    if (URL.canParse(url)) {
+      try { await admit(new URL(url)); }
+      catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
+    }
 
     const resolved = await resolveHeaders(url, headers, ctx);
     if (!resolved.ok) { yield { type: 'error', message: resolved.message }; return; }
@@ -140,12 +172,13 @@ const executor = {
 
     let res: Response;
     try {
-      res = await fetch(target, {
+      res = await originGatedFetch(admit, target, {
         method,
         headers: resolved.value.headers,
         ...(body !== undefined ? { body } : {}),
         // A redirect is not followed with a key attached. fetch strips only `Authorization` and `Cookie`
         // when one changes origin, so an `X-API-Key` would arrive at wherever the approved host points.
+        // Without one, a redirect is followed, each new origin asked about as the first was.
         ...(secrets.length > 0 ? { redirect: 'manual' as const } : {}),
         signal: ctx.signal,
       });
@@ -197,7 +230,9 @@ export const httpTool: Tool = {
              + 'entering the conversation: give its value as { "Vault": "KEY_NAME" } and the stored value is sent, e.g. '
              + '{ "X-API-Key": { "Vault": "ACME_API_KEY" } }. To send a key inside other text, write it as ${KEY_NAME}: '
              + '{ "Authorization": { "Vault": "Bearer ${ACME_API_KEY}" } }. The user is asked before a key is '
-             + 'sent to an origin it has not been approved for, and a redirect is not followed while a key is attached.',
+             + 'sent to an origin it has not been approved for, and a redirect is not followed while a key is attached. '
+             + 'The user is also asked before a request goes to an origin (scheme, host and port) not yet approved, '
+             + 'including one a redirect leads to; a call that has no one to ask is refused.',
   inputSchema: {
     type:       'object',
     required:   ['url'],

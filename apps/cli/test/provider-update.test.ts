@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseYaml, applyProviderPatch, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { parseYaml, applyProviderPatch, movedCredentialKeys, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
          CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
 import { writeProviderBlock, createProviderTool } from '@matatbread/matbot-tool-plugin';
 import type { ProviderConfig, PromptFn, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';
+
+const noKeys = { hasKey: (): boolean => false };
 
 // `provider update` exists because a provider renaming its models (DeepSeek did) left no way to change
 // `model:` on a profile: the only route was remove + add, and `provider list` projects `credentials` down
@@ -68,7 +72,7 @@ function stored(name: string, over: Partial<ProviderConfig> = {}): ProviderConfi
 
 test('a model rename changes the model and nothing else — the credential reference included', async () => {
   const file = await fixture();
-  const next = applyProviderPatch(stored('deepseek'), { model: 'deepseek-chat-v2' });
+  const next = applyProviderPatch(stored('deepseek'), { model: 'deepseek-chat-v2' }, noKeys);
 
   assert.equal(await writeProviderBlock(file, next), true);
 
@@ -84,7 +88,7 @@ test('a model rename changes the model and nothing else — the credential refer
 
 test('every other section and profile survives the rewrite', async () => {
   const file = await fixture();
-  await writeProviderBlock(file, applyProviderPatch(stored('deepseek'), { model: 'x' }));
+  await writeProviderBlock(file, applyProviderPatch(stored('deepseek'), { model: 'x' }, noKeys));
 
   const doc = parseYaml(await readFile(file, 'utf8'));
   assert.deepEqual(doc['plugins'], ['@matatbread/matbot-tool-plugin']);
@@ -98,22 +102,46 @@ test('every other section and profile survives the rewrite', async () => {
 
 test('null clears a field, absent leaves it alone', async () => {
   const file = await fixture();
-  const next = applyProviderPatch(stored('deepseek'), { endpoint: null, maxRounds: null });
+  const next = applyProviderPatch(stored('deepseek'), { parameters: null, maxRounds: null }, noKeys);
 
   await writeProviderBlock(file, next);
   const back = await readBack(file, 'deepseek');
 
-  assert.equal('endpoint'  in back, false);
-  assert.equal('maxRounds' in back, false);
+  assert.equal('parameters' in back, false);
+  assert.equal('maxRounds'  in back, false);
   assert.equal(back['model'], 'deepseek-chat');                       // absent ⇒ untouched
   assert.deepEqual(back['credentials'], { apiKey: '${DEEPSEEK_KEY}' });
+});
+
+test('an endpoint moved to another origin does not take the credential with it (#111)', () => {
+  // The credential is sent wherever the endpoint points, so an endpoint change could post it anywhere.
+  const cur = stored('deepseek');
+  for (const endpoint of ['https://evil.example', 'http://api.deepseek.com', 'https://api.deepseek.com:8443', null]) {
+    const next = applyProviderPatch(cur, { endpoint }, noKeys);
+    assert.deepEqual(next.credentials, { apiKey: '${MATBOT_API_KEY_DEEPSEEK}' }, String(endpoint));
+    assert.deepEqual(movedCredentialKeys(cur, next), ['MATBOT_API_KEY_DEEPSEEK']);
+  }
+  // The same origin is the same place: a new path keeps it.
+  const samePlace = applyProviderPatch(cur, { endpoint: 'https://api.deepseek.com/v2' }, noKeys);
+  assert.deepEqual(samePlace.credentials, { apiKey: '${DEEPSEEK_KEY}' });
+  assert.deepEqual(movedCredentialKeys(cur, samePlace), []);
+  // A profile with no credential has nothing to move.
+  const { credentials: _c, ...bare } = cur;
+  assert.equal(applyProviderPatch(bare, { endpoint: 'https://evil.example' }, noKeys).credentials, undefined);
+});
+
+test('the fresh key is one the vault does not hold, so no existing secret follows by name', () => {
+  const held = new Set(['MATBOT_API_KEY_DEEPSEEK', 'MATBOT_API_KEY_DEEPSEEK_2']);
+  const next = applyProviderPatch(stored('deepseek', { credentials: { apiKey: '${MATBOT_API_KEY_DEEPSEEK}', org: 'o-1' } }),
+                                  { endpoint: 'https://elsewhere.example' }, { hasKey: k => held.has(k) });
+  assert.deepEqual(next.credentials, { apiKey: '${MATBOT_API_KEY_DEEPSEEK_3}', org: '${MATBOT_API_KEY_DEEPSEEK_ORG}' });
 });
 
 test('parameters are replaced wholesale, not merged', () => {
   // Merging per key would make "drop temperature" unexpressible: there is no shape to diff against,
   // since a parameter is whatever the endpoint takes. Replacement is what `list` + edit + send-back
   // means, and the tool description says so.
-  const next = applyProviderPatch(stored('deepseek'), { parameters: { maxTokens: 8192 } });
+  const next = applyProviderPatch(stored('deepseek'), { parameters: { maxTokens: 8192 } }, noKeys);
   assert.deepEqual(next.parameters, { maxTokens: 8192 });
 });
 
@@ -122,7 +150,7 @@ test('a literal key in the config round-trips as a literal, unquoted', async () 
   // key itself, and update regenerates the block either way. Neither form may acquire quotes, lose them,
   // or turn into the other.
   const file = await fixture();
-  const next = applyProviderPatch(stored('deepseek', { credentials: { apiKey: 'sk-abc123' } }), { model: 'm2' });
+  const next = applyProviderPatch(stored('deepseek', { credentials: { apiKey: 'sk-abc123' } }), { model: 'm2' }, noKeys);
 
   await writeProviderBlock(file, next);
   assert.deepEqual((await readBack(file, 'deepseek'))['credentials'], { apiKey: 'sk-abc123' });
@@ -147,7 +175,7 @@ test('a profile absent from the file is reported, not appended', async () => {
 test('removing the last profile does not swallow the section after it', async () => {
   const file = await fixture();
   // `deepseek` is last in `providers:`, and `default_settings:` follows the block.
-  await writeProviderBlock(file, applyProviderPatch(stored('deepseek'), { model: 'v2' }));
+  await writeProviderBlock(file, applyProviderPatch(stored('deepseek'), { model: 'v2' }, noKeys));
 
   const doc = parseYaml(await readFile(file, 'utf8'));
   const providers = doc['providers'] as Record<string, unknown>;
@@ -175,6 +203,7 @@ async function runUpdate(
     session:    { id: 's1', messages: [] },
     signal:     new AbortController().signal,
     prompt:     ask,
+    vault:      noKeys,
     ...bindGate(undefined, 'provider', ask),
   } as unknown as ToolContext;
 
@@ -199,6 +228,21 @@ test('the executor writes the file and repoints the live registry together', asy
   assert.equal((await readBack(file, 'deepseek'))['model'], 'deepseek-chat-v2');
   // The live profile keeps its credential, exactly as the file does.
   assert.deepEqual(providers.get('deepseek')!.credentials, { apiKey: '${DEEPSEEK_KEY}' });
+});
+
+test('moving the endpoint to another origin says the credential stays behind, by key name only', async () => {
+  const server = createServer((_q, r) => { r.writeHead(200); r.end(); });
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const file = await fixture();
+    const { events, providers, prompts } = await runUpdate(file, { action: 'update', name: 'deepseek', endpoint });
+    assert.match(prompts.at(-1)!, /credentials: \$\{DEEPSEEK_KEY\} → \$\{MATBOT_API_KEY_DEEPSEEK\}/);
+    assert.match(prompts.at(-1)!, /does not go with it/);
+    assert.match(JSON.stringify(resultOf(events)), /not sent to the new origin.*MATBOT_API_KEY_DEEPSEEK/);
+    assert.deepEqual(providers.get('deepseek')!.credentials, { apiKey: '${MATBOT_API_KEY_DEEPSEEK}' });
+    assert.deepEqual((await readBack(file, 'deepseek'))['credentials'], { apiKey: '${MATBOT_API_KEY_DEEPSEEK}' });
+  } finally { await new Promise<void>(r => server.close(() => r())); }
 });
 
 test('declining the confirmation changes neither the file nor the registry', async () => {

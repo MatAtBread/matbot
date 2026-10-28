@@ -3,10 +3,11 @@ import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, buildBodyFn, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
+import { buildAsyncFn, buildBodyFn, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
 import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
+import { Lineage, carriedNote } from './lineage.js';
 
 const PLUGIN_NAME       = 'function-tools';
 const NAMESPACE         = 'functions';
@@ -195,7 +196,7 @@ function globalTypeError(report: ToolCheckReport, sessionNames: Iterable<string>
  *  (where its description says it came from) and `check` (the input gate a session one needs, having no
  *  registry entry for a validator to find it by). */
 function definedTool(
-  machine: MatbotMachine, rec: FunctionRecord, sig: ParsedSignature, fn: CompiledFn,
+  machine: MatbotMachine, lineage: Lineage, rec: FunctionRecord, sig: ParsedSignature, fn: CompiledFn,
   origin: string, extra?: { wire?: true; check?: (input: Record<string, unknown>) => string | undefined },
 ): Tool {
   const paramNames = sig.params.map(p => p.name);
@@ -221,7 +222,7 @@ function definedTool(
         const obj = (input ?? {}) as Record<string, unknown>;
         const bad = extra?.check?.(obj);
         if (bad !== undefined) return (async function* () { yield { type: 'error', message: bad } satisfies ToolEvent; })();
-        return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition });
+        return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition, resolve: lineage.resolve });
       },
     },
   };
@@ -275,22 +276,26 @@ type ToolFunctionAction =
 class FunctionStore {
   private readonly machine: MatbotMachine;
   private readonly store:   Store<FunctionDoc>;
+  private readonly lineage: Lineage;
   private readonly registered = new Set<string>();
 
-  constructor(machine: MatbotMachine, store: Store<FunctionDoc>) {
+  constructor(machine: MatbotMachine, store: Store<FunctionDoc>, lineage: Lineage) {
     this.machine = machine;
     this.store   = store;
+    this.lineage = lineage;
   }
 
   /** Register a tool for every stored function, dropping any this plugin registered that is no longer
-   *  there. Idempotent, so it serves both boot and a StorageBackend swap (which replaces the whole set). */
+   *  there. Idempotent, so it serves both boot and a StorageBackend swap (which replaces the whole set).
+   *  Each body compiles at its first call ({@link onFirstCall}): it compiled when it was defined, so all
+   *  a reload needs up front is its signature. */
   async reload(): Promise<void> {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
       const holder = this.holderOf(doc.id);
       if (holder !== undefined) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": the name is held by a tool from "${holder}"`); continue; }
-      try { this.commit(await this.build(recordOf(doc))); seen.add(doc.id); }
+      try { this.commit(await this.build(recordOf(doc), true)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of this.registered) if (!seen.has(name) && this.owns(name)) this.machine.tools.remove(name);
@@ -314,7 +319,7 @@ class FunctionStore {
   }
 
   /** `sessionNames`: the calling session's own functions, named in the hint if the check trips on one. */
-  async define(definition: string, description?: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<{ name: string; parameters: ParsedParam[] }> {
+  async define(ctx: ToolContext, definition: string, description?: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<{ name: string; parameters: ParsedParam[]; carried: 'kept' | 'reset' | undefined }> {
     const sig = parseDefinition(definition);
     this.assertFree(sig.name);
     // Type-check the body against the live tool types before registering — a strong signal the composition
@@ -355,10 +360,12 @@ class FunctionStore {
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
     // and the name is the whole identity. Only this one document is touched, so two concurrent defines
     // of different names can no longer lose each other.
+    const before = (await this.store.get(sig.name))?.definition;
     try { await this.store.set(doc.id, doc); }
     catch (e) { throw refusedWrite(e, 'a function', 'by `name`'); }
     this.commit(tool);
-    return { name: sig.name, parameters: sig.params };
+    const carried = await this.lineage.carry(ctx, { kind: 'function', name: sig.name }, [{ tool: sig.name, before, after: definition }]);
+    return { name: sig.name, parameters: sig.params, carried };
   }
 
   /** Re-run define's type-check over already-stored source, registering and persisting nothing: the same
@@ -423,10 +430,13 @@ class FunctionStore {
     if (this.holderOf(name) !== undefined) throw new Error(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
   }
 
-  private async build(rec: FunctionRecord): Promise<Tool> {
-    const sig = parseSignature(rec.definition);
-    const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
-    return definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
+  private async build(rec: FunctionRecord, deferCompile = false): Promise<Tool> {
+    const sig   = parseSignature(rec.definition);
+    const names = sig.params.map(p => p.name);
+    const fn    = deferCompile
+      ? onFirstCall(() => buildAsyncFn(this.machine, rec.definition, names))
+      : await buildAsyncFn(this.machine, rec.definition, names);
+    return definedTool(this.machine, this.lineage, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
   }
 
   private commit(tool: Tool): void {
@@ -444,18 +454,20 @@ class FunctionStore {
 class PackageStore {
   private readonly machine: MatbotMachine;
   private readonly store:   Store<PackageDoc>;
+  private readonly lineage: Lineage;
   private readonly owned = new Map<string, Set<string>>();
 
-  constructor(machine: MatbotMachine, store: Store<PackageDoc>) {
+  constructor(machine: MatbotMachine, store: Store<PackageDoc>, lineage: Lineage) {
     this.machine = machine;
     this.store   = store;
+    this.lineage = lineage;
   }
 
   async reload(): Promise<void> {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
-      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition)); seen.add(doc.id); }
+      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition, true)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping package "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
@@ -491,7 +503,7 @@ class PackageStore {
     return undefined;
   }
 
-  async define(name: string, definition: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<string[]> {
+  async define(ctx: ToolContext, name: string, definition: string, noTypeCheck = false, sessionNames: Iterable<string> = []): Promise<{ tools: string[]; carried: 'kept' | 'reset' | undefined }> {
     const parsed = parsePackage(name, definition);
     // The whole module is the snippet, so a private helper's signature is checked against its callers too.
     const index = this.machine.ToolTypeIndex;
@@ -510,10 +522,17 @@ class PackageStore {
       ...(checked ? {} : { definedUnchecked: true as const }),
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
     };
+    const before = (await this.store.get(name))?.definition;
     try { await this.store.set(doc.id, doc); }
     catch (e) { throw refusedWrite(e, 'a package', 'by `package`'); }
     this.commit(name, tools);
-    return parsed.exports.map(e => e.toolName);
+    // Every export's grants are filed under its own tool name and the whole package's text, so an edit to the
+    // package is one question for all of them. An export new in this version has nothing to keep.
+    let had: Set<string> = new Set();
+    if (before !== undefined) { try { had = new Set(parsePackage(name, before).exports.map(e => e.toolName)); } catch { /* nothing to keep */ } }
+    const carried = await this.lineage.carry(ctx, { kind: 'package', name },
+      parsed.exports.filter(e => had.has(e.toolName)).map(e => ({ tool: e.toolName, before, after: definition })));
+    return { tools: parsed.exports.map(e => e.toolName), carried };
   }
 
   async check(name?: string): Promise<CheckResult[]> {
@@ -567,8 +586,10 @@ class PackageStore {
 
   /** Compile, then check every exported name, registering nothing — so a failure at either step, or a
    *  refused write after it, leaves the previous definition (or nothing) registered. */
-  private async prepare(name: string, parsed: ParsedPackage, definition: string): Promise<Tool[]> {
-    const pkg  = await buildPackageFn(this.machine, definition, parsed);
+  private async prepare(name: string, parsed: ParsedPackage, definition: string, deferCompile = false): Promise<Tool[]> {
+    const pkg  = deferCompile
+      ? onFirstCall(() => buildPackageFn(this.machine, definition, parsed))
+      : await buildPackageFn(this.machine, definition, parsed);
     const mine = this.owned.get(name);
     for (const e of parsed.exports) {
       if (foreignHolder(this.machine, mine, e.toolName) !== undefined) {
@@ -576,6 +597,7 @@ class PackageStore {
       }
     }
     const machine = this.machine;
+    const lineage = this.lineage;
     return parsed.exports.map(e => {
       const fn = exportFn(pkg, e.name);
       return {
@@ -583,10 +605,11 @@ class PackageStore {
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
         inputSchema:  e.inputSchema,
         toolContract: e.toolContract,
+        ...(e.toolContractTypes !== undefined ? { toolContractTypes: e.toolContractTypes } : {}),
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source });
+            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source, compiled: definition, resolve: lineage.resolve });
           },
         },
       } satisfies Tool;
@@ -620,11 +643,13 @@ const BUILD_CACHE_LIMIT = 256;
  */
 class SessionFunctions {
   private readonly machine: MatbotMachine;
+  private readonly lineage: Lineage;
   private readonly built  = new Map<string, Promise<Tool | Error>>();
   private readonly warned = new Set<string>();
 
-  constructor(machine: MatbotMachine) {
+  constructor(machine: MatbotMachine, lineage: Lineage) {
     this.machine = machine;
+    this.lineage = lineage;
   }
 
   /** The tools to offer `session` this round — the source the screen hook hands the runner. */
@@ -651,7 +676,7 @@ class SessionFunctions {
    * callable from the next. Checked against this turn's tools — including the session's other functions,
    * so one may call another — plus itself, so it may recurse.
    */
-  async define(ctx: ToolContext, definition: string, description?: string, noTypeCheck = false): Promise<{ marker: SessionFunctionMarker; name: string; parameters: ParsedParam[] }> {
+  async define(ctx: ToolContext, definition: string, description?: string, noTypeCheck = false): Promise<{ marker: SessionFunctionMarker; name: string; parameters: ParsedParam[]; carried: 'kept' | 'reset' | undefined }> {
     const sig = parseDefinition(definition);
     if (this.machine.tools.resolve(sig.name) !== null) throw new Error(shadowMessage(sig.name));
     const index = this.machine.ToolTypeIndex;
@@ -671,7 +696,9 @@ class SessionFunctions {
     };
     const built = await this.build(rec);   // compiles: a bad source fails here, before any marker exists
     if (built instanceof Error) throw built;
-    return { marker: { op: 'define', ...rec }, name: sig.name, parameters: sig.params };
+    const before = sessionFunctions(ctx.session).get(sig.name)?.definition;
+    const carried = await this.lineage.carry(ctx, { kind: 'function', name: sig.name }, [{ tool: sig.name, before, after: definition }]);
+    return { marker: { op: 'define', ...rec }, name: sig.name, parameters: sig.params, carried };
   }
 
   /** define's check, re-run against the tools as they stand now — which is how a function left calling
@@ -710,7 +737,7 @@ class SessionFunctions {
       try {
         const sig = parseSignature(rec.definition);
         const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
-        return definedTool(this.machine, rec, sig, fn, `Defined via ${TOOL_NAME} for this conversation only.`,
+        return definedTool(this.machine, this.lineage, rec, sig, fn, `Defined via ${TOOL_NAME} for this conversation only.`,
           { wire: true, check: paramsGate(rec.name, sig.params) });
       } catch (e) { return e instanceof Error ? e : new Error(String(e)); }
     })();
@@ -791,6 +818,8 @@ and do not reach for \`noTypeCheck\` to get past it.
 \`fetch\`, \`AbortSignal\`, \`WebSocket\`, \`console\` and the timers are ordinary globals in a body, which no
 runner here withholds (\`types\` lists any that are). An HTTP request inside a body is therefore
 \`await fetch(url, { signal: context.signal })\` — not a tool call, and never a reason to install one.
+Where a runner is loaded, the first request to each origin (scheme, host and port) asks the user, as an
+import does, and one that is refused rejects with the reason; a call with nobody to ask is refused.
 
 MODULES (node only). A body may reach the platform through a dynamic import —
 \`const fs = await import('node:fs/promises')\`. Import by NAME only — a node builtin or a package already
@@ -948,19 +977,19 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             const mine = sessionFunctions(ctx.session);
             try {
               if (act.scope === 'session') {
-                const { marker, name, parameters } = await sessions.define(ctx, act.definition, act.description, act.noTypeCheck === true);
+                const { marker, name, parameters, carried } = await sessions.define(ctx, act.definition, act.description, act.noTypeCheck === true);
                 yield sessionMarker(marker);
                 const params = parameters.map(p => p.name).join(', ');
-                yield { type: 'result', value: { message: `Defined session function "${name}"${params ? ` (${params})` : ''}.${note} Callable from your next step, in this conversation only — directly, or as \`await tool.${name}(…)\` from your other functions.`, tool: name, parameters } };
+                yield { type: 'result', value: { message: `Defined session function "${name}"${params ? ` (${params})` : ''}.${note}${carriedNote(carried)} Callable from your next step, in this conversation only — directly, or as \`await tool.${name}(…)\` from your other functions.`, tool: name, parameters } };
                 return;
               }
-              const { name, parameters } = await store.define(act.definition, act.description, act.noTypeCheck === true, mine.keys());
+              const { name, parameters, carried } = await store.define(ctx, act.definition, act.description, act.noTypeCheck === true, mine.keys());
               // Promotion: a session function of this name would now be shadowed by its own global
               // successor, and told so every turn. Retire it with the same marker a remove writes.
               const promoted = mine.has(name);
               if (promoted) yield sessionMarker({ op: 'remove', name });
               const params = parameters.map(p => p.name).join(', ');
-              yield { type: 'result', value: { message: `Defined tool "${name}"${params ? ` (${params})` : ''}.${note}${promoted ? ' It replaces the session function of that name.' : ''} Call it directly to run.`, tool: name, parameters } };
+              yield { type: 'result', value: { message: `Defined tool "${name}"${params ? ` (${params})` : ''}.${note}${promoted ? ' It replaces the session function of that name.' : ''}${carriedNote(carried)} Call it directly to run.`, tool: name, parameters } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
@@ -985,9 +1014,9 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('package requires a "name" (the package name).'); return; }
             if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('package requires a "definition" (the module source).'); return; }
             try {
-              const tools = await packages.define(act.name, act.definition, act.noTypeCheck === true, sessionFunctions(ctx.session).keys());
+              const { tools, carried } = await packages.define(ctx, act.name, act.definition, act.noTypeCheck === true, sessionFunctions(ctx.session).keys());
               const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
-              yield { type: 'result', value: { message: `Defined package "${act.name}" exporting ${tools.map(t => `"${t}"`).join(', ')}.${note} Call them by those names.`, package: act.name, tools } };
+              yield { type: 'result', value: { message: `Defined package "${act.name}" exporting ${tools.map(t => `"${t}"`).join(', ')}.${note}${carriedNote(carried)} Call them by those names.`, package: act.name, tools } };
             } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
             return;
           }
@@ -1080,16 +1109,17 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
 
     async setup(services) {
       lifecycle = new AbortController();
+      const lineage = new Lineage(services.settings());
       const docs = notifyingStore(
         services.createStore<FunctionDoc>(NAMESPACE), services.Notifier, NAMESPACE, 'function',
       );
-      const fns = new FunctionStore(services, docs);
+      const fns = new FunctionStore(services, docs, lineage);
       store = fns;
       const pkgs = new PackageStore(services, notifyingStore(
         services.createStore<PackageDoc>(PACKAGE_NAMESPACE), services.Notifier, PACKAGE_NAMESPACE, 'function-package',
-      ));
+      ), lineage);
       packages = pkgs;
-      const sessionFns = new SessionFunctions(services);
+      const sessionFns = new SessionFunctions(services, lineage);
       await fns.reload();
       await pkgs.reload();
       // The registered tools are state derived from the store at setup time, so they must be rebuilt

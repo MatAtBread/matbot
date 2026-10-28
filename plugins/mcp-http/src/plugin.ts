@@ -104,7 +104,10 @@ export function createMcpHttpPlugin(): MatbotPluginSpec {
       manager = new RemoteMcpManager(services, services.settings());
       await services.register('McpRemoteService', manager);
       services.tools.register(remoteMcpActionTool(manager));
-      await manager.reconnectPersisted((name, err) => console.warn(`[mcp-http] Failed to reconnect "${name}":`, err));
+      // Not awaited, as in the node mcp plugin: setup() is registration, and a server that is slow or
+      // unreachable must not hold the rest of the boot. Its proxy tools appear when it answers.
+      void manager.reconnectPersisted((name, err) => console.warn(`[mcp-http] Failed to reconnect "${name}":`, err))
+        .catch((e: unknown) => console.warn('[mcp-http] Reconnect failed:', e));
     },
 
     async teardown() { manager?.closeAll(); },

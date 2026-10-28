@@ -52,7 +52,6 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
     [`async function f() { return process.cwd(); }`,                 /'process' is not defined/],
     [`async function f() { return eval('1'); }`,                     /'eval' is not defined/],
     [`async function f() { return new Function('return 1')(); }`,    /'Function' is not defined/],
-    [`async function f() { return Buffer.from('x').length; }`,       /'Buffer' is not defined/],
     [`async function f() { return typeof globalThis; }`,             /'globalThis' is not defined/],
     [`async function f() { return typeof (global as never); }`,      /'global' is not defined/],
   ] as const) {
@@ -72,6 +71,21 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
                     `async function f() { const { Buffer: B } = await import('node:buffer'); return typeof B; }`]) {
     assert.deepEqual((await index.check(ok)).diagnostics.map(d => d.label), [], ok);
   }
+});
+
+test('Buffer is a global a body has, typed for real whatever may be imported', async () => {
+  // Module types load only on an import, so a body using `Buffer` and importing nothing failed on a name
+  // it really has. Under `permit: []` nothing at all is imported, which is the case that proves it.
+  for (const permit of [undefined, [], ['node:os']]) {
+    const index = indexFor(permit);
+    const ok = await index.check(`async function f() { return Buffer.from('aGk=', 'base64').toString('utf8'); }`);
+    assert.deepEqual(ok.diagnostics.map(d => `${d.label}: ${d.message}`), [], JSON.stringify(permit));
+    // If it had collapsed to any, this would pass too.
+    const typo = await index.check(`async function f() { return Buffer.frm('x'); }`);
+    assert.equal(typo.diagnostics.length, 1, JSON.stringify(typo.diagnostics));
+    assert.match(typo.diagnostics[0]!.message, /frm/);
+  }
+  assert.doesNotMatch(await indexFor(undefined).dts(), /Absent:[^\n]*Buffer/);
 });
 
 test('a builtin whose name already carries the prefix is typed too', async () => {

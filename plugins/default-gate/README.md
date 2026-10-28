@@ -102,12 +102,15 @@ the specific act.
 
 `tools.overwrite` (subject: tool name) · `plugin.add` / `plugin.provision-deps` / `plugin.remove` /
 `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load` · `provider.add` / `provider.add-unverified` /
-`provider.update` / `provider.update-unverified` / `provider.remove` · `mcp_action.add` /
+`provider.add-unlisted` / `provider.update` / `provider.update-unverified` / `provider.update-unlisted` /
+`provider.remove` · `mcp_action.add` /
 `mcp_action.remove`.
 
 A tool's ids are qualified with the name it is **registered** under, so one answer covers both
 runtimes' implementations of a tool. The list is open — a plugin this build never compiled against
 contributes ids, and an id this policy does not recognise is asked about, never allowed.
 
-Two gates chain on the provider path (`add-unverified` → `add`, `update-unverified` → `update`): one
-user-visible operation can cost two decisions, the first carrying information the second does not.
+Gates chain on the provider path (`add-unverified` → `add` → `add-unlisted`, `update-unverified` →
+`update-unlisted` → `update`): one user-visible operation can cost up to three decisions, each carrying
+information the others do not. `*-unlisted` is asked when the endpoint lists its models and the profile's
+model is not among them; `add-unlisted` comes after `add` because listing sends the credential.

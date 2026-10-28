@@ -336,7 +336,12 @@ function unionSchema(arms: string[]): JSONSchema {
   return scalars.every(s => s.literal) ? { ...typed, enum: scalars.map(s => s.value) } : typed;
 }
 
-function objectSchema(body: string, depth: number): JSONSchema {
+/** Named types a type text may use that are declared beside it — a package's own `interface`/`type` — by
+ *  name, as the type text each stands for: an alias's right-hand side, an interface's `{ … }` body. */
+export type LocalTypes = ReadonlyMap<string, string>;
+const NO_LOCAL_TYPES: LocalTypes = new Map();
+
+function objectSchema(body: string, depth: number, local: LocalTypes): JSONSchema {
   const properties: Record<string, JSONSchema> = {};
   const required: string[] = [];
   let additional: JSONSchema | undefined;
@@ -345,12 +350,12 @@ function objectSchema(body: string, depth: number): JSONSchema {
     if (bits.length < 2) continue;
     const key   = (bits[0] ?? '').trim();
     const value = bits.slice(1).join(':').trim();
-    if (key.startsWith('[')) { additional = tsTypeToSchema(value, depth + 1); continue; }   // index signature
+    if (key.startsWith('[')) { additional = tsTypeToSchema(value, depth + 1, local); continue; }   // index signature
     const optional = key.endsWith('?');
     const raw      = bareType(optional ? key.slice(0, -1) : key);
     const name     = raw.replace(/^(['"])([\s\S]*)\1$/, '$2');
     if (name === raw && !/^[A-Za-z_$][\w$]*$/.test(raw)) continue;   // a method/call signature, not a property
-    properties[name] = tsTypeToSchema(value, depth + 1);
+    properties[name] = tsTypeToSchema(value, depth + 1, local);
     if (!optional) required.push(name);
   }
   return {
@@ -377,35 +382,42 @@ function objectSchema(body: string, depth: number): JSONSchema {
  * and what `json-validation` enforces. Recovering structure therefore rejects calls that used to pass —
  * a missing member of an object param, a value outside a literal union — which is the point of it.
  */
-export function tsTypeToSchema(type: string | undefined, depth = 0): JSONSchema {
+export function tsTypeToSchema(type: string | undefined, depth = 0, local: LocalTypes = NO_LOCAL_TYPES): JSONSchema {
   const t = bareType(type ?? '');
   if (t === '' || depth > 6) return {};
 
   // Union first: a suffix test would otherwise read `string | number[]` as an array. An `undefined` arm
-  // carries no JSON value — optionality belongs to the parameter and is recorded in `required`.
-  const arms = splitTopLevel(t, '|').map(bareType).filter(a => a !== '' && a !== 'undefined');
+  // carries no JSON value — optionality belongs to the parameter and is recorded in `required`. A local
+  // alias that is itself a union (`Mode | number`, with `type Mode = 'a' | 'b'`) contributes its own arms,
+  // or one named arm would make the whole union unexpressible.
+  const arms = splitTopLevel(t, '|').map(bareType)
+    .flatMap(a => { const body = local.get(a); return body !== undefined && !body.startsWith('{') ? splitTopLevel(bareType(body), '|').map(bareType) : [a]; })
+    .filter(a => a !== '' && a !== 'undefined');
   if (arms.length === 0) return {};
   if (arms.length > 1)   return unionSchema(arms);
   const one = arms[0] ?? '';
-  if (one !== t) return tsTypeToSchema(one, depth);
+  if (one !== t) return tsTypeToSchema(one, depth, local);
 
   const prim = PRIMITIVE_SCHEMA_TYPE[one];
   if (prim !== undefined) return { type: prim };
   const lit = literalType(one);
   if (lit !== undefined) return { type: lit.type, enum: [lit.value] };
 
-  if (one.endsWith('[]')) return { type: 'array', items: tsTypeToSchema(one.slice(0, -2), depth + 1) };
+  if (one.endsWith('[]')) return { type: 'array', items: tsTypeToSchema(one.slice(0, -2), depth + 1, local) };
   const arr = one.match(/^(?:Readonly)?Array\s*<([\s\S]*)>$/);
-  if (arr !== null) return { type: 'array', items: tsTypeToSchema(arr[1], depth + 1) };
+  if (arr !== null) return { type: 'array', items: tsTypeToSchema(arr[1], depth + 1, local) };
   if (one.startsWith('[')) return { type: 'array' };   // tuple: per-position schemas aren't expressible here
 
   const rec = one.match(/^Record\s*<([\s\S]*)>$/);
   if (rec !== null) {
     const args = splitTopLevel(rec[1] ?? '', ',');
-    return { type: 'object', ...(args.length === 2 ? { additionalProperties: tsTypeToSchema(args[1], depth + 1) } : {}) };
+    return { type: 'object', ...(args.length === 2 ? { additionalProperties: tsTypeToSchema(args[1], depth + 1, local) } : {}) };
   }
-  if (one.startsWith('{') && matchBrace(one, 0) === one.length - 1) return objectSchema(one.slice(1, -1), depth);
+  if (one.startsWith('{') && matchBrace(one, 0) === one.length - 1) return objectSchema(one.slice(1, -1), depth, local);
   if (one === 'object' || /^Map\s*</.test(one)) return { type: 'object' };
+  // A named type declared beside it stands for its declaration. The depth bound stops a self-referencing one.
+  const declared = local.get(one);
+  if (declared !== undefined) return tsTypeToSchema(declared, depth + 1, local);
   return {};
 }
 

@@ -50,6 +50,8 @@ async function rig(seed: (r: Omit<Rig, 'call' | 'swap'>) => void = () => {}): Pr
     Notifier: { notify() {}, consume() {} },
     mounted: { observe(_o: unknown, h: () => void | Promise<void>) { observers.push(h); } },
     systemContext: { register() {} },
+    // function-tools keeps its permission lineage in its own settings.
+    settings: (() => { const m = new Map<string, unknown>(); const s = { get: async (k: string) => m.get(k), set: async (k: string, v: unknown) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); }, entries: async () => Object.fromEntries(m) }; return () => s; })(),
     createStore: (ns: string) => {
       const m = docs(ns) as unknown as Map<string, { version: string }>;
       const guard = (id: string) => { const e = refuse.get(id); if (e !== undefined) throw e(); };
@@ -189,4 +191,32 @@ test('a check sweep survives a re-stamp the store refuses', async () => {
   assert.deepEqual(results.map(x => [x.name, x.ok]), [['a', true], ['b', true]]);
   assert.equal(r.docs('functions').get('b')!.checkedAgainst, 'here', 'the one that could be re-stamped was');
   assert.equal(r.docs('functions').get('a')!.checkedAgainst, 'elsewhere');
+});
+
+test('reload registers stored functions and packages without compiling them; each compiles at its first call', async () => {
+  let strips = 0;
+  const r = await rig(({ machine, docs }) => {
+    const strip = machine.TypeScriptStripper.strip;
+    (machine as { TypeScriptStripper: MatbotMachine['TypeScriptStripper'] }).TypeScriptStripper = { strip: s => { strips++; return strip(s); } };
+    docs('functions').set('double', fnDoc('double(n: number): number { return n * 2; }', 'double'));
+    docs('functions').set('broken', fnDoc('broken(): number { return <; }', 'broken'));
+    docs('function-packages').set('P', fnDoc('export function a(x: {}): number { return 7; }', 'P'));
+  });
+  assert.equal(strips, 0, 'nothing is compiled at boot');
+  const run = async (name: string, input: unknown) => {
+    const ctx = { callId: 'c', session: { id: 's1', messages: [] }, signal: new AbortController().signal } as unknown as ToolContext;
+    const out: ToolEvent[] = [];
+    for await (const ev of r.machine.tools.resolve(name)!.executor.execute(input, ctx)) out.push(ev);
+    return last(out);
+  };
+
+  assert.deepEqual(await run('double', { n: 21 }), { type: 'result', value: 42 });
+  assert.deepEqual(await run('double', { n: 1 }), { type: 'result', value: 2 });
+  assert.equal(strips, 1, 'compiled once, at the first call');
+  assert.deepEqual(await run('P__a', {}), { type: 'result', value: 7 });
+
+  // A stored body that no longer compiles is registered, and says so when called rather than at boot.
+  const bad = await run('broken', {});
+  assert.equal(bad.type, 'error');
+  assert.match(bad.message!, /not valid TypeScript/);
 });

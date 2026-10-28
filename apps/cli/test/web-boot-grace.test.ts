@@ -93,7 +93,7 @@ test('a tool that will never register 404s once the registry settles', { timeout
     // The registry has been quiet since construction, so the settle deadline is already the near one —
     // NOT the 30s ceiling. This is the UI probing for an optional capability that is not installed.
     const started = Date.now();
-    const res = await fetch(`${base}/tools/profile_action`, { method: 'POST', body: JSON.stringify({ action: 'list' }) });
+    const res = await fetch(`${base}/tools/profile_action`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'list' }) });
     const waited = Date.now() - started;
     assert.equal(res.status, 404);
     assert.ok(waited < 5_000, `should give up when the registry settles, not at the ceiling — waited ${waited}ms`);
@@ -104,7 +104,7 @@ test('a tool that is merely late is still waited for', { timeout: 30000 }, async
   const tools: Tool[] = [];
   const { base, web, notifier } = await serve(tools);
   try {
-    const pending = fetch(`${base}/tools/echo`, { method: 'POST', body: JSON.stringify({}) });
+    const pending = fetch(`${base}/tools/echo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
     // A plugin's setup() lands after the request — the whole reason the grace exists.
     await new Promise(r => setTimeout(r, 300));
     tools.push(echo);
@@ -118,7 +118,7 @@ test('registry churn keeps the grace alive for an unknown name', { timeout: 3000
   const { base, web, notifier } = await serve([echo]);
   try {
     const started = Date.now();
-    const pending = fetch(`${base}/tools/never_exists`, { method: 'POST', body: JSON.stringify({}) });
+    const pending = fetch(`${base}/tools/never_exists`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
     // Boot is still registering things — the deadline must keep moving out while it does, or a slow boot
     // would 404 a tool that had not had its turn yet.
     for (let i = 0; i < 4; i++) {

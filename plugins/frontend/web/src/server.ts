@@ -11,6 +11,7 @@ import {
 import { bindGate } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
+import { trackOwnConnections } from './own-connections.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
 
@@ -22,7 +23,15 @@ export interface WebServerDeps {
   loadPlugin:     (specifier: string) => Promise<MatbotPlugin>;
   unloadPlugin:   (specifier: string) => Promise<boolean>;
   tools?:         ToolRegistry;
-  cors?:          string;  // Access-Control-Allow-Origin value, default '*'
+  /** An origin other than this server's own that may call it from a browser (`Access-Control-Allow-Origin`).
+   *  Absent ⇒ same-origin only. It was `*`, which on an installation walled off by its network rather than
+   *  by a login let any page a user on that network visited read and drive the whole API. */
+  cors?:          string;
+  /** Refuse every request arriving on a connection this process opened. The model acts on the network
+   *  from inside this process — the `http` tool, a body's `fetch` — and the UI's endpoints answer prompts,
+   *  including the gate prompts that exist so a human decides what the model cannot. Off unless asked,
+   *  because a test that drives the server with `fetch` is exactly such a connection. */
+  refuseOwnProcess?: boolean;
   workdir?:       string;
   files?:         FileStore;
   /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, not a captured value) because a
@@ -190,6 +199,10 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+function isJsonRequest(req: IncomingMessage): boolean {
+  return (req.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase() === 'application/json';
+}
+
 function corsHeaders(origin: string): Record<string, string> {
   return {
     'access-control-allow-origin':  origin,
@@ -216,8 +229,10 @@ const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) =>
 }) as PromptFn;
 
 export function createWebServer(deps: WebServerDeps) {
-  const origin = deps.cors ?? '*';
+  const origin = deps.cors;
+  const cors = (): Record<string, string> => origin !== undefined ? corsHeaders(origin) : {};
   const resolvePrincipal = deps.resolvePrincipal ?? defaultWebPrincipal;
+  const own = deps.refuseOwnProcess ? trackOwnConnections() : undefined;
 
   // Boot race guard for the /tools endpoints. This server starts listening inside frontend-web's
   // setup(), which runs before the plugins configured after it — and before the core tools registered
@@ -443,15 +458,25 @@ export function createWebServer(deps: WebServerDeps) {
     req.on('error', () => {});
     res.on('error', () => {});
 
-    // Set CORS headers on every response
-    for (const [k, v] of Object.entries(corsHeaders(origin))) {
-      res.setHeader(k, v);
+    if (own?.opened(req.socket)) {
+      json(res, 403, { error: 'This server does not accept requests from matbot\'s own process. Call the tool directly instead.' });
+      return;
     }
+
+    for (const [k, v] of Object.entries(cors())) res.setHeader(k, v);
     // Every response carries the serving build, including the SSE streams and the static assets. Routes
     // that writeHead their own header object keep this one — writeHead merges over what setHeader set.
     if (harnessVersion !== undefined) res.setHeader('x-matbot-version', harnessVersion);
 
     if (method === 'OPTIONS') { res.writeHead(204).end(); return; }
+
+    // Every POST must say it is JSON, body or none. A cross-origin page may send a `text/plain` or form
+    // POST without asking first, and every body here was parsed as JSON whatever it claimed to be; a JSON
+    // content type makes the browser ask (a preflight), which is refused unless `cors` grants that origin.
+    if (method === 'POST' && !isJsonRequest(req)) {
+      json(res, 415, { error: 'POST requests must be sent with Content-Type: application/json.' });
+      return;
+    }
 
     try {
       // Establish the request's security principal at the entry, so every store/file/vault access
@@ -1027,7 +1052,7 @@ export function createWebServer(deps: WebServerDeps) {
         'content-type':  handle.mimeType,
         // Immutable: an anonymous put mints a fresh id per upload, so a given id's bytes never change.
         'cache-control': 'private, max-age=31536000, immutable',
-        ...corsHeaders(origin),
+        ...cors(),
       });
       for await (const chunk of handle.stream()) res.write(chunk);
       res.end();
@@ -1064,7 +1089,7 @@ export function createWebServer(deps: WebServerDeps) {
       res.writeHead(200, {
         'content-type':  handle.mimeType,
         'cache-control': 'no-cache',
-        ...corsHeaders(origin),
+        ...cors(),
       });
       for await (const chunk of handle.stream()) {
         res.write(chunk);
@@ -1087,6 +1112,7 @@ export function createWebServer(deps: WebServerDeps) {
     globalListeners.clear();
 
     watchAc.abort();                              // ends the firehose subscription
+    own?.stop();
 
     // Settle all pending prompts so callers don't hang. Cancelled, not defaulted: the server going
     // away is not an answer, and a tool reports a cancel as an error rather than acting on it.

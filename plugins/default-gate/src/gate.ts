@@ -70,7 +70,7 @@ const allows = (answer: StandingAnswer | undefined, subject: string, standing: r
  *
  * `previous` is whatever gate this one displaced (the host's asking default, in the normal case). It
  * is delegated to when there is nobody to ask — the one case this policy has nothing to add to, and
- * the `ToolCallValidator` idiom that makes two gates compose in either load order.
+ * the capture-and-delegate idiom that makes two gates compose in either load order.
  */
 export function createDefaultGate(settings: PluginSettings, previous?: PermissionGate): PermissionGate {
   const read = async (gate: string): Promise<StandingAnswer | undefined> =>

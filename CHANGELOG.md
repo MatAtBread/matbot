@@ -9,10 +9,184 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.4.21
+
+### Breaking changes
+
+- **`applyProviderPatch(cur, patch, vault)`** — takes the vault (only its `hasKey`), and an `endpoint` that
+  moves a profile to another origin (scheme, host and port; clearing it back to the adapter's default
+  counts) no longer carries the credential (#111). The credential is sent wherever the endpoint points, so
+  an update could post the key to any host, and its prompt never said so. The profile is pointed at fresh
+  vault keys the vault does not hold, to be supplied out of band with `plugin store-key`; the old keys stay,
+  since another profile may share them. `movedCredentialKeys(cur, next)` names the new ones. A required
+  argument rather than an optional one, because every host applying a patch must apply this rule.
+  - The browser's `ProviderAdmin.update` returns those keys (`readonly string[] | undefined`) instead of a
+    boolean, so its tool can say so.
+
+### API gaps filled
+
+- **A `validate` hook channel, for tool-input validators.** Core dispatches it at the executor, before every
+  call through every door (the model's path, `POST /tools/:name`, `invokeTool`), so it carries no session.
+  A handler returns `ToolInputError[]` to refuse, `[]` for valid, or nothing for no opinion; a throw is no
+  opinion, logged. Every `validate` hook is asked and the call is refused if any refuses it, with each
+  refusal's errors (one shared by two validators is said once). So validators co-exist with no reference to
+  each other, and neither the verdict nor the message depends on load order.
+- **`tools.validate(name, params)`** asks the same validators without running the tool, for a caller that
+  stores a call to make later. Optional on `ToolRegistry`. `ToolInputError` moved to plugin-api (core still
+  exports it).
+- **`ToolCallValidator` is `@deprecated`, and will be removed in 0.5.0.** A service key holds one value, so a
+  second validator had to capture the first and delegate to it: the pair depended on load order and on each
+  other, and unloading the one underneath took the other with it. It is still consulted, as one more opinion
+  beside the `validate` hooks, so a validator registered there keeps working until then. Removing it in
+  0.5.0 is a breaking change: a validator still registered under the key will silently stop being consulted.
+  Register a `validate` hook instead.
+- **`ProviderAdapter.models?(config, signal?)`** — the model ids an adapter can run, for a person choosing
+  one and for catching a mistyped one. The browser setup wizard offers them as a drop-down for a
+  self-contained adapter; absent, or rejecting, it asks for a model name as before.
+- **`checkProviderModel(adapter, config, vault, timeoutMs?)`** — whether a profile's model is one its
+  endpoint lists: `listed`, `unlisted` (with the closest ids), or `unchecked` with the reason. It never
+  throws, and gives up after 8s (`MODEL_LIST_TIMEOUT_MS`) even for an adapter that ignores the signal.
+  Credentials are resolved through the vault, so one the vault does not hold sends nothing. Listing sends
+  the credential, so a caller asks only once it may go to that endpoint. `modelListed(model, ids)` counts
+  names an endpoint accepts without listing them: an undated alias of a dated id, a `-latest` alias, a bare
+  name for an Ollama `:latest` tag, and Gemini's `models/` prefix. `closestIds(id, ids, n?)` ranks a near
+  spelling first, then shared name segments.
+- **`originGatedFetch(admit, input, init?)`** — `fetch`, with each URL a request reaches put to `admit`
+  first: the one asked for, and each one a redirect leads to (#111). A `follow` request is followed one hop
+  at a time as the platform would (303, and 301/302 after a POST, become a bodiless GET; 307/308 resend the
+  body; credentials are dropped on a change of origin). A gate on the first URL alone is a gate on nothing,
+  since an approved host that answers 302 forwards the request to one nobody was asked about.
+- **`FunctionCall.fetch` / `FunctionCall.WebSocket`** — what a body's own `fetch` and `WebSocket` should be,
+  handed to the runner per call beside `importModule`. Absent, the body has the platform's.
+- **`Tool.toolContractTypes`** and **`contractArms()`** — a `toolContract` string may name types declared
+  nowhere else (a function package's own `interface HubReport`), carried as declarations beside it.
+  `contractArms` writes such tools' `ToolContracts` arms for any file that declares them: each distinct set
+  of declarations in a namespace of its own, with an alias per tool, so the contract is kept as written and
+  two tools' types of one name never meet.
+
+### Bug fixes
+
+- **Unloading a plugin withdraws only its own registration of a service.** The registry holds one value
+  per key, and unloading used to `unregister` the key outright, whichever plugin was current. Where plugins
+  stack on a key by capturing what they displace (`ts-validation` over `json-validation`), unloading the one
+  underneath removed the one on top too — `plugin reload json-validation` switched typed validation off with
+  it — and unloading the one on top reverted past the one it had displaced, to the host default. Now
+  withdrawing the current registration reinstates the one it displaced, withdrawing a displaced one changes
+  nothing, and only the last one out reverts to the host. The same holds for the swap-members, a plugin's own
+  `unregister`, and `StorageBackend`, with one difference: a displaced backend was closed by the swap, so
+  withdrawing the live one still reverts to the host's own — but withdrawing a displaced one no longer pulls
+  the live backend out from under everything.
+- **Concurrent first uses of an adapter module that `plugins:` does not list share one load.** Each started
+  its own: the first won and the rest failed on "already registered", so their `complete()` calls failed.
+  Boot is when they arrive together — a skills reindex analyses every skill at once through one provider — so
+  this happened on every boot of such a config. A failed load is not remembered; the next use tries again.
+- **A gate refused because nobody could be asked is logged** (#111). The model was told, and nobody else:
+  the operation simply did not happen, in a process nobody watches (a background job, a trigger,
+  `POST /tools/:name`). `bindGate` now logs it at error level, naming the gate and subject a standing answer
+  would need, at most once an hour per gate and subject.
 
 ### Optional
 
+- **`json-validation`, `ts-validation`** — each registers a `validate` hook instead of the `ToolCallValidator`
+  service, and neither captures nor calls the other. The verdict is unchanged — a call either one refuses is
+  refused — but it no longer depends on which loaded first, and unloading one leaves the other validating.
+  When `ts-validation` has no contract for a tool (or its `enforce` is `off`) it has no opinion, and the schema
+  check still stands.
+- **`triggers`** — a trigger's `invoke` is checked with `tools.validate` when it is stored, so it meets every
+  validator its call will meet when it fires.
+- **`hook-logger`** — logs the `validate` channel too.
+- **`cognition`** — its triggers are seeded whatever order `triggers` is listed in. It read `Triggers` once,
+  when the `SkillManager` arrived, so with `triggers` listed after `cognition` the Inner voice and
+  `remember_fact` triggers were never seeded, at that boot or any later one. Seeding passes now also run when
+  `Triggers` arrives, one at a time. It also no longer passes its own abort signal to `mounted.observe`: that
+  controller was created once per plugin instance and aborted by the first teardown, so a later setup of the
+  same instance observed nothing.
+- **`mcp-http`** — a persisted server no longer holds up boot. `setup()` awaited every reconnect, one server
+  after another, with no bound on the handshake: an unroutable endpoint held the whole boot for ~21s, and one
+  that accepted the connection and never replied held it indefinitely, along with every plugin listed after
+  it. Reconnects now run in the background and concurrently, as the node `mcp` plugin's already did. The
+  `initialize` + `tools/list` handshake has a 30s bound, which `mcp_action add` also gets, and an unload
+  aborts a handshake still in flight instead of letting it register tools for a plugin that has gone.
+
+- **`tool-router`** — the tool window is set in the plugin's settings instead of constants, so a small
+  model can be given fewer tools at once: `targetWindow` (default 20), `cullTrigger` and `cullTarget`
+  (default from `targetWindow`, 100% and 60%), and `eagerFill` (default false). Lowering `targetWindow`
+  alone shrinks the whole window. Settings are read on each call, so a change applies from the next one.
+  - The new `tool_router_config` tool (`get`/`set`/`clear`) changes them where `default_settings:` cannot
+    be authored, such as the browser. `set` refuses a non-positive or non-integer value, and a combination
+    that defeats itself once stored values are included (`cullTrigger` below `targetWindow`, `cullTarget`
+    above `cullTrigger`), and then writes nothing. It is left out of `tool_search`'s catalogue line and never
+    pinned, but a search finds it.
+  - Warming the noun/width cache reads each batch of queued tools with one store query, not one `get` per
+    tool in sequence — on a remote `StorageBackend` that was a network round trip per tool for the whole
+    boot (#109). Tools registered while a batch is in flight form the next one. If the query fails, it
+    falls back to per-key `get`, never to treating every tool as uncached.
+- **`function-tools`** — stored functions and packages are no longer compiled at boot (or on a
+  `StorageBackend` swap). Each one compiles at its first call, so startup costs only parsing the
+  signatures: 200 large functions took 2.4s with `function-runner-node` and now take 50ms, and a single
+  function took ~0.2s, most of it the runner's first load of TypeScript. A stored definition that no
+  longer compiles is now registered and reports the error when called, where boot used to skip it with a
+  warning. `define` and `package` still compile straight away, so a bad new definition is still refused.
+- **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
+  capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
+  one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
+  as `checkedElsewhere` once, since the withheld set is part of the environment its verdict names.
+- **`tool-types`** — the scan of the monorepo `plugins/` tree skips a package whose `matbotRuntime`
+  excludes the runtime being described, by the loader's rule (absent or empty means no restriction). A
+  derivation given no live tool set, such as a typed client generated at build time, no longer declares
+  browser-only tools on node (`webllm_models`), nor google-drive's `managedBy` on `plugin`'s result (#110).
+  `collectToolTypeRoots`, `buildToolTypesData` and `buildMatbotToolsDts` take a trailing `runtime`
+  (default `'node'`), and the web bundle's contract bake passes `'browser'`.
+- **`chatjimmy`** — runs in the browser too, and the web bundle's setup wizard offers it. The endpoint sends
+  no CORS headers, so it needs a CORS-unblocking browser extension, which the wizard says. Without one, a
+  turn fails with an error that says so, not a bare "Failed to fetch".
+- **`chatjimmy`** — tool calling, done in the prompt since the endpoint has none. On by default;
+  `parameters.tools: false` turns it off. Tools are described in the system prompt in the `<tools>` / `<tool_call>` format, calls are
+  parsed out of the reply, and results are replayed as `<tool_response>` turns saying what to do with
+  them, restating the user's question. Only the first `maxCalls` calls of a reply are kept (default 1),
+  because the model writes on past a call. A call whose arguments are not an object is shown, not run. A
+  reply that ends at the token limit is reported as truncated.
+  - Every request is fitted to the endpoint's ~6k-token window (`contextWindow`). It shortens old tool
+    results and then tool descriptions, leaves out the earliest turns, and then leaves out tools, keeping
+    the ones the latest tool result names. Past the window, the endpoint returns an empty response, and
+    that is now reported as an error rather than passed on as an empty turn. This applies with
+    `tools: false` too.
+  - Sampling defaults to greedy (`topK: 1`) when tools are offered; a profile's own `topK` still wins.
+  - `debug: true` logs each exchange whole.
+- **`provider-anthropic`, `provider-openai-compat`, `provider-google`** — implement `models`.
+  - Anthropic reads `/v1/models`, every page.
+  - OpenAI-compat reads the `/models` sibling of the chat-completions URL (or `<base>/models`). The list
+    includes non-chat models, since nothing in OpenAI's rows says which is which. With no key it sends no
+    `authorization` header, so a local server or OpenRouter, which list without one, are not refused.
+  - Google reads the native `/models`, keeping only models that `generateContent`. Every id is returned
+    without its `models/` prefix.
+- **`tool-plugin`, `browser`** — `provider add` and `provider update` check the model against the endpoint's
+  list.
+  - A model the endpoint does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`),
+    not a refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A
+    refusal names the closest listed ids. An endpoint that cannot list is accepted unchecked, and the tool
+    says so.
+  - **Breaking** for an installation that adds or updates profiles with nobody to ask (a trigger, a job,
+    `POST /tools/provider`): an unlisted model is now refused there (`fallback: false`). Give a standing
+    answer for the gate, or use an id the endpoint lists.
+  - On node, `add` first lists without the credential, before its own approval, since that sends nothing
+    secret. Only if that fails (every hosted API but OpenRouter needs a key) is the list fetched with the
+    credential, after the approval, because only `add` agrees that it may go there. So a profile can cost
+    one more decision: `add-unverified` → `add` → `add-unlisted`.
+  - `update` checks only when the model or endpoint changes, and only where the profile's credential
+    already went: one that would have followed the endpoint to another origin is already detached.
+  - The browser's `ProviderAdmin` takes an optional `get(name)`, so an update can be checked. Without it,
+    an update's model is not checked.
+- **`cli`** — the first-run setup wizard checks the model once the endpoint and key are entered. An unlisted
+  one names the closest ids and asks again; Enter keeps the name as typed.
+- **`cli`** — the first-run setup wizard tested an endpoint's reachability only when it did *not* start with
+  `http`, so a real URL was never tested. It now tests every endpoint, and asks again for one that is not an
+  `http(s)` URL. A blank endpoint (the adapter's default) was written as `endpoint:` and carried as `''`,
+  which the adapter used in place of its default, so the first turn failed. It is now left out.
+- **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field: once the
+  endpoint is typed if it lists without a key, and again once the key is typed (the key now comes before
+  the model). An unlisted model is warned about once on save, naming the closest ids, and saving again
+  keeps it.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
   - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
@@ -34,7 +208,112 @@ churn and less likely to affect a consumer who doesn't use them.
     never touched, the session is unchanged, and the model is told. Both decisions stay put across turns, so
     WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill is re-fitted with a
     stricter estimate.
-  - Offered by the web bundle's setup wizard.
+  - Offered by the web bundle's setup wizard, which asks which model to use from a drop-down of the same
+    models `webllm_models` lists (Qwen3-4B preselected). If the list cannot be fetched, the wizard shows a
+    text field instead, and leaving it empty uses Qwen3-4B.
+- **`frontend-web`** — closes the server to other origins (#111). **Breaking** for a page served from
+  elsewhere that calls this server.
+  - No `Access-Control-Allow-Origin` is sent by default; it was `*`. On an installation walled off by its
+    network rather than by a login, that let any page a user on the network visited read and drive the
+    whole API. A dashboard hosted on another origin is granted with the plugin's `cors_origin` setting.
+  - Every POST must be sent as `Content-Type: application/json`, and anything else is refused with 415
+    before its body is read. A cross-origin page can send a `text/plain` or form POST without a preflight,
+    and every body was parsed as JSON whatever it claimed to be.
+- **`frontend-web`** — model output can no longer run script in the UI (#111). The page renders the prompt a
+  gate is waiting on, so script there could answer it.
+  - Rendered markdown is sanitised with DOMPurify (pinned, with an integrity hash). Event handlers,
+    `<script>`, `javascript:` URLs, `<style>`, `<form>`, `<meta>`, `<base>`, `<link>`, `<object>` and
+    `<embed>` are removed; SVG, images, video, audio, `<details>`, styled elements and tables are kept.
+    Each message is `contain: paint`, so a styled reply cannot draw outside its own bubble (over a prompt).
+  - Every `<iframe>` is sandboxed without `allow-same-origin`, and `srcdoc` is removed: a page from this
+    server would otherwise run with the UI's access. One that points at this server is loaded through a
+    bridge instead: its HTML is set as `srcdoc` behind a `<base>` and a `fetch` shim, and the UI makes its
+    requests for it, allowing only tool calls (`POST /tools/*`, `/stream/tools/*`) and file reads
+    (`GET /files/*`), never `/sessions/…`. An embedded dashboard therefore keeps working unchanged, and a
+    gated tool it calls is refused as for any caller with nobody to ask. Node server only: in the
+    in-browser build an embedded workspace page says it is unavailable.
+  - `marked` and `tiny-markdown-editor` are loaded at exact versions with integrity hashes. Both were
+    unpinned, so whoever controlled those CDN URLs controlled the page. The versions are the ones the
+    unpinned URLs served (`marked` 15.0.12) or the release before (`tiny-markdown-editor` 0.2.34).
+  - `web_user_environment`'s Worker has the page's origin, so its expression could `fetch` any route the UI
+    can, and in the in-browser build open the machine's IndexedDB and OPFS storage. Every way it had to send
+    a request, start another realm or open that storage is now deleted before the expression runs, and the
+    tool's description says so.
+- **`frontend-dom`** — the same markdown rules, and `marked` pinned to 14.1.4 (it was `marked@14`).
+- **`frontend-web`** — the model can no longer answer its own prompts over HTTP (#111). The server refuses
+  every request arriving on a connection matbot's own process opened (403), recognised through node's
+  `net.client.socket` diagnostics channel on every platform. The model reaches the network from inside
+  that process, through the `http` tool or a function's `fetch`, and `POST /sessions/:id/prompt` answers
+  whatever prompt is pending, a permission gate's included. Browsers and other processes are served as
+  before. A process matbot starts (`curl` from `bash`) is not covered, and the README says so.
+  `createWebServer` takes `refuseOwnProcess`, off by default so a test can drive the server with `fetch`.
+- **`http`** — asks before a request reaches an origin, and again for each origin a redirect leads to
+  (#111). The subject is the origin (scheme, host and port), the gate `http.request`, and a call with
+  nobody to ask is refused. **Breaking** for an installation that calls `http` from a trigger, a job or
+  `POST /tools/http`: give a standing answer for the origins it uses.
+- **`function-tools`** — a body's `fetch` and `WebSocket` ask about each origin, as its `import(…)` asks
+  about each module (#111): gate `tool_function.connect`, subject `<function> <origin>`, once per origin
+  per invocation, redirects asked about in their own right. A refused `WebSocket` closes with code 1006
+  and the refusal as its reason. Only where a runner binds them.
+- **`function-runner-node`** — binds the gated `fetch` and `WebSocket` each call is handed in place of the
+  globals. The constructor escape still reaches the real ones, as it reaches `process`.
+- **`frontend-telegram`** — `telegram_open_door` asks before it opens (#111). Whoever joins gets the owner's
+  access to this matbot, so admitting someone is the user's decision: gate `telegram_open_door.open`, and a
+  call with nobody to ask is refused.
+- **`docker-bash`** — `.data/settings` and any SQLite database files are mounted read-only inside the
+  container (#111). They hold the permission gates' standing answers, so a script that could write them
+  could grant itself every later gate. The container is labelled with the set it was made with, and one
+  made with another set (including every container from before this) is replaced on its next use.
+- **`function-tools`** — a function's own import and network grants name its version (#111). The subject
+  is `<name>@<digest> <module|origin>`, the digest of the text that was compiled (a package export's is the
+  whole package's), so a redefinition asks again instead of inheriting what the reviewed version was
+  granted. "Any function" answers and `#execute` are unchanged. Narrow standing answers stored before this
+  no longer match and are asked once more.
+- **`tool-plugin`** — `plugin reload` asks before importing code that has changed since the plugin was
+  loaded (#111). A reload of a resident plugin was never asked about, but it imports whatever is on disk or
+  upstream now, which the model can change (`skills_compiler` writes a plugin; `refresh` re-fetches one).
+  The host records a digest of each plugin's own files as it loads it, boot included (in memory, so a
+  restart re-records what the configuration loads); gate `plugin.reload`, subject the config entry, with
+  `fallback: false`. Code already on disk is checked before anything is unloaded, so a refusal leaves the
+  plugin running; a refreshed copy is checked once fetched, and a refusal restores the cached one. A
+  recompiled skill is therefore asked about on its reload; a standing answer for that plugin covers it.
+- **`cli`** — `.env`'s secrets are kept out of the process environment (#111). Every process matbot starts
+  inherits it (`bash`, an MCP server, `npm` running a fetched plugin's install scripts), so a secret there
+  went to all of them with no gate asked. The vault now reads `.env` itself, and its keys are removed from
+  the environment once it has, including when something else loaded the file (a systemd
+  `EnvironmentFile=`). `MATBOT_WEB_PORT` and `MATBOT_PRINCIPAL` are still applied from `.env`. **Breaking**
+  for anything that read a `.env` value from the environment directly, such as a local MCP server relying
+  on inheriting a token: name it in that server's `env:` as `${KEY}` instead (see `mcp`).
+- **`mcp`** — a local server's `env` values may name vault keys as `${KEY}`, read from the vault as the
+  process starts and stored as written, never resolved (#111). It is how a server gets a token now that
+  `.env` is not inherited; the spawn prompt names every key it will be given.
+- **`tool-plugin`, `browser`** — `provider update` follows the rule above: when the endpoint moves origin,
+  the confirmation (node) says the credential does not go with it and names the key it will read instead,
+  and both tools' results tell the model to have the user supply it with `plugin store-key`. A credential is
+  shown by key name only, never a literal value.
+- **`cli`** — a background job's turns get no prompt, so a gate in one refuses as unattended (and is logged)
+  instead of printing its question into the log and reading the answer from the closed pipe its config came
+  on. A form there takes each field's default.
+- **`function-tools`, `tool-types`, `browser`** — a function package's export whose contract names the
+  package's own types is validated and typed. Each export carries the declarations its contract reaches
+  (`toolContractTypes`); they were missing from the program that types contract strings, so
+  `ts-validation` refused the tool ("Cannot find name 'HubReport'") and the dts named a type it never
+  declared. A declaration that does not resolve refuses only the tools that carry it.
+- **`function-tools`** — a package export whose parameter is typed by one of the package's own names
+  (`args: CheckArgs`) gets a real input schema: the name is read as what it declares (an interface's body,
+  an alias's type), and a local union alias joins the union it appears in. It was `{}`, so
+  `json-validation` — the browser's only validator — accepted anything. A generic declaration stays open.
+- **`function-tools`** — editing a function no longer re-asks for its imports and connections, when the
+  user permits it. A function's grants are filed under its lineage (the version it descends from by
+  permitted edits), not the digest of its current text, and a redefinition of one that uses `import(`,
+  `fetch` or `WebSocket` asks `tool_function.edit` whether the new version keeps them — offering "always,
+  for edits to this function in this session". The grants stay general, so a function developed in a
+  session keeps them when it later runs in a background job. Links are kept in the plugin's settings, never
+  on the stored definition, so text written any other way starts a fresh lineage. Prompts name "function
+  F" rather than "F as currently defined".
+- **`docker-bash`** — the project's `.env` is covered by `/dev/null` inside the container, so it reads as
+  empty (#111). The project is mounted read-only, which kept the file from being written but left every
+  secret in it readable to a script. Containers made without the cover are replaced on their next use.
 
 ## 0.4.20
 

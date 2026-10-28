@@ -83,6 +83,7 @@ tool appears once a WebLLM profile has answered once, or straight away if the pl
 | `contextWindow` | Tokens. Default 8192. WebLLM's own default for Qwen3 is 4096, which matbot's system context and tool list can fill alone. A larger window costs GPU memory. |
 | `thinking` | `true` lets Qwen3 reason before answering, streamed as `thinking`. Off by default, because on a laptop GPU it is most of the wait. |
 | `tools` | `false` offers no tools. |
+| `lenientCalls` | `false` stops a call written without its `<tool_call>` tags from being read as a call (see below). On by default. |
 | `cache` | Where weights are kept: `cache`, `indexeddb`, `opfs` or `cross-origin`. Defaults to `indexeddb` for a page opened from `file://`, where Cache Storage is unavailable, and to WebLLM's default otherwise. |
 | `library` | Another WebLLM build to import, as an ES module URL. |
 | `maxTokens`, `temperature`, `topP`, `stopSequences` | Passed through. |
@@ -103,6 +104,41 @@ A WebLLM *structural tag* constrains everything after `<tool_call>`:
 Text outside a call is unconstrained, so the model still writes prose. The constraint enforces shape (keys,
 types, enums, required fields), not the content of a free string. It is reliable on models trained on this
 format: Qwen and Hermes.
+
+The constraint only ever applies *after* the literal `<tool_call>`, so the tags themselves have to come from
+the model — and on small models they often do not. Measured on `Qwen3-1.7B-q4f16_1-MLC`, asked what tools it
+had, the whole reply was:
+
+```
+<think>
+
+</think>
+
+{"name": "tool_search", "arguments": {"query": "List the tools I have"}}
+```
+
+A complete, well-formed call with the two tags its prompt showed it missing. The grammar never fired, and the
+call arrived as JSON in a text bubble. So a reply is read for what it means, not only for what it was told to
+write:
+
+- **A call with no `<tool_call>` around it** is read as a call: `{"name": …, "arguments": …}`, or a `[…]` of
+  them. It must name its `arguments`, which is what separates a call from a JSON example in prose. Any prose
+  in front of it is kept, and is emitted first. `parameters.lenientCalls: false` turns this off for a model
+  found to write JSON examples as prose — though an example is a shape, not a call, and is ignored either way.
+- **A call ends reasoning.** Qwen3 opens `<think>` and, when it decides to call, may write the call without
+  closing the block; vLLM's own Qwen3 parser treats `<tool_call>` as the implicit end of reasoning for that
+  reason. Without it the whole call arrives as `thinking` — invisible when `thinking` is off.
+- **A call that will not parse is not called.** It is shown as the model wrote it, as the reply's text. An
+  unreadable call has no arguments, and running the tool with `{}` instead turns a formatting slip into a real
+  side effect — a tool that ran on nothing and returned its own error or a dump of its defaults, which then
+  reads as the model's answer. The model also meets its own attempt in history, and can correct it.
+- **A call the reply ended inside** (cut off by `maxTokens`) is reported as a `truncated` tool call, which
+  matbot answers with an error result rather than executing. If the JSON had already closed and only
+  `</tool_call>` was cut, it is an ordinary call: the arguments are whole.
+- **`arguments` as a JSON string** (`"arguments": "{"query": "x"}"`) is normalised to the object the tool
+  declared. Qwen's own template accepts both, and the small builds use either. A trailing comma before a
+  closing bracket is repaired — but only for a body that does not already parse, so an argument value that
+  legitimately contains `,}` is never rewritten.
 
 History is rendered the way Qwen's chat template renders it: calls as `<tool_call>` blocks after the
 assistant's text, results as `<tool_response>` blocks in a user turn. Rendering is deterministic, so WebLLM

@@ -38,7 +38,7 @@ async function withServer(fn: (base: string, docs: Map<string, Session>) => Prom
   try { await fn(base, docs); } finally { web.server.close(); }
 }
 
-const create = (base: string, body?: unknown) => fetch(`${base}/sessions`, body === undefined ? { method: 'POST' } : {
+const create = (base: string, body?: unknown) => fetch(`${base}/sessions`, body === undefined ? { method: 'POST', headers: { 'content-type': 'application/json' } } : {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 

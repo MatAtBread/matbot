@@ -29,6 +29,8 @@ function machineWith(extra: Record<string, unknown>): MatbotMachine {
     Notifier: { notify() {}, consume() {} },
     mounted: { observe() {} },
     systemContext: { register() {} },
+    // function-tools keeps its permission lineage in its own settings.
+    settings: (() => { const m = new Map<string, unknown>(); const s = { get: async (k: string) => m.get(k), set: async (k: string, v: unknown) => { m.set(k, v); }, delete: async (k: string) => { m.delete(k); }, entries: async () => Object.fromEntries(m) }; return () => s; })(),
     createStore: (ns: string) => {
       if (!data.has(ns)) data.set(ns, new Map());
       const docs = data.get(ns)!;

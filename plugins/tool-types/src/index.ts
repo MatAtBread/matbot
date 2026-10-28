@@ -1,10 +1,10 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION, RegistryChangeKind, importPermitted, importableByName } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName } from '@matatbread/matbot-plugin-api';
 import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
-import { buildToolTypesData, compileToolValidators, type ToolTypesData } from './build-dts.js';
+import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
 import type { ToolValidator } from './validator.js';
 
@@ -23,8 +23,8 @@ export {
  * type formation and analysis — it derives the dts, the wire contracts and the JSON Schemas from each
  * tool's `ToolContract`, and emits a validator from the checker's resolved params type — but it is not
  * itself a validator and registers no validator service. Enforcement is a consumer's:
- * `@matatbread/matbot-tool-ts-validation` calls this, applies a policy, and registers the
- * `ToolCallValidator` that core consults at the executor.
+ * `@matatbread/matbot-tool-ts-validation` calls this, applies a policy, and registers the `validate`
+ * hook that core dispatches at the executor.
  *
  * That separation is the point. A code generator (`skills_compiler`, `function-tools`) loads this package
  * for `dts()`/`check()` alone; if loading it also switched input enforcement on, adopting typed codegen
@@ -136,7 +136,7 @@ export interface ToolTypesInputs {
   pluginEntryUrls:    string[];
   /** Absent ⇒ every scanned tool, for a build meant to serve any live set (see `filterToolTypesData`). */
   liveToolNames?:     string[];
-  syntheticContracts: Record<string, string>;
+  syntheticContracts: Record<string, SyntheticContract>;
 }
 
 /** Where the index gets a build from on a miss. The default builds one; a specialisation may find one. */
@@ -230,9 +230,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // which they were described to the model in full and then enforced only by their loose
     // `inputSchema`, which is backwards: their params were authored by an LLM, not a compiler.
     const live      = this.machine.tools.list();
-    const synthetic = Object.fromEntries(
-      live.flatMap(t => (t.toolContract !== undefined ? [[t.name, t.toolContract] as const] : [])),
-    );
+    const synthetic = Object.fromEntries(live.flatMap(t => (t.toolContract !== undefined
+      ? [[t.name, { contract: t.toolContract, ...(t.toolContractTypes !== undefined ? { types: t.toolContractTypes } : {}) }] as const]
+      : [])));
     const built  = await this.fill({
       projectRoot: root, pluginEntryUrls: urls, liveToolNames: live.map(t => t.name), syntheticContracts: synthetic,
     });
@@ -451,6 +451,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       prefixLines: prefix.split('\n').length - 1,
       ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
+      globalTypes: nodeGlobalTypes(),
       ...(restricted !== undefined ? { permittedImports: restricted } : {}),
       // ENV-GATE's list, from the runner that withholds them. Absent with no runner, which is correct:
       // nothing is withheld there either, so there is nothing to reject.
@@ -473,13 +474,12 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
   // top-of-file import the derived block emits (every arm references it); when the scan produced nothing to
   // import it (no source resolved, or an all-`MatbotServices` block), this block supplies that one import.
   private registryBlock(derived: string): string {
-    const arms: string[] = [];
-    for (const t of this.machine.tools.list()) {
-      if (this.covered.has(t.name)) continue;
-      arms.push(`    ${JSON.stringify(t.name)}: ${t.toolContract ?? `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`};`);
-    }
+    const { preamble, arms: armOf } = contractArms(this.machine.tools.list().filter(t => !this.covered.has(t.name)).map(t => ({
+      name: t.name, contract: t.toolContract ?? `ToolContract<unknown, ${schemaToTs(t.inputSchema)}>`, types: t.toolContractTypes,
+    })));
+    const arms = [...armOf].map(([name, arm]) => `    ${JSON.stringify(name)}: ${arm};`);
     if (arms.length === 0) return derived;
-    const body = arms.join('\n');
+    const body = preamble + arms.join('\n');
     // Import the plugin-api types these arms reference — `ToolContract` always, plus any plugin-api export a
     // source-less `toolContract` names (e.g. `StoreQuery`) — minus whatever the derived block already imports
     // (importing a name twice is a redeclaration error). A synthetic tool inlines its own shape types, so the
@@ -493,7 +493,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     const head = needed.length
       ? `${derived === '' ? "import '@matatbread/matbot-plugin-api';\n" : ''}import type { ${needed.join(', ')} } from '@matatbread/matbot-plugin-api';\n`
       : '';
-    return `${head}${derived}\ndeclare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${body}\n  }\n}\n`;
+    return `${head}${derived}\n${preamble}declare module '@matatbread/matbot-plugin-api' {\n  interface ToolContracts {\n${arms.join('\n')}\n  }\n}\n`;
   }
 
   async toolValidators(): Promise<Record<string, ToolValidator>> {
@@ -519,6 +519,15 @@ export function createToolTypesPlugin(): MatbotPluginSpec {
 
 export const plugin: MatbotPluginSpec = createToolTypesPlugin();
 
+
+// The node globals a body has that the standard library does not declare: `Buffer`, and its overloads in
+// buffer.buffer.d.ts. The rest of what a body is given (`fetch`, the timers, `console`, `TextEncoder`,
+// `atob`) is in lib.dom. Loaded whether or not the runner withholds it, since ENV-GATE rejects a withheld
+// name either way, and with no runner a body really has it.
+function nodeGlobalTypes(): string[] {
+  const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
+  return ['buffer.buffer.d.ts', 'buffer.d.ts'].map(f => join(nodeTypes, f)).filter(f => existsSync(f));
+}
 
 // Where @types/node declares a builtin. Most have a file of their own, but a few subpaths are declared
 // inside their parent's (`path/posix` in path.d.ts, `util/types` in util.d.ts, `test/reporters` in

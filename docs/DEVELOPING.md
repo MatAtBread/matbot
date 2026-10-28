@@ -521,7 +521,9 @@ absent. When one plugin is a *specialization* of another (it depends on it by co
 import and construct it directly with a hard `package.json` dependency instead. See CLAUDE.md
 for the full distinction and for the five swap-aware keys (`StorageBackend`, `KnowledgeIndex`,
 `Vault`, `Notifier`, `PermissionGate`) — each carries a host boot default and reverts to it when the
-plugin that registered one is unloaded.
+plugin that registered one is unloaded. For any key, unloading a plugin withdraws only its own
+registration: if another plugin had registered over it, that one stays; if it had displaced another
+plugin's, that one is reinstated.
 
 ### Plugin settings
 
@@ -837,7 +839,8 @@ stash it anywhere that outlives your plugin.
 
 `ask` is the prompt channel in scope for that call, or `undefined` when **no human is reachable** (a
 boot load, a background task, `POST /tools/:name`, a frontend that cannot ask). Unloading your plugin
-reverts to the host's boot default, which asks.
+reinstates the gate you displaced — the host's boot default, which asks, unless another plugin's was
+current.
 
 Two things to know before you write one. A standing answer is a *decision, not a channel*: it applies
 at every door, so allowing a gate outright also allows it for callers with no human behind them. And
@@ -1071,7 +1074,8 @@ type Hook =
   | { on: 'contribute'; priority?: number; handler(ctx: ContributeContext): Message[] | void | Promise<…> }
   | { on: 'toolcall';   priority?: number; handler(ctx: ToolCallContext):   ToolCallResult | void | Promise<…> }
   | { on: 'toolresult'; priority?: number; handler(ctx: ToolResultContext): { result: unknown } | void | Promise<…> }
-  | { on: 'followup';   priority?: number; handler(ctx: FollowupContext):   FollowupResult | void | Promise<…> };
+  | { on: 'followup';   priority?: number; handler(ctx: FollowupContext):   FollowupResult | void | Promise<…> }
+  | { on: 'validate';   priority?: number; handler(ctx: ValidateContext):   ToolInputError[] | undefined | void | Promise<…> };
 ```
 
 | Hook | When it fires | What it can do |
@@ -1081,6 +1085,11 @@ type Hook =
 | `toolcall` | Before each tool runs | Reject or abort the tool call |
 | `toolresult` | After each tool runs | Redact or transform the result; observe for audit |
 | `followup` | After the turn commits | `resubmit` a robo turn (head-enqueued, runs next), `retractAndRerun` the turn just committed, and/or append durable `markers` |
+| `validate` | Before each tool runs, through **every** door (the model's path, `POST /tools/:name`, `invokeTool`) and on `tools.validate` | Return errors to refuse the call, `[]` to say it is valid, nothing for no opinion. Every `validate` hook is asked and any refusal refuses, so validators co-exist without referring to each other |
+
+**`validate` replaces the `ToolCallValidator` service**, which is `@deprecated`, still consulted beside
+the hooks, and removed in 0.5.0. A service key holds one value, so a second validator had to capture the
+first and delegate to it — depending on load order, and on the other plugin. Register a hook instead.
 
 **`screen`'s `deferred` verdict** lets a hook race expensive work — a classifier — against
 generation instead of gating on it: return immediately, hand back a `DeferredScreen`, and the runner
@@ -1378,7 +1387,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-default-gate` | `PermissionGate` + `gate_action` · always seeded | Built-in: the default permission policy — asks about a privileged operation, offers to remember the answer, honours what was remembered. Register your own `PermissionGate` to supply different rules |
-| `@matatbread/matbot-tool-json-validation` | `toolcall` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
+| `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
@@ -1393,7 +1402,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-tool-whoami` | `whoami` | Reports the current Principal |
 | `@matatbread/matbot-tool-types` | `ToolTypeIndex` service · Node only | Derives a `.d.ts` of the loaded tools' result/service types so code generators can type what `tool` calls resolve to |
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
-| `@matatbread/matbot-tool-ts-validation` | `ToolCallValidator` service · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Defers to whatever validator it displaced when it has no opinion, so it composes with `json-validation` in either load order |
+| `@matatbread/matbot-tool-ts-validation` | `validate` hook · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Sits beside `json-validation` with no reference to it: a call either refuses is refused, in any load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |

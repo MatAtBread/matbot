@@ -5,9 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <link rel="icon" type="image/svg+xml" href="/favicon.ico">
   <title>matbot</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tiny-markdown-editor/dist/tiny-mde.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/tiny-markdown-editor/dist/tiny-mde.min.js"></script>
+  <!-- Pinned, with integrity: an unpinned CDN script is whoever controls that URL running in this page. -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js" integrity="sha384-948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.17/dist/purify.min.js" integrity="sha384-P0JNneQf81HOl9VwNXK76cQ9VMD6Nfsnepxb0cCOg8+UzEdzgPHAPV4wVQrvYQSx" crossorigin="anonymous"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tiny-markdown-editor@0.2.34/dist/tiny-mde.min.css" integrity="sha384-JLDYZZFkDlfAd9sVjYRMnVB3GjCvJWMVlYdbVUrnuZt88BsrgWOTrLAfL/2Klnli" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/tiny-markdown-editor@0.2.34/dist/tiny-mde.min.js" integrity="sha384-9yL8xlxu+l/V/wW/RJ1nuK4d0tTTCsoRjUvctnG2UvIG4u3R3wEzc0ZB2TnEixoC" crossorigin="anonymous"></script>
   <script>(function(){const s=localStorage.getItem('fontSize');if(s)document.documentElement.style.setProperty('--fs',s+'px');}());</script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1359,7 +1361,9 @@
 
     /* ── Markdown body ─────────────────────────────────────────── */
 
-    .md-body { line-height: 1.7; color: #111; }
+    /* `contain: paint` keeps whatever a reply draws inside its own bubble: a `position: fixed` element is
+       placed and clipped here, so nothing styled in a reply can lie over the prompt a gate is waiting on. */
+    .md-body { line-height: 1.7; color: #111; contain: paint; overflow-x: auto; }
     .md-body p { margin: 0 0 0.65em; }
     .md-body p:last-child { margin-bottom: 0; }
     .md-body code {
@@ -2308,7 +2312,7 @@
 
       #composer-cog, #attach-btn, #stop-btn, #send-btn {
         width: auto;
-        height: 24px;
+        height: 32px;
         min-width: 0;
         border-radius: 10px;
         font-size: 0.78em;

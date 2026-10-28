@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ProviderRegistry, MatbotPlugin,
               ProviderToolContract, ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
 
 // Shared with the browser implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
@@ -7,17 +7,13 @@ declare module '@matatbread/matbot-plugin-api' {
     provider: ProviderToolContract;
   }
 }
-import { applyProviderPatch, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, credentialKeyName, movedCredentialKeys, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
 import path                                                  from 'node:path';
 
 // Credential env-var naming convention for secrets created by this tool.
-function credEnvVarName(profileName: string): string {
-  return `MATBOT_API_KEY_${profileName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-}
-
 // ── Input types ───────────────────────────────────────────────────────────────
 
 type ProviderInput =
@@ -274,6 +270,41 @@ async function checkEndpoint(url: string): Promise<string | null> {
   }
 }
 
+// ── Model check ───────────────────────────────────────────────────────────────
+
+// A model the endpoint does not list is put to a gate rather than refused: an endpoint accepts names it
+// does not list (an Azure deployment, an alias the matching does not know), and those must stay usable.
+// `retry`: a keyed attempt follows if this one cannot list, so it does not report giving up.
+type ModelVerdict = 'checked' | 'unchecked' | { refusal: string };
+
+async function* confirmModel(
+  plugin: MatbotPlugin,
+  cfg:    ProviderConfig,
+  ctx:    ToolContext,
+  gate:   'add-unlisted' | 'update-unlisted',
+  verb:   'Add' | 'Update',
+  retry = false,
+): AsyncGenerator<ToolEvent<ToolResultOf<'provider'>>, ModelVerdict> {
+  const adapter = plugin.provider?.(cfg);
+  if (adapter?.models === undefined) return 'unchecked';
+  const check = await checkProviderModel(adapter, cfg, ctx.vault);
+  switch (check.kind) {
+    case 'listed':
+      yield { type: 'stdout', chunk: `"${cfg.model}" is among the endpoint's models.\n` };
+      return 'checked';
+    case 'unchecked':
+      if (!retry) yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
+      return 'unchecked';
+    case 'unlisted': {
+      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
+      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
+                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
+      if (permit.allowed) return 'checked';
+      return { refusal: `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}` };
+    }
+  }
+}
+
 // ── Current provider detection ────────────────────────────────────────────────
 
 function currentProviderName(ctx: ToolContext): string | undefined {
@@ -338,9 +369,11 @@ function makeExecutor(
         // always the source string, and instantiateProvider resolves it to the adapter factory at use time.
         // We never write the raw `mod` the LLM supplied unless it resolves as-is.
         let yamlModule: string;
+        let adapterPlugin: MatbotPlugin;
 
         const loaded = findLoadedAdapter(mod, projectDir, pluginNameToOrigPath);
         if (loaded !== undefined) {
+          adapterPlugin = loaded;
           const spec = yamlSpecifierFor(loaded.name, projectDir, pluginNameToOrigPath, nameResolves);
           if (spec === undefined) {
             yield { type: 'error', message: `Adapter "${loaded.name}" is loaded but its module path could not be determined.` };
@@ -355,6 +388,7 @@ function makeExecutor(
               yield { type: 'error', message: `Module "${mod}" loaded but is not a provider adapter.` };
               return;
             }
+            adapterPlugin = justLoaded;
             // Prefer the canonical package name (location-independent) when it resolves; otherwise the
             // just-supplied `mod` resolved and loaded, so it is YAML-valid as written.
             yamlModule = nameResolves?.(justLoaded.name) ? justLoaded.name : mod;
@@ -382,7 +416,7 @@ function makeExecutor(
           const credKey = credentialKey ?? 'apiKey';
           const answer  = await ctx.prompt(`${credKey} for provider "${name}" (leave blank if none required):`, '');
           if (answer.trim()) {
-            const varName = credEnvVarName(name);
+            const varName = credentialKeyName(name);
             // createSecret may return a different name (an existing key the value already lives
             // under, or a key name the user typed by mistake); reference what it returns.
             envVarName = await ctx.vault.createSecret(varName, answer.trim());
@@ -405,6 +439,16 @@ function makeExecutor(
           }
         }
 
+        // Without the credential first, and so before the approval: that sends nothing secret, and the
+        // reachability probe above has already contacted the endpoint. One that lists without a key
+        // (OpenRouter, a local server) is then checked at the cost of no extra question.
+        const bare: ProviderConfig = { name, module: yamlModule, model, ...(endpoint !== undefined ? { endpoint } : {}) };
+        const keyless = yield* confirmModel(adapterPlugin, bare, ctx, 'add-unlisted', 'Add', envVarName !== undefined);
+        if (typeof keyless === 'object') {
+          yield { type: 'result', value: { message: keyless.refusal } };
+          return;
+        }
+
         const permit = await ctx.gate({ gate: 'add', subject: name, fallback: false,
                                         label: `Add provider profile **"${name}"** (${model} via ${yamlModule})?` });
         if (!permit.allowed) {
@@ -415,6 +459,15 @@ function makeExecutor(
         const credentials = envVarName !== undefined
           ? { [credentialKey ?? 'apiKey']: `\${${envVarName}}` }
           : undefined;
+
+        // With the credential only after the approval: until then nothing has agreed it may go there.
+        if (keyless === 'unchecked' && credentials !== undefined) {
+          const keyed = yield* confirmModel(adapterPlugin, { ...bare, credentials }, ctx, 'add-unlisted', 'Add');
+          if (typeof keyed === 'object') {
+            yield { type: 'result', value: { message: keyed.refusal } };
+            return;
+          }
+        }
 
         const block = buildProviderBlock({
           name,
@@ -472,7 +525,8 @@ function makeExecutor(
           return;
         }
 
-        const next = applyProviderPatch(cur, patch);
+        const next  = applyProviderPatch(cur, patch, ctx.vault);
+        const moved = movedCredentialKeys(cur, next);
 
         const unwritable = unrepresentableYamlValue(next);
         if (unwritable !== undefined) {
@@ -497,13 +551,36 @@ function makeExecutor(
           }
         }
 
+        // Before the confirmation, unlike add: `next` sends its credential only where `cur` already did,
+        // since one that would have followed the endpoint to another origin has been detached above.
+        if (patch.model !== undefined || patch.endpoint !== undefined) {
+          const plugin = findLoadedAdapter(cur.module, path.dirname(configPath), pluginNameToOrigPath);
+          if (plugin !== undefined) {
+            const verdict = yield* confirmModel(plugin, next, ctx, 'update-unlisted', 'Update');
+            if (typeof verdict === 'object') {
+              yield { type: 'result', value: { message: verdict.refusal } };
+              return;
+            }
+          }
+        }
+
         const show = (v: unknown): string => v === undefined ? '(unset)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v);
-        const diff = supplied.map(f => `  ${f}: ${show(cur[f])} → ${show(next[f])}`).join('\n');
+        // A credential is shown by the key it names, never by value: a literal secret in the yaml would
+        // otherwise be printed into a prompt every attached client receives.
+        const refs = (c: Record<string, string> | undefined): string =>
+          Object.values(c ?? {}).map(v => /^\$\{[^}]+\}$/.test(v) ? v : '(a literal value)').join(', ');
+        const diff = [
+          ...supplied.map(f => `  ${f}: ${show(cur[f])} → ${show(next[f])}`),
+          ...(moved.length > 0 ? [`  credentials: ${refs(cur.credentials)} → ${refs(next.credentials)}`] : []),
+        ].join('\n');
+        const detached = moved.length > 0
+          ? `\n\n**Its credential does not go with it**: the new endpoint is another origin, so the profile will read ${moved.join(', ')} instead, which is not set until supplied with \`plugin store-key\`.`
+          : '';
 
         // Confirmed like add/remove, and for a reason particular to update: the block is regenerated,
         // so any comment inside it does not survive. The caller sees that before it happens.
         const permit = await ctx.gate({ gate: 'update', subject: name, fallback: false,
-                                        label: `Update provider profile **"${name}"**?\n${diff}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_` });
+                                        label: `Update provider profile **"${name}"**?\n${diff}${detached}\n\n_(the profile's block in matbot.yaml is rewritten; comments inside it are lost)_` });
         if (!permit.allowed) {
           yield { type: 'result', value: { message: refusalMessage(permit) } };
           return;
@@ -527,7 +604,11 @@ function makeExecutor(
           type:  'result',
           value: {
             message: `Profile "${name}" updated: ${supplied.join(', ')}.`
-              + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : ''),
+              + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : '')
+              + (moved.length > 0
+                ? ` Its credential was not sent to the new origin: the profile now reads ${moved.join(', ')}, which is not set. ` +
+                  'Ask the user to supply it with `plugin store-key`, if this endpoint should have one.'
+                : ''),
           },
         };
         return;
@@ -687,7 +768,7 @@ When a user asks to add a new LLM or provider, ask for:
         },
         model: {
           type:        'string',
-          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update).',
+          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update). Checked against the models the endpoint lists, where it lists them; one it does not list needs the user to confirm it, and the refusal names the closest listed ids.',
         },
         endpoint: {
           // `['string','null']`, and likewise for parameters/maxRounds below: null is update's clear

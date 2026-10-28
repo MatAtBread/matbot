@@ -58,6 +58,35 @@ function textOf(content: MessageContent[]): string {
  * through `services.run` and renders the `PipelineEvent` stream, exactly as a remote frontend would
  * over SSE — only here the runner is in the same realm, so there is no wire.
  */
+interface MarkedToken { type: string; href?: string }
+interface MarkedUse {
+  use(ext: { renderer: { html(t: { text: string }): string }; walkTokens(t: MarkedToken): void }): unknown;
+}
+
+// What a link or image may point at: the web, mail, or anywhere relative to this page; an image may also be
+// a raster `data:` URI, which an <img> cannot script.
+const SAFE_HREF = /^(?:https?:|mailto:|[^:]*$|[^:]*[/?#])/i;
+const SAFE_IMG  = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i;
+
+// Markdown is model output, and marked passes raw HTML through: a reply containing `<img onerror>` would run
+// as this page, which renders the prompt a gate is waiting on and the buttons that answer it. Raw HTML is
+// shown as text (block and inline both reach `renderer.html`), and a link loses an href it may not have,
+// judged as the browser will read it — entities decoded, and the controls a URL parser drops removed.
+function harden(marked: MarkedUse): void {
+  const esc = (s: string): string => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+  marked.use({
+    renderer: { html: ({ text }) => esc(text) },
+    walkTokens(t) {
+      if ((t.type !== 'link' && t.type !== 'image') || t.href === undefined) return;
+      const probe = document.createElement('textarea');
+      probe.innerHTML = t.href;
+      const url = probe.value.replace(/[\u0000-\u0020\u007f]/g, '');
+      if (SAFE_HREF.test(url) || (t.type === 'image' && SAFE_IMG.test(url))) return;
+      t.href = '#';
+    },
+  });
+}
+
 export class ChatUI {
   private readonly services: MatbotMachine;
   private readonly root: HTMLElement;
@@ -141,16 +170,17 @@ export class ChatUI {
   // Markdown is a served-mode nicety, not a bundle dependency: only when running over http(s) do we
   // pull `marked` from a CDN. On file:// (the self-contained, offline case) we never touch the
   // network and messages stay plain text. The specifier is built at runtime so the bundler/loader
-  // doesn't try to resolve it. Note: rendered markdown is injected as HTML — acceptable for a
-  // single-user local demonstrator; a hardened deployment would sanitise it.
+  // doesn't try to resolve it. Pinned to an exact version: an unpinned CDN module is whoever controls
+  // that URL running in this page.
   private async loadMarkdown(): Promise<void> {
     const proto = globalThis.location?.protocol;
     if (proto !== 'http:' && proto !== 'https:') return;
     try {
-      const url = 'https://esm.sh/marked@14';
+      const url = 'https://esm.sh/marked@14.1.4';
       const mod = await import(/* @vite-ignore */ url) as { marked?: unknown };
       const fn  = mod.marked;
       if (typeof fn === 'function') {
+        harden(fn as unknown as MarkedUse);
         this.renderMd = (src: string) => String((fn as (s: string) => unknown)(src));
         if (!this.busy) this.renderSession(this.session);   // re-render history now that markdown is available
       }

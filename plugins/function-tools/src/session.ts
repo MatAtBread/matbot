@@ -1,4 +1,5 @@
-import type { Session, Tool } from '@matatbread/matbot-plugin-api';
+import type { ContractSource, Session, Tool } from '@matatbread/matbot-plugin-api';
+import { contractArms } from '@matatbread/matbot-plugin-api';
 
 export const MARKER_CREATOR = '@matatbread/matbot-function-tools';
 
@@ -75,14 +76,16 @@ export function sessionFunctions(session: Session): Map<string, SessionFunctionR
  * arms of one name are a TS2717).
  */
 export function turnContracts(turnTools: ReadonlyMap<string, Tool> | undefined, own?: { name: string; contract: string }): string {
-  const arms = new Map<string, string>();
-  for (const t of turnTools?.values() ?? []) arms.set(t.name, t.toolContract ?? 'ToolContract<unknown, unknown>');
-  if (own !== undefined) arms.set(own.name, own.contract);
-  if (arms.size === 0) return '';
-  const body = [...arms]
-    .map(([name, contract]) => `${JSON.stringify(name)}: ${contract.replace(/\bToolContract</g, "import('@matatbread/matbot-plugin-api').ToolContract<")};`)
-    .join(' ');
-  return `\n\n\ndeclare module '@matatbread/matbot-plugin-api' { interface ToolContracts { ${body} } }`;
+  const sources = new Map<string, ContractSource>();
+  for (const t of turnTools?.values() ?? []) {
+    sources.set(t.name, { name: t.name, contract: t.toolContract ?? 'ToolContract<unknown, unknown>', types: t.toolContractTypes });
+  }
+  if (own !== undefined) sources.set(own.name, own);
+  if (sources.size === 0) return '';
+  const { preamble, arms } = contractArms(sources.values());
+  const inline = (s: string): string => s.replace(/\bToolContract</g, "import('@matatbread/matbot-plugin-api').ToolContract<");
+  const body = [...arms].map(([name, arm]) => `${JSON.stringify(name)}: ${inline(arm)};`).join(' ');
+  return `\n\n\n${inline(preamble)}declare module '@matatbread/matbot-plugin-api' { interface ToolContracts { ${body} } }`;
 }
 
 /** The error a session function gets for a name the registry already holds — at definition, and on any

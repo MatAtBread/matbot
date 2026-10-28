@@ -1,6 +1,7 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ModelParameters,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
               ProviderToolContract, ProviderSummary, AvailableProvider,
-              ProviderPatch } from '@matatbread/matbot-plugin-api';
+              ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, refusalMessage } from '@matatbread/matbot-plugin-api';
 
 export type { AvailableProvider, ProviderSummary };
 
@@ -37,10 +38,14 @@ export interface ProviderAdmin {
   available: AvailableProvider[];
   list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
-  /** Apply a patch to an existing profile — never its credentials (see {@link ProviderPatch}). `false`
-   *  ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
-  update(name: string, patch: ProviderPatch): Promise<boolean>;
+  /** Apply a patch to an existing profile with `applyProviderPatch`, and say which vault keys its credential
+   *  is now read from where the endpoint moved origin and the credential did not follow (empty otherwise).
+   *  `undefined` ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
+  update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined>;
   remove(name: string): Promise<boolean>;
+  /** The stored profile, credential placeholders and all — what `update` checks its model against before
+   *  applying. Absent, an update's model is not checked. */
+  get?(name: string): ProviderConfig | undefined;
 }
 
 type ProviderInput =
@@ -55,6 +60,52 @@ type ProviderInput =
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
  * exactly like `plugin store-key`. Persistence is entirely the injected {@link ProviderAdmin}'s concern.
  */
+/** What to tell the caller when a credential did not follow an endpoint to another origin. */
+function movedNote(keys: readonly string[]): string {
+  if (keys.length === 0) return '';
+  return ` Its credential was not sent to the new origin: the profile now reads ${keys.join(', ')}, which is not set. ` +
+         'Ask the user to supply it with the `plugin` tool\'s `store-key` action, if this endpoint should have one.';
+}
+
+// The adapter's own factory, read from its module as the setup wizard reads it. Importing registers
+// nothing, and a module already loaded is the same instance.
+async function adapterOf(module: string, cfg: ProviderConfig): Promise<ReturnType<NonNullable<MatbotPluginSpec['provider']>> | undefined> {
+  try {
+    const mod  = await import(/* @vite-ignore */ module) as Record<string, unknown>;
+    const spec = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined;
+    return spec?.provider?.(cfg);
+  } catch {
+    return undefined;
+  }
+}
+
+// As the node tool's: a model the endpoint does not list goes to a gate, since an endpoint accepts names
+// it does not list. Returns the refusal to report, or undefined to go ahead.
+async function* confirmModel(
+  cfg:  ProviderConfig,
+  ctx:  ToolContext,
+  gate: 'add-unlisted' | 'update-unlisted',
+  verb: 'Add' | 'Update',
+): AsyncGenerator<ToolEvent<ToolResultOf<'provider'>>, string | undefined> {
+  const adapter = await adapterOf(cfg.module, cfg);
+  if (adapter?.models === undefined) return undefined;
+  const check = await checkProviderModel(adapter, cfg, ctx.vault);
+  switch (check.kind) {
+    case 'listed':
+      return undefined;
+    case 'unchecked':
+      yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
+      return undefined;
+    case 'unlisted': {
+      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
+      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
+                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
+      if (permit.allowed) return undefined;
+      return `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}`;
+    }
+  }
+}
+
 export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResultOf<'provider'>> {
   const adapterList = () => admin.available.map((a, i) => `  ${i}. ${a.label}  (${a.module})`).join('\n');
 
@@ -109,6 +160,19 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
           endpoint: endpoint ?? '', apiKey: apiKey.trim(),
           ...(parameters !== undefined ? { parameters } : {}),
         };
+        // Before the add: there is no confirmation here, and the key the user just typed for this profile
+        // goes to this endpoint on its first turn in any case. A self-contained adapter checks its own.
+        if (!found.selfContained) {
+          const refusal = yield* confirmModel({
+            name, module: found.module, model: draft.model,
+            ...(draft.endpoint ? { endpoint: draft.endpoint } : {}),
+            ...(draft.apiKey   ? { credentials: { apiKey: draft.apiKey } } : {}),
+          }, ctx, 'add-unlisted', 'Add');
+          if (refusal !== undefined) {
+            yield { type: 'result', value: { message: refusal } };
+            return;
+          }
+        }
         try {
           const added = await admin.add(draft);
           yield { type: 'result', value: { message: `Provider "${added}" added and ready (adapter: ${found.label}).` } };
@@ -134,11 +198,22 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         // No confirmation prompt and no endpoint probe, unlike the node tool: there is no YAML block to
         // rewrite (and so no comment to lose), and a browser cannot HEAD a third-party endpoint without
         // tripping CORS — a failed probe here would mean nothing about reachability.
-        const ok = await admin.update(name, patch);
+        // `next` sends its credential only where the stored profile already did: one that would have
+        // followed the endpoint to another origin is detached by the patch.
+        const cur = admin.get?.(name);
+        if (cur !== undefined && (patch.model !== undefined || patch.endpoint !== undefined)) {
+          const refusal = yield* confirmModel(applyProviderPatch(cur, patch, ctx.vault), ctx, 'update-unlisted', 'Update');
+          if (refusal !== undefined) {
+            yield { type: 'result', value: { message: refusal } };
+            return;
+          }
+        }
+
+        const moved = await admin.update(name, patch);
         yield {
           type:  'result',
-          value: ok
-            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.` }
+          value: moved !== undefined
+            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedNote(moved)}` }
             : { message: `No provider named "${name}".` },
         };
         return;
