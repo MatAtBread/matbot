@@ -161,14 +161,22 @@ churn and less likely to affect a consumer who doesn't use them.
   - Google reads the native `/models`, keeping only models that `generateContent`. Every id is returned
     without its `models/` prefix.
 - **`tool-plugin`, `browser`** — `provider add` and `provider update` check the model against the endpoint's
-  list. One it does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`), not a
-  refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A refusal
-  names the closest listed ids, and an endpoint that cannot list is accepted unchecked, saying so. On
-  node, `add` first lists without the credential, before its own approval, since that sends nothing
-  secret. Only if that fails (every hosted API but OpenRouter needs a key) is the list fetched with the
-  credential, after the approval, because only `add` agrees that it may go there. `update` checks only when the model or endpoint changes, and only where `cur`'s
-  credential already went: one that would have followed the endpoint to another origin is already
-  detached. The browser's `ProviderAdmin` takes an optional `get(name)` so an update can be checked.
+  list.
+  - A model the endpoint does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`),
+    not a refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A
+    refusal names the closest listed ids. An endpoint that cannot list is accepted unchecked, and the tool
+    says so.
+  - **Breaking** for an installation that adds or updates profiles with nobody to ask (a trigger, a job,
+    `POST /tools/provider`): an unlisted model is now refused there (`fallback: false`). Give a standing
+    answer for the gate, or use an id the endpoint lists.
+  - On node, `add` first lists without the credential, before its own approval, since that sends nothing
+    secret. Only if that fails (every hosted API but OpenRouter needs a key) is the list fetched with the
+    credential, after the approval, because only `add` agrees that it may go there. So a profile can cost
+    one more decision: `add-unverified` → `add` → `add-unlisted`.
+  - `update` checks only when the model or endpoint changes, and only where the profile's credential
+    already went: one that would have followed the endpoint to another origin is already detached.
+  - The browser's `ProviderAdmin` takes an optional `get(name)`, so an update can be checked. Without it,
+    an update's model is not checked.
 - **`cli`** — the first-run setup wizard checks the model once the endpoint and key are entered. An unlisted
   one names the closest ids and asks again; Enter keeps the name as typed.
 - **`cli`** — the first-run setup wizard tested an endpoint's reachability only when it did *not* start with
@@ -177,8 +185,8 @@ churn and less likely to affect a consumer who doesn't use them.
   which the adapter used in place of its default, so the first turn failed. It is now left out.
 - **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field: once the
   endpoint is typed if it lists without a key, and again once the key is typed (the key now comes before
-  the model). An unlisted model is warned about once
-  on save, naming the closest ids, and saving again keeps it.
+  the model). An unlisted model is warned about once on save, naming the closest ids, and saving again
+  keeps it.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
   - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
