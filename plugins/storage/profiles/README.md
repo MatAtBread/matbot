@@ -61,6 +61,10 @@ plugin name above the store). Files (`fileStore`) are a separate axis and are no
 `Profile.sharedFrom` maps a namespace to another profile's id (or `''` for base), so two profiles can point
 at one namespace's data. It is honoured by the router today; no UI/tooling exposes it yet.
 
+Sharing an item with the `share` tool is not gated. It is the item's owner using their own authority over
+it, not matbot widening what a permission gate allows (see [docs/SECURITY.md](../../../docs/SECURITY.md)).
+That is this implementation's choice: another profiles backend could ask before an item leaves its owner.
+
 ## Not in scope
 
 Real security (any client may assert any profile via the header), files/workspace partitioning, and
