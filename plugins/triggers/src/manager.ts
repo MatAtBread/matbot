@@ -15,6 +15,20 @@ function clip(text: string): string {
   return text.slice(0, half) + '...' + text.slice(-half);
 }
 
+/** One side of the exchange shown to the classifier: its text, and the bracketed summary of what else
+ *  its turn held (tool calls, files), which the classifier is not shown as content. */
+export interface ClassifiedMessage {
+  label:    string;
+  text:     string;
+  summary?: string;
+}
+
+// The summary follows the clipped text, so a long message cannot truncate it away.
+function render(m: ClassifiedMessage): string {
+  const parts = [...(m.text !== '' ? [clip(m.text)] : []), ...(m.summary !== undefined ? [m.summary] : [])];
+  return parts.length > 0 ? parts.join('\n\n') : '(none)';
+}
+
 /** Stable identity for seed idempotency: a trigger is "the same" if it invokes the same tool with
  *  the same params. Triggers carry no name, so the invocation is the natural key. */
 function invokeKey(t: { invoke: Trigger['invoke'] }): string {
@@ -133,12 +147,12 @@ export class TriggerManager implements Triggers {
    * you nothing about *why*, which is the question a false-positive post-mortem actually asks. Both
    * sides of the exchange are passed: `subject` is judged, `context` is what it is paired with — many
    * conditions are relational ("disputes the previous answer") and can only be judged from the pair. No
-   * LLM call when there are no candidate conditions or the subject is empty.
+   * LLM call when there are no candidate conditions or the subject has neither text nor a summary.
    */
   async evaluate(
     surface:      TriggerSurface,
-    subject:      { label: string; text: string },
-    context:      { label: string; text: string },
+    subject:      ClassifiedMessage,
+    context:      ClassifiedMessage,
     signal:       AbortSignal,
     turnProvider: string,
   ): Promise<{ trigger: Trigger; kinds: TriggerKind[]; matched: FiredCondition[] }[]> {
@@ -151,7 +165,7 @@ export class TriggerManager implements Triggers {
       .flatMap(t => t.conditions
         .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, index: i, kind: c.kind, rule: c.rule }))
         .filter(c => surfaceOfKind(c.kind) === surface));
-    if (candidates.length === 0 || subject.text === '') return [];
+    if (candidates.length === 0 || (subject.text === '' && subject.summary === undefined)) return [];
 
     const res = await this.services.singleTurn({
       provider: await this.resolveClassifierProvider(turnProvider),
@@ -190,6 +204,10 @@ export class TriggerManager implements Triggers {
         'happens to list. Latitude stops at paraphrase of what the condition actually names — it is not ' +
         'licence to match anything merely related to it.\n' +
         'Where a condition spans more than one basis, every requirement it states still applies.\n\n' +
+        // The classifier sees text only; the rest of a turn reaches it as these summaries (turnSummary).
+        'A bracketed line closing a message — "[Tool calls in this turn: …]", "[Files in this turn: …]" — ' +
+        'is a summary of what that message\'s turn held besides its text, and is evidence like the text. ' +
+        '"none" means no tool was called.\n\n' +
         'Match only on evidence actually present in the text above. A condition that stays silent costs ' +
         'nothing; one that fires wrongly is disruptive and expensive.\n\n' +
         `Judge only the "${subject.label}" — the other message is context for relational conditions, ` +
@@ -197,8 +215,8 @@ export class TriggerManager implements Triggers {
         'bracketed value) to an object {"match": true|false, "why": "<a terse fragment, at most ~15 words, ' +
         'citing the specific evidence — not a full sentence>"}. No other text.',
       prompt:
-        `=== ${context.label.toUpperCase()} (earlier) ===\n${context.text === '' ? '(none)' : clip(context.text)}\n\n` +
-        `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${clip(subject.text)}\n\n` +
+        `=== ${context.label.toUpperCase()} (earlier) ===\n${render(context)}\n\n` +
+        `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${render(subject)}\n\n` +
         `=== CONDITIONS (${candidates.length}) ===\n` +
         candidates.map(c => `--- [${c.key}] ---\n${c.rule}`).join('\n\n') +
         `\n\n=== END CONDITIONS ===`,

@@ -303,6 +303,63 @@ function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
 }
 
+const isGenuineUser = (m: Message): boolean => m.role === 'user' && !m.content.every(c => c.origin === 'robo');
+
+function fileLabel(c: MessageContent): string | undefined {
+  switch (c.type) {
+    case 'file-ref':  return `${c.name} (${c.mimeType})`;
+    case 'document':  return c.name !== undefined ? `${c.name} (${c.mimeType})` : `document (${c.mimeType})`;
+    case 'image':     return `image (${c.mimeType})`;
+    case 'audio':     return `audio (${c.mimeType})`;
+    case 'image-url': return c.url;
+    default:          return undefined;
+  }
+}
+
+function listing(items: string[]): string {
+  const counts = new Map<string, number>();
+  for (const i of items) counts.set(i, (counts.get(i) ?? 0) + 1);
+  return [...counts].map(([i, n]) => n > 1 ? `${i} ×${n}` : i).join(', ');
+}
+
+/**
+ * What else `msg`'s turn held besides its text, as bracketed lines for the classifier. The classifier is
+ * shown text alone, to stay small and quick, but conditions turn on the rest — "no tool was called",
+ * "the attachment is a PDF" — and without this it can only guess. A user message reports the files
+ * attached to it. An assistant message reports every tool call between the genuine user messages either
+ * side of it (its turn, across rounds), stating `none` outright since an absent line would read as "not
+ * shown", plus any file blocks in that turn's non-user messages; the user's own attachments belong to
+ * the user message, so they are not repeated here.
+ */
+export function turnSummary(messages: readonly Message[], msg: Message | undefined): string | undefined {
+  const i = msg ? messages.indexOf(msg) : -1;
+  if (!msg || i < 0) return undefined;
+  const lines: string[] = [];
+  const files = (ms: readonly Message[]): string[] =>
+    ms.flatMap(m => m.content.flatMap(c => fileLabel(c) ?? []));
+  if (msg.role === 'user') {
+    const f = files([msg]);
+    if (f.length > 0) lines.push(`[Files in this turn: ${listing(f)}]`);
+  } else if (msg.role === 'assistant') {
+    let start = i;
+    while (start > 0 && !isGenuineUser(messages[start]!)) start--;
+    let end = i + 1;
+    while (end < messages.length && !isGenuineUser(messages[end]!)) end++;
+    const turn  = messages.slice(isGenuineUser(messages[start]!) ? start + 1 : start, end);
+    const calls = turn.flatMap(m => m.content.flatMap(c => c.type === 'tool-call' ? [c.name] : []));
+    lines.push(`[Tool calls in this turn: ${calls.length > 0 ? listing(calls) : 'none'}]`);
+    const f = files(turn.filter(m => m.role !== 'user'));
+    if (f.length > 0) lines.push(`[Files in this turn: ${listing(f)}]`);
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined;
+}
+
+// The labelled message the classifier judges or reads beside the judged one: its text, and its turn summary.
+function side(label: string, messages: readonly Message[], msg: Message | undefined): { label: string; text: string; summary?: string } {
+  const summary = turnSummary(messages, msg);
+  return { label, text: textOf(msg), ...(summary !== undefined ? { summary } : {}) };
+}
+
 /**
  * Wire the triggers subsystem: build the {@link TriggerManager}, load persisted triggers, register
  * the `Triggers` service and the `trigger_action` tool, then install the two evaluation hooks:
@@ -364,13 +421,14 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   // (informs one answer). A silent fire contributes only its tool's markers. Runs off the turn's
   // critical path (kicked off in `screen`); the correction is delivered later on whichever path wins.
   const runUserPhase = async (ctx: { session: Session; signal: AbortSignal; provider: string; prompt?: PromptFn }): Promise<UserPhaseOutcome> => {
-    const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
+    const messages = ctx.session.messages;
+    const lastUser = messages.findLast(l => l.role === 'user');
     const fired = await manager.evaluate(
       'user',
-      { label: 'latest user message', text: textOf(lastUser) },
-      { label: 'preceding assistant message', text: textOf(ctx.session.messages.findLast(
+      side('latest user message', messages, lastUser),
+      side('preceding assistant message', messages, messages.findLast(
         l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
-      )) },
+      )),
       ctx.signal,
       ctx.provider,
     );
@@ -494,12 +552,13 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // or the screen grace inject), so it must NOT also enter the retract context below.
       const insitu = rec?.claimed ?? false;
 
+      const messages = ctx.session.messages;
       const fired = await manager.evaluate(
         'agent',
-        { label: 'assistant response', text: textOf(ctx.session.messages.findLast(
+        side('assistant response', messages, messages.findLast(
           l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
-        )) },
-        { label: 'preceding user message', text: textOf(ctx.session.messages.findLast(l => l.role === 'user')) },
+        )),
+        side('preceding user message', messages, messages.findLast(l => l.role === 'user')),
         ctx.signal,
         ctx.config.provider,
       );
