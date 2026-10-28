@@ -24,6 +24,10 @@ standing answers in plugin settings, wherever the storage backend keeps them; a 
 there can grant itself anything. `docker-bash` mounts them read-only for that reason. Plain `bash` can
 write them, and everything else, as the user matbot runs as.
 
+A refusal at a door with nobody to ask is logged (once an hour per gate and subject), naming the gate
+and subject a standing answer would need, so an unattended job that stopped working can be found and
+fixed.
+
 A standing answer ("always allow…") is the user extending authority. It applies at every door, including
 the ones with no human behind them, and it can be withdrawn with `gate_action`.
 

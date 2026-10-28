@@ -463,7 +463,7 @@ async function runTurn(
   run:          SessionRunner,
   providerName: string,
   principal:    Principal,
-  promptFn:     PromptFn,
+  promptFn:     PromptFn | undefined,
 ): Promise<Session> {
   const ac       = new AbortController();
   // Ctrl-C aborts the running turn (and drops anything queued) through the runner.
@@ -490,7 +490,7 @@ async function runTurn(
       content:   contentArr,
       provider:  providerName,
       principal,
-      prompt:    promptFn,
+      ...(promptFn !== undefined ? { prompt: promptFn } : {}),
     });
     turnTraceId = view.traceId;
     for await (const ev of view.events) {
@@ -543,7 +543,8 @@ async function runTurn(
                 // The FIELD, not a label + a hand-built hint: passing a synthesised string took the
                 // free-text branch of the prompt, so a form's select answer came back as whatever was
                 // typed — unresolved, and never the option's value. One resolver, every path.
-                values[field.name] = await promptFn(field);
+                // With nobody to ask (a background job), each field takes its own default.
+                values[field.name] = promptFn !== undefined ? await promptFn(field) : String(field.default ?? '');
               }
               process.removeListener('SIGINT', onSigint);
               ac.abort();
@@ -1121,10 +1122,17 @@ async function main(): Promise<void> {
     return answer.trim() || defaultValue || '';
   }) as PromptFn;
 
+  // A background job has nobody at its terminal: its stdin was the config it was handed, and what it writes
+  // is a log. So its turns get no prompt at all, which is what tells a permission gate that nobody can be
+  // asked — it refuses, as at any other unattended door, and the refusal is logged for someone to act on.
+  // Handing it the terminal prompt instead printed the question into the log and read the answer from a
+  // closed pipe.
+  const turnPrompt = isBackground ? undefined : stdinPrompt;
+
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (argPrompt !== undefined) {
     try {
-      await runTurn(session, argPrompt, cliRun, providerConfig.name, principal, stdinPrompt);
+      await runTurn(session, argPrompt, cliRun, providerConfig.name, principal, turnPrompt);
     } finally {
       rl.close();
       await teardownPlugins();
@@ -1146,7 +1154,7 @@ async function main(): Promise<void> {
       endInput();
       if (!line.trim()) continue;
       process.stderr.write(cyanErr('assistant: '));
-      session = await runTurn(session, line, cliRun, providerConfig.name, principal, stdinPrompt);
+      session = await runTurn(session, line, cliRun, providerConfig.name, principal, turnPrompt);
     }
   } finally {
     rl.close();

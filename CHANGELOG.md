@@ -67,6 +67,10 @@ churn and less likely to affect a consumer who doesn't use them.
   its own: the first won and the rest failed on "already registered", so their `complete()` calls failed.
   Boot is when they arrive together — a skills reindex analyses every skill at once through one provider — so
   this happened on every boot of such a config. A failed load is not remembered; the next use tries again.
+- **A gate refused because nobody could be asked is logged** (#111). The model was told, and nobody else:
+  the operation simply did not happen, in a process nobody watches (a background job, a trigger,
+  `POST /tools/:name`). `bindGate` now logs it at error level, naming the gate and subject a standing answer
+  would need, at most once an hour per gate and subject.
 
 ### Optional
 
@@ -240,6 +244,9 @@ churn and less likely to affect a consumer who doesn't use them.
   the confirmation (node) says the credential does not go with it and names the key it will read instead,
   and both tools' results tell the model to have the user supply it with `plugin store-key`. A credential is
   shown by key name only, never a literal value.
+- **`cli`** — a background job's turns get no prompt, so a gate in one refuses as unattended (and is logged)
+  instead of printing its question into the log and reading the answer from the closed pipe its config came
+  on. A form there takes each field's default.
 
 ## 0.4.20
 
