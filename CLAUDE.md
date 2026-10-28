@@ -766,7 +766,7 @@ The gate, the runner and `IMPORT-GATE` each apply the rule.
 
 Within that, three parts, and only the first two enforce anything:
 
-1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function> <specifier>"`. The pair, not the
+1. **A per-call gate** — the control, and the default. `tool_function.import`, subject `"<function>@<version> <specifier>"`. The pair, not the
    specifier alone: *why is THIS function asking for `node:fs`* is the question being put, and a
    specifier-only key would let a brand-new function inherit every grant a reviewed one earned.
    `standing` carries the answers it may be remembered as (the exact pair, the module's directory, any
@@ -948,10 +948,14 @@ runner's: a global that is shadowed but not rejected typechecks and fails at the
 one failure the check gate exists to prevent. The half that matters most is the half with no node types
 behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
 
-**Known weakness, accepted knowingly:** the grant keys on the function's NAME, so redefining a function
-under the same name inherits it — and redefinition is the one door the model controls. Keying the body
-instead would re-ask on each of the two or three attempts a model commonly needs, pushing a human towards
-the broadest standing answer on offer. It is the thing to revisit first.
+**A grant names the function's VERSION, not only its name** — `<name>@<digest>`, the digest of the text
+function-tools compiled (a package export's is the whole package's), computed by function-tools and never
+taken from the body (`Function.prototype.toString` is the body's to override). Redefinition is the one door
+the model controls, and keyed on the name it inherited what the reviewed version had been granted. The cost
+is a question per attempt while a model iterates; an answer spanning versions is the user's to give, as the
+"any function" standing answer, which is unversioned. `#execute` is unversioned too, having no identity,
+and its label already says a standing answer covers every one-off body. The same subject keys a body's
+network gate (`tool_function.connect`).
 
 **Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`. With no
 restriction that is every builtin, so a body can be graded on what it may legitimately ask for; with one,

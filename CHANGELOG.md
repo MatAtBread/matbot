@@ -193,6 +193,11 @@ churn and less likely to affect a consumer who doesn't use them.
   container (#111). They hold the permission gates' standing answers, so a script that could write them
   could grant itself every later gate. The container is labelled with the set it was made with, and one
   made with another set (including every container from before this) is replaced on its next use.
+- **`function-tools`** — a function's own import and network grants name its version (#111). The subject
+  is `<name>@<digest> <module|origin>`, the digest of the text that was compiled (a package export's is the
+  whole package's), so a redefinition asks again instead of inheriting what the reviewed version was
+  granted. "Any function" answers and `#execute` are unchanged. Narrow standing answers stored before this
+  no longer match and are asked once more.
 
 ## 0.4.20
 

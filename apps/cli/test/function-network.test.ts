@@ -39,7 +39,12 @@ async function run(def: string, allow: (req: PermissionRequest) => boolean = () 
   const ctx = {
     callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
     prompt: () => Promise.reject(new Error('non-interactive')),
-    gate: (req: PermissionRequest & { namespace?: string }) => { asked.push(req); return Promise.resolve(allow(req) ? permitted('user') : refused('user')); },
+    // The version half of `probe@<digest>` is function-imports' to pin; here only the origin matters.
+    gate: (req: PermissionRequest & { namespace?: string }) => {
+      const subject = req.subject.replace(/^probe@[0-9a-f]{32} /, 'probe ');
+      const seen = { ...req, subject, ...(req.standing !== undefined ? { standing: req.standing.map(o => ({ ...o, subject: o.subject.replace(/^probe@[0-9a-f]{32} /, 'probe ') })) } : {}) };
+      asked.push(seen); return Promise.resolve(allow(seen) ? permitted('user') : refused('user'));
+    },
   } as unknown as ToolContext;
   const fn = await buildAsyncFn(host, def, []);
   let final: ToolEvent | undefined;

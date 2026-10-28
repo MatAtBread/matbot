@@ -18,11 +18,21 @@ const machine = (runner: ReturnType<typeof createVmFunctionRunner>): MatbotMachi
   FunctionRunner: runner,
 } as unknown as MatbotMachine);
 
+// A defined function's subject carries its version (`probe@<digest>`), which every definition below
+// changes; these tests are about the module half, so they read it with the version taken off. The
+// versioning itself is pinned on its own, further down.
+const unversioned = (s: string): string => s.replace(/^([^ @]+)@[0-9a-f]{32}(?= )/, '$1');
+const versionedRaw: (PermissionRequest & { namespace?: string })[] = [];
 const asked: (PermissionRequest & { namespace?: string })[] = [];
 const ctxFor = (allow: boolean): ToolContext => ({
   callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal,
   prompt: () => Promise.reject(new Error('non-interactive')),
-  gate: (req: PermissionRequest & { namespace?: string }) => { asked.push(req); return Promise.resolve(allow ? permitted('user') : refused('user')); },
+  gate: (req: PermissionRequest & { namespace?: string }) => {
+    versionedRaw.push(req);
+    asked.push({ ...req, subject: unversioned(req.subject),
+                 ...(req.standing !== undefined ? { standing: req.standing.map(o => ({ ...o, subject: unversioned(o.subject) })) } : {}) });
+    return Promise.resolve(allow ? permitted('user') : refused('user'));
+  },
 }) as unknown as ToolContext;
 
 async function result(events: AsyncIterable<ToolEvent>): Promise<ToolEvent | undefined> {
@@ -158,8 +168,8 @@ test('a permitted import is gated, and the subject names the function as well as
   // Narrowest first, so a frontend resolving a typed prefix lands on the narrower answer. Each carries
   // its own prose: a subject is a key, and `#execute node:fs/` is a correct key and an unusable question.
   assert.deepEqual(req.standing, [
-    { subject: 'probe node:os', label: 'Always allow function "probe" to import node:os' },
-    { subject: 'probe node:',   label: 'Always allow function "probe" to import any node builtin' },
+    { subject: 'probe node:os', label: 'Always allow function "probe" as currently defined to import node:os' },
+    { subject: 'probe node:',   label: 'Always allow function "probe" as currently defined to import any node builtin' },
     { subject: '* node:os',     label: 'Always allow ANY function to import node:os' },
   ]);
 });
@@ -280,6 +290,27 @@ test('a function NAMED execute does not share a one-off body\'s standing answers
   const fn = await buildBodyFn(host, `{ return import('node:os').then(() => 1); }`);
   await result(runFunction(machine(runner), ctxFor(true), fn, [], { tool: 'x', source: 'x', gateSubject: EXECUTE_SUBJECT }));
   assert.equal(asked[0]?.subject, '#execute node:os');
+});
+
+test('a redefinition is a new subject: the version is a digest of what was compiled', async () => {
+  const runner = createVmFunctionRunner(2000);
+  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
+  const subjectOf = async (def: string, compiled?: string): Promise<string> => {
+    versionedRaw.length = 0;
+    const fn = await buildAsyncFn(host, def, []);
+    await result(runFunction(machine(runner), ctxFor(true), fn, [], { tool: 'probe', source: def, ...(compiled !== undefined ? { compiled } : {}) }));
+    return versionedRaw[0]!.subject;
+  };
+  const one = `probe() { return import('node:os').then(() => 1); }`;
+  const two = `probe() { return import('node:os').then(() => 2); }`;
+  const a = await subjectOf(one);
+  assert.match(a, /^probe@[0-9a-f]{32} node:os$/);
+  assert.equal(await subjectOf(one), a, 'the same text is the same subject, across calls and restarts');
+  assert.notEqual(await subjectOf(two), a, 'an edit, however small, asks again');
+  // A package export's version is the whole package's: a helper it calls can change what it does.
+  assert.notEqual(await subjectOf(one, `${one}\nconst helper = 1;`), a);
+  // Narrow answers carry the version; the any-function one does not, being the user's to give across versions.
+  assert.deepEqual(versionedRaw[0]!.standing?.map(o => o.subject.replace(/@[0-9a-f]{32}/, '@V')), ['probe@V node:os', 'probe@V node:', '* node:os']);
 });
 
 test('the withheld globals are undefined, and a real import() is inert', async () => {

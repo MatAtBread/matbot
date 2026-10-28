@@ -593,7 +593,7 @@ class PackageStore {
         pluginName:   PLUGIN_NAME,
         executor: {
           execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
-            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source });
+            return runFunction(machine, ctx, fn, e.param === undefined ? [] : [input ?? {}], { tool: e.toolName, source: e.source, compiled: definition });
           },
         },
       } satisfies Tool;
