@@ -79,6 +79,7 @@ declare global {
 
   // Loaded from a CDN by index.html, before app.js runs.
   const marked:  any;
+  const DOMPurify: any;
   const TinyMDE: any;
 
   // ── DOM widening ────────────────────────────────────────────────────────────

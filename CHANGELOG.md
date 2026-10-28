@@ -170,9 +170,17 @@ churn and less likely to affect a consumer who doesn't use them.
     and every body was parsed as JSON whatever it claimed to be.
 - **`frontend-web`** — model output can no longer run script in the UI (#111). The page renders the prompt a
   gate is waiting on, so script there could answer it.
-  - Raw HTML in rendered markdown is shown as text, block and inline alike. A link or image whose URL is not
-    web, mail or relative (`javascript:`, `data:` other than a raster image) keeps its text and loses the
-    URL, judged after the entities and controls a browser would decode or drop.
+  - Rendered markdown is sanitised with DOMPurify (pinned, with an integrity hash). Event handlers,
+    `<script>`, `javascript:` URLs, `<style>`, `<form>`, `<meta>`, `<base>`, `<link>`, `<object>` and
+    `<embed>` are removed; SVG, images, video, audio, `<details>`, styled elements and tables are kept.
+    Each message is `contain: paint`, so a styled reply cannot draw outside its own bubble (over a prompt).
+  - Every `<iframe>` is sandboxed without `allow-same-origin`, and `srcdoc` is removed: a page from this
+    server would otherwise run with the UI's access. One that points at this server is loaded through a
+    bridge instead: its HTML is set as `srcdoc` behind a `<base>` and a `fetch` shim, and the UI makes its
+    requests for it, allowing only tool calls (`POST /tools/*`, `/stream/tools/*`) and file reads
+    (`GET /files/*`), never `/sessions/…`. An embedded dashboard therefore keeps working unchanged, and a
+    gated tool it calls is refused as for any caller with nobody to ask. Node server only: in the
+    in-browser build an embedded workspace page says it is unavailable.
   - `marked` and `tiny-markdown-editor` are loaded at exact versions with integrity hashes. Both were
     unpinned, so whoever controlled those CDN URLs controlled the page. The versions are the ones the
     unpinned URLs served (`marked` 15.0.12) or the release before (`tiny-markdown-editor` 0.2.34).

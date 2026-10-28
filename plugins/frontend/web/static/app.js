@@ -294,36 +294,42 @@ function escHtml(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', "'": '&#39;' }[c] ?? c));
 }
 
-// What a link or image may point at: the web, mail, or anywhere relative to this page. Anything else with
-// a scheme (`javascript:`, `data:`, `vbscript:`) runs or renders as content of ours when clicked; an image
-// may also be a raster `data:` URI, which an <img> cannot script. A relative path containing a colon after
-// a `/`, `?` or `#` is still relative.
-const SAFE_HREF = /^(?:https?:|mailto:|[^:]*$|[^:]*[/?#])/i;
-const SAFE_IMG  = /^data:image\/(?:png|jpe?g|gif|webp|avif);/i;
-
-// Markdown is model output, and marked passes raw HTML through: a reply containing `<img onerror>` would run
-// as this page — which holds the prompt a gate is waiting on. So raw HTML is shown as text, block and inline
-// alike (both reach `renderer.html`), and a link keeps its text but loses an href it may not have.
-if (typeof marked !== 'undefined') {
-  marked.use({
-    renderer: { html({ text }) { return escHtml(text); } },
-    walkTokens(t) {
-      if (t.type !== 'link' && t.type !== 'image') return;
-      // Judged as the browser will read it: the attribute's entities decoded (`javascript&#58;`), and the
-      // tabs, newlines and controls a URL parser drops from a scheme (`java\tscript:`) removed.
-      const probe = document.createElement('textarea');
-      probe.innerHTML = t.href;
-      const url = probe.value.replace(/[\u0000- \u007f]/g, '');
-      if (SAFE_HREF.test(url) || (t.type === 'image' && SAFE_IMG.test(url))) return;
-      t.href = '#';
-    },
+// Markdown is model output, and raw HTML in it is wanted — SVG, images, video, <details>, styled blocks,
+// embedded pages. What is not wanted is script running as this page, which holds the prompt a gate is waiting
+// on: script here could answer it. So the HTML is SANITISED, not escaped: DOMPurify removes what runs (event
+// handlers, <script>, `javascript:` URLs) and the elements that change what the page does (<style> restyles
+// all of it; <form>, <meta>, <base>, <link>, <object>, <embed>), and keeps the rest. Placement is the CSS's
+// job (`contain: paint` on `.md-body`), so a styled reply stays inside its own bubble.
+//
+// An <iframe> is kept, always sandboxed WITHOUT `allow-same-origin`: a page from this server would otherwise
+// run as this page, and that is the one route left to a model that writes a page and embeds it. One that
+// points at this server is loaded through the embed bridge below instead of by `src`, so a dashboard keeps
+// its tool calls. `allow-popups-to-escape-sandbox` is deliberately absent: a popup it opens stays sandboxed.
+const EMBED_SANDBOX = 'allow-scripts allow-popups allow-forms';
+const PURIFY = {
+  ADD_TAGS:    ['iframe'],
+  ADD_ATTR:    ['allowfullscreen', 'frameborder'],
+  FORBID_TAGS: ['style', 'form', 'meta', 'base', 'link', 'object', 'embed'],
+};
+if (typeof DOMPurify !== 'undefined') {
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.nodeName !== 'IFRAME') return;
+    node.removeAttribute('data-mb-embed');           // only this hook marks a frame for the bridge
+    node.setAttribute('sandbox', EMBED_SANDBOX);
+    const src = node.getAttribute('src');
+    if (src === null) return;
+    let url;
+    try { url = new URL(src, location.href); } catch { node.removeAttribute('src'); return; }
+    if (url.origin !== location.origin) return;
+    node.removeAttribute('src');
+    node.setAttribute('data-mb-embed', url.pathname + url.search);
   });
 }
 
 function md(text) {
   if (!text) return '';
-  if (typeof marked === 'undefined') return '<p>' + escHtml(text) + '</p>';
-  const result = marked.parse(text);
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return '<p>' + escHtml(text) + '</p>';
+  const result = DOMPurify.sanitize(marked.parse(text), PURIFY);
   // Open all links in new tab. The code-block copy button is spliced in here rather than via a
   // `renderer.code` override: marked is loaded unpinned from the CDN and that hook's signature changed at
   // v13, whereas `<pre>` in the output has not. Being part of the HTML, it also survives the streaming
@@ -336,6 +342,147 @@ function md(text) {
 // The glyph is CSS `::before` content, never a text node, so a message's innerText — which includes its
 // code blocks' buttons — copies clean.
 const COPY_BTN_HTML = '<button type="button" class="copy-btn" title="Copy" aria-label="Copy"></button>';
+
+// ── Embedded pages ─────────────────────────────────────────────────────────────
+//
+// A page from this server embedded in a reply (`<iframe src="/files/workspace/report.html">`) is a dashboard,
+// and a dashboard calls tools. Sandboxed without `allow-same-origin` it runs as an opaque origin, which this
+// server refuses (it answers its own origin only), so it is loaded here instead: its HTML is fetched and set
+// as `srcdoc`, behind a `<base>` that keeps its relative URLs pointing where they did and a shim that sends
+// its requests for this server to this page. This page makes the ones an embedded page may make — tool calls
+// and file reads — and nothing else: in particular never `/sessions/…/prompt`, which is what the sandbox is
+// for. A tool call made this way is the same non-interactive door a dashboard in its own tab uses, so a gated
+// tool is refused there unless a standing answer allows it.
+//
+// The ALLOW-LIST is the boundary, not the shim: a sandboxed frame can navigate itself to a page without the
+// shim and post to this page directly, and gets the same answers.
+//
+// Node only. The in-browser build has no HTTP route for files, so an embedded page there says so.
+
+const EMBED_SHIM = `(() => {
+  const SERVER = %ORIGIN%;
+  const realFetch = window.fetch.bind(window);
+  const pending = new Map();
+  let next = 0;
+  addEventListener('message', (ev) => {
+    const m = ev.data;
+    if (ev.source !== parent || !m || m.mbBridge !== 1) return;
+    pending.get(m.id)?.(m);
+  });
+  window.fetch = async (input, init) => {
+    const req = new Request(input, init);
+    const url = new URL(req.url);
+    if (url.origin !== SERVER) return realFetch(input, init);
+    const body = req.method === 'GET' || req.method === 'HEAD' ? null : await req.arrayBuffer();
+    const id = ++next;
+    return new Promise((resolve, reject) => {
+      let ctl;
+      const stream = new ReadableStream({ start(c) { ctl = c; } });
+      pending.set(id, (m) => {
+        if (m.kind === 'head') {
+          resolve(new Response([204, 205, 304].includes(m.status) ? null : stream, { status: m.status, statusText: m.statusText, headers: m.headers }));
+        } else if (m.kind === 'chunk') {
+          ctl.enqueue(new Uint8Array(m.bytes));
+        } else if (m.kind === 'end') {
+          pending.delete(id); ctl.close();
+        } else {
+          pending.delete(id);
+          const e = new TypeError(m.message);
+          reject(e);
+          try { ctl.error(e); } catch {}
+        }
+      });
+      parent.postMessage({ mbBridge: 1, id, method: req.method, path: url.pathname + url.search, headers: [...req.headers], body }, '*', body ? [body] : []);
+    });
+  };
+})();`;
+
+const embedWindows = new WeakSet();
+const embedPages = new Map();      // path → { at, html }: a streamed reply re-renders its frames on every delta
+const EMBED_PAGE_TTL_MS = 10_000;
+
+function embedRequestAllowed(method, path) {
+  if (method === 'POST') return /^\/(?:stream\/)?tools\/[^/]+$/.test(path);
+  if (method === 'GET' || method === 'HEAD') return path.startsWith('/files/');
+  return false;
+}
+
+async function embedPage(path) {
+  const hit = embedPages.get(path);
+  if (hit && Date.now() - hit.at < EMBED_PAGE_TTL_MS) return hit.html;
+  const html = fetch(path).then(async (res) => {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res.text();
+  });
+  embedPages.set(path, { at: Date.now(), html });
+  html.catch(() => embedPages.delete(path));
+  return html;
+}
+
+async function attachEmbed(frame) {
+  const path = frame.getAttribute('data-mb-embed');
+  frame.removeAttribute('data-mb-embed');
+  if (T.hostRuntime !== 'node') {
+    frame.srcdoc = '<p style="font:13px system-ui,sans-serif;color:#6b7280">An embedded page from the workspace opens only when matbot runs as a server.</p>';
+    return;
+  }
+  let html;
+  try { html = await embedPage(path); }
+  catch (e) {
+    frame.srcdoc = '<p style="font:13px system-ui,sans-serif;color:#b91c1c">Could not load ' + escHtml(path) + ': ' + escHtml(e.message) + '</p>';
+    return;
+  }
+  // Ahead of everything the page has, after its doctype (before one, the page would render in quirks mode).
+  const head = '<base href="' + escHtml(new URL(path, location.href).href) + '"><script>'
+             + EMBED_SHIM.replace('%ORIGIN%', JSON.stringify(location.origin)) + '<\/script>';
+  const doctype = /^\s*<!doctype[^>]*>/i.exec(html);
+  frame.srcdoc = doctype ? doctype[0] + head + html.slice(doctype[0].length) : head + html;
+  if (frame.contentWindow) embedWindows.add(frame.contentWindow);
+}
+
+window.addEventListener('message', async (ev) => {
+  const m = ev.data;
+  if (!m || m.mbBridge !== 1 || !embedWindows.has(ev.source)) return;
+  const source = /** @type {Window} */ (ev.source);
+  const reply = (msg, transfer) => source.postMessage({ mbBridge: 1, id: m.id, ...msg }, '*', transfer ?? []);
+  // Normalised before it is judged, so `/files/../sessions/x/prompt` is judged as where it actually goes.
+  let url;
+  try { url = new URL(String(m.path), location.origin); } catch { reply({ kind: 'error', message: 'Bad request path.' }); return; }
+  if (url.origin !== location.origin || !embedRequestAllowed(m.method, url.pathname)) {
+    reply({ kind: 'error', message: m.method + ' ' + url.pathname + ' is not available to an embedded page: it may call tools and read files.' });
+    return;
+  }
+  try {
+    const headers = new Headers();
+    for (const [k, v] of Array.isArray(m.headers) ? m.headers : []) {
+      if (k === 'content-type' || k === 'accept') headers.set(k, v);
+    }
+    const res = await fetch(url.pathname + url.search, { method: m.method, headers, ...(m.body ? { body: m.body } : {}) });
+    reply({ kind: 'head', status: res.status, statusText: res.statusText, headers: [...res.headers] });
+    if (res.body) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const bytes = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        reply({ kind: 'chunk', bytes }, [bytes]);
+      }
+    }
+    reply({ kind: 'end' });
+  } catch (e) {
+    reply({ kind: 'error', message: String(e?.message ?? e) });
+  }
+});
+
+new MutationObserver((records) => {
+  for (const r of records) {
+    for (const n of r.addedNodes) {
+      if (!(n instanceof Element)) continue;
+      const frames = n.matches('iframe[data-mb-embed]') ? [n] : n.querySelectorAll('iframe[data-mb-embed]');
+      for (const f of frames) void attachEmbed(/** @type {HTMLIFrameElement} */ (f));
+    }
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
 
 function makeCopyBtn() {
   const btn = document.createElement('button');

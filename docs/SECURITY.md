@@ -60,8 +60,12 @@ endpoint can answer a prompt, which is correct for every browser the user has op
 - **answers its own origin only**, unless `cors_origin` names another;
 - **refuses a POST not sent as `application/json`**, which is what makes a browser ask before a page on
   another origin may send one;
-- **renders model output as text**: no raw HTML in chat, no `javascript:` links, and the libraries the
-  page loads are pinned with integrity hashes.
+- **sanitises model output**: HTML in a reply is kept, minus what runs script or changes the page
+  (event handlers, `<script>`, `javascript:` URLs, `<style>`, `<form>` and the like), and each reply is
+  drawn inside its own bubble. The libraries the page loads are pinned with integrity hashes;
+- **sandboxes every embedded page**, so it never runs with the UI's access. One from this server is
+  loaded through a bridge that makes tool calls and file reads for it, and nothing else: a dashboard
+  embedded in a reply works, and cannot answer a prompt.
 
 What remains open, and why:
 
@@ -71,8 +75,9 @@ What remains open, and why:
 - **`docker-bash` over Docker's default bridge network** can reach the host, and so the UI's port.
   A `docker-bash` that cannot reach the host, whether another implementation or an option on this one, is
   an implementation choice.
-- **A dashboard open in a browser** runs on the UI's origin with the UI's access, so script in it can
-  answer a prompt while it is open. Files served from `/files` are active content by design.
+- **A dashboard opened in its own tab** runs on the UI's origin with the UI's access, so script in it
+  can answer a prompt while it is open. Files served from `/files` are active content by design; the
+  same page embedded in a reply is sandboxed instead.
 - **An origin the user approved that forwards to matbot**: a `cors_origin`, or a service the model can
   reach that relays requests on.
 
