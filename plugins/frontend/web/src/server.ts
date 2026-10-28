@@ -11,6 +11,7 @@ import {
 import { bindGate } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
+import { trackOwnConnections } from './own-connections.js';
 import { promises } from "node:fs";
 const { readFile } = promises;
 
@@ -26,6 +27,11 @@ export interface WebServerDeps {
    *  Absent ⇒ same-origin only. It was `*`, which on an installation walled off by its network rather than
    *  by a login let any page a user on that network visited read and drive the whole API. */
   cors?:          string;
+  /** Refuse every request arriving on a connection this process opened. The model acts on the network
+   *  from inside this process — the `http` tool, a body's `fetch` — and the UI's endpoints answer prompts,
+   *  including the gate prompts that exist so a human decides what the model cannot. Off unless asked,
+   *  because a test that drives the server with `fetch` is exactly such a connection. */
+  refuseOwnProcess?: boolean;
   workdir?:       string;
   files?:         FileStore;
   /** Optional partition-aware file-watch layer. Resolved lazily (a thunk, not a captured value) because a
@@ -226,6 +232,7 @@ export function createWebServer(deps: WebServerDeps) {
   const origin = deps.cors;
   const cors = (): Record<string, string> => origin !== undefined ? corsHeaders(origin) : {};
   const resolvePrincipal = deps.resolvePrincipal ?? defaultWebPrincipal;
+  const own = deps.refuseOwnProcess ? trackOwnConnections() : undefined;
 
   // Boot race guard for the /tools endpoints. This server starts listening inside frontend-web's
   // setup(), which runs before the plugins configured after it — and before the core tools registered
@@ -450,6 +457,11 @@ export function createWebServer(deps: WebServerDeps) {
     // exits the process. Writing to a dead socket is never fatal, so absorb it on both streams.
     req.on('error', () => {});
     res.on('error', () => {});
+
+    if (own?.opened(req.socket)) {
+      json(res, 403, { error: 'This server does not accept requests from matbot\'s own process. Call the tool directly instead.' });
+      return;
+    }
 
     for (const [k, v] of Object.entries(cors())) res.setHeader(k, v);
     // Every response carries the serving build, including the SSE streams and the static assets. Routes
@@ -1100,6 +1112,7 @@ export function createWebServer(deps: WebServerDeps) {
     globalListeners.clear();
 
     watchAc.abort();                              // ends the firehose subscription
+    own?.stop();
 
     // Settle all pending prompts so callers don't hang. Cancelled, not defaulted: the server going
     // away is not an answer, and a tool reports a cancel as an error rather than acting on it.

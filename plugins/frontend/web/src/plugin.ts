@@ -94,6 +94,7 @@ export const plugin: MatbotPluginSpec = {
       unloadPlugin:  services.unloadPlugin.bind(services),
       tools:         services.tools,
       ...(typeof cors === 'string' && cors !== '' ? { cors } : {}),
+      refuseOwnProcess: true,
       // An explicit `x-matbot-principal` header wins over any registered resolver (so a browser acting as
       // a chosen profile is honoured even when web-principal-user/auth pins a default identity); absent it,
       // a registered WebPrincipalResolver takes effect, else the header-aware default. Resolver looked up
@@ -124,14 +125,16 @@ export const plugin: MatbotPluginSpec = {
       });
       webServer!.server.listen(port, '0.0.0.0', () => {
         process.stderr.write(`[frontend-web] http://localhost:${port}\n`);
-        // A model with `bash`/`http` otherwise has no way to learn that every registered tool is reachable
-        // over HTTP — it greps for the process to find the port, or never thinks to call a tool from a script.
+        // A dashboard the model writes is served from here and calls tools from the browser; nothing else
+        // tells the model that the route exists. Its own process is refused (`refuseOwnProcess`), so this is
+        // not an invitation to reach the UI's endpoints with `http` — it already holds every tool directly.
         services.systemContext.register(() =>
           'Every registered tool can be invoked over HTTP via the relative URL `/tools`. ' +
           '`POST /tools/<name>` with the JSON params as the body (sent as `Content-Type: application/json` — ' +
           'any other POST is refused) returns the result as JSON (a tool error is a ' +
           'non-2xx status with `{ error }`); `POST /stream/tools/<name>` streams the tool\'s events as SSE. ' +
-          'Use it to call tools from scripts run by a live dashboard or similar.');
+          'It is for pages this server serves, such as a live dashboard, calling tools from the browser. ' +
+          'Requests from matbot\'s own process are refused; call the tool directly instead.');
         resolve();
       });
     });

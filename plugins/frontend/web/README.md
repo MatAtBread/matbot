@@ -28,3 +28,9 @@ default_settings:
 Every POST must be sent as `Content-Type: application/json`, with or without a body; anything else is
 refused with 415. That is what stops a page on another origin from sending one without the browser asking
 first.
+
+Requests from matbot's own process are refused with 403. The model reaches the network from inside that
+process (the `http` tool, a function's `fetch`), and these endpoints answer the prompts that put a decision
+to a human, permission gates among them. A page in a browser, and any other process, is served as before.
+That includes a process matbot itself starts, such as `curl` from `bash`: node cannot tell whose child a
+connection belongs to, so an installation that grants a shell has granted that route too.

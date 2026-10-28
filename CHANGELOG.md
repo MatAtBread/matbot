@@ -162,6 +162,13 @@ churn and less likely to affect a consumer who doesn't use them.
     a request, start another realm or open that storage is now deleted before the expression runs, and the
     tool's description says so.
 - **`frontend-dom`** — the same markdown rules, and `marked` pinned to 14.1.4 (it was `marked@14`).
+- **`frontend-web`** — the model can no longer answer its own prompts over HTTP (#111). The server refuses
+  every request arriving on a connection matbot's own process opened (403), recognised through node's
+  `net.client.socket` diagnostics channel on every platform. The model reaches the network from inside
+  that process, through the `http` tool or a function's `fetch`, and `POST /sessions/:id/prompt` answers
+  whatever prompt is pending, a permission gate's included. Browsers and other processes are served as
+  before. A process matbot starts (`curl` from `bash`) is not covered, and the README says so.
+  `createWebServer` takes `refuseOwnProcess`, off by default so a test can drive the server with `fetch`.
 
 ## 0.4.20
 
