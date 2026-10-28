@@ -3,7 +3,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { streamProcess, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS } from '@matatbread/matbot-tool-bash/stream';
 import type { ChildProcess } from 'node:child_process';
 import { spawn, execFile } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { getServers } from 'node:dns';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
@@ -202,18 +202,47 @@ async function removeContainer(name: string): Promise<void> {
   });
 }
 
-async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
-  let running: string;
-  try {
-    running = await dockerExec(['inspect', '--format', '{{.State.Running}}', cfg.name]);
-  } catch {
-    // Container doesn't exist — create and start it.
-    const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
-    await mkdir(dataPath, { recursive: true });
+const READONLY_LABEL = 'matbot.readonly';
+const SQLITE_FILE = /\.db(?:-wal|-shm|-journal)?$/;
 
+/**
+ * The parts of the data directory a script may read but not write, relative to it: where stored gate
+ * answers live. A permission gate's standing answers are plugin settings, so a container that can write
+ * them can grant itself every later gate (`{"plugin.add": true}`) — the human's decision, made by the model.
+ * That is the filesystem backend's `settings` (the profiles backend keeps settings there too, never in a
+ * profile's own area) and the SQLite backend's database files, which hold every namespace at once; the rest
+ * of `.data` stays writable, being the model's to use. `settings` is created if absent, since a directory
+ * that does not exist yet cannot be mounted and could be planted before it is.
+ *
+ * Read on every call rather than once, and compared with what the container was created with: SQLite's
+ * `-wal` exists only while the database is open.
+ */
+async function readOnlyPaths(dataPath: string): Promise<string[]> {
+  await mkdir(`${dataPath}/settings`, { recursive: true });
+  return ['settings', ...(await readdir(dataPath)).filter(f => SQLITE_FILE.test(f))].sort();
+}
+
+async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
+  const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
+  await mkdir(dataPath, { recursive: true });
+  const readOnly = await readOnlyPaths(dataPath);
+  const label = readOnly.join(',');
+
+  let state: string | undefined;
+  try {
+    state = await dockerExec(['inspect', '--format', `{{.State.Running}} {{index .Config.Labels "${READONLY_LABEL}"}}`, cfg.name]);
+  } catch { /* no such container */ }
+  // A container made with another set — including one from before any were protected — is replaced: its
+  // mounts are fixed at creation, and leaving it would leave the gate answers writable.
+  if (state !== undefined && state.slice(state.indexOf(' ') + 1) !== label) {
+    await removeContainer(cfg.name);
+    state = undefined;
+  }
+
+  if (state === undefined) {
     // --init: PID 1 is otherwise `sleep infinity`, which never reaps, so every process killed or orphaned
     // by an exec stays in the table as a zombie for the container's lifetime.
-    const args = ['run', '-d', '--init', '--name', cfg.name];
+    const args = ['run', '-d', '--init', '--name', cfg.name, '--label', `${READONLY_LABEL}=${label}`];
     if (cfg.network !== undefined) args.push('--network', cfg.network);
     for (const server of resolveDnsServers(cfg.dns)) {
       args.push('--dns', server);
@@ -221,6 +250,8 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     args.push(
       '-v', `${cfg.projectRoot}:${cfg.mountPoint}:ro`,
       '-v', `${dataPath}:${cfg.mountPoint}/${cfg.dataSubdir}`,
+      // Over the read-write mount above: a nested mount wins for its own path.
+      ...readOnly.flatMap(p => ['-v', `${dataPath}/${p}:${cfg.mountPoint}/${cfg.dataSubdir}/${p}:ro`]),
       cfg.image,
       'sleep', 'infinity',
     );
@@ -228,7 +259,7 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     return;
   }
 
-  if (running !== 'true') {
+  if (!state.startsWith('true ')) {
     await dockerExec(['start', cfg.name]);
   }
 }
@@ -463,7 +494,7 @@ const TOOL_DESCRIPTION =
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'The container runs node:24-bookworm (Debian 12, Node 24 + npm preinstalled) with network access; ' +
   'install standard packages with apt freely. ' +
-  'The project root is mounted read-only at /app; /app/.data is read-write. ' +
+  'The project root is mounted read-only at /app; /app/.data is read-write, except its settings and any SQLite database, which are read-only. ' +
   'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
   `The script and every process it spawns are killed after \`timeout\` milliseconds (default ${DEFAULT_TIMEOUT_MS}) ` +
   `or once combined stdout+stderr reaches \`maxOutputBytes\` (default ${DEFAULT_MAX_OUTPUT_BYTES}), whichever comes ` +

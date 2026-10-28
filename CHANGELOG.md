@@ -189,6 +189,10 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`frontend-telegram`** — `telegram_open_door` asks before it opens (#111). Whoever joins gets the owner's
   access to this matbot, so admitting someone is the user's decision: gate `telegram_open_door.open`, and a
   call with nobody to ask is refused.
+- **`docker-bash`** — `.data/settings` and any SQLite database files are mounted read-only inside the
+  container (#111). They hold the permission gates' standing answers, so a script that could write them
+  could grant itself every later gate. The container is labelled with the set it was made with, and one
+  made with another set (including every container from before this) is replaced on its next use.
 
 ## 0.4.20
 
