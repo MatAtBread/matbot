@@ -99,9 +99,10 @@ export function runProviderSetup(
     modelField.appendChild(modelList);
     const apiKeyField   = field('API key', apiKey);
 
-    // An endpoint adapter can list nothing before the URL and key it lists with are typed, so its models
-    // are suggestions under the text field rather than a drop-down: an endpoint accepts names it does not
-    // list (an alias, an Azure deployment), which a free field still allows.
+    // An endpoint adapter can list nothing before its URL is typed, and most hosted APIs nothing before the
+    // key either (a local server or OpenRouter lists without one), so its models are suggestions under
+    // the text field rather than a drop-down: an endpoint accepts names it does not list (an alias, an
+    // Azure deployment), which a free field still allows. Re-listed when the key arrives.
     const suggestions = document.createElement('datalist');
     suggestions.id = `mb-setup-models-${crypto.randomUUID()}`;
     model.setAttribute('list', suggestions.id);
@@ -115,9 +116,9 @@ export function runProviderSetup(
       listed = undefined;
       suggestions.replaceChildren();
       const ep = endpoint.value.trim(), key = apiKey.value.trim();
-      if (!a || a.selfContained || !ep || !key) return;
+      if (!a || a.selfContained || !ep) return;
       const config: ProviderConfig = { name: name.value.trim(), module: a.module, model: model.value.trim(),
-                                       endpoint: ep, credentials: { apiKey: key } };
+                                       endpoint: ep, ...(key ? { credentials: { apiKey: key } } : {}) };
       void adapterFor(a, config).then(async adapter => {
         if (asked !== listing || !adapter?.models) return;
         const ids = await adapter.models(config, AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS));

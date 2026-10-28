@@ -267,9 +267,11 @@ export class OpenAICompatAdapter implements ProviderAdapter {
   // models, and nothing in a row says which is which. That is no obstacle to telling whether a name
   // exists, which is what it is mostly asked.
   async models(config: ProviderConfig, signal?: AbortSignal): Promise<string[]> {
+    const apiKey = config.credentials?.['apiKey'];
+    // No key, no header: a local server or OpenRouter lists without one, and some refuse an empty bearer.
     const res = await fetch(modelsUrl(config.endpoint ?? DEFAULT_ENDPOINT), {
       headers: {
-        'authorization': `Bearer ${config.credentials?.['apiKey'] ?? ''}`,
+        ...(apiKey ? { 'authorization': `Bearer ${apiKey}` } : {}),
         ...(config.credentials?.['organization']
           ? { 'openai-organization': config.credentials['organization'] }
           : {}),

@@ -679,10 +679,17 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       process.stderr.write(yellow('Model name is required.\n'));
     }
 
-    let endpoint = await ask('Endpoint URL');
+    // Blank is the adapter's own default, and is left out of the profile: written as `endpoint:` it reads
+    // back as a value, and an empty one is a URL nothing can fetch.
+    let endpoint = '';
+    for (;;) {
+      endpoint = await ask('Endpoint URL (blank for the adapter\'s default)');
+      if (!endpoint || /^https?:$/.test(URL.parse(endpoint)?.protocol ?? '')) break;
+      process.stderr.write(yellow('An endpoint is an http:// or https:// URL.\n'));
+    }
     let apiKey = await ask('API key');
 
-    if (endpoint && !endpoint.startsWith('http')) {
+    if (endpoint) {
       process.stderr.write(yellow(`\nTesting ${endpoint}… `));
       const reachable = await testEndpointReachable(endpoint);
       if (!reachable) {
@@ -741,7 +748,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
       'providers:',
       `  ${providerName}:`,
       `    module: ${moduleSpec}`,
-      `    endpoint: ${endpoint}`,
+      ...(endpoint ? [`    endpoint: ${endpoint}`] : []),
       `    model: ${model}`,
       ...(keyName !== undefined ? ['    credentials:', `      apiKey: \${${keyName}}`] : []),
     ].join('\n') + '\n';
@@ -759,7 +766,7 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
         // The placeholder, not the typed string: this run must resolve the same key the written
         // config names, or a reference would be posted to the endpoint as if it were the secret.
         ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
-        endpoint,
+        ...(endpoint ? { endpoint } : {}),
       }]]),
     };
   } finally {

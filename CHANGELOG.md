@@ -156,21 +156,28 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`provider-anthropic`, `provider-openai-compat`, `provider-google`** — implement `models`.
   - Anthropic reads `/v1/models`, every page.
   - OpenAI-compat reads the `/models` sibling of the chat-completions URL (or `<base>/models`). The list
-    includes non-chat models, since nothing in OpenAI's rows says which is which.
+    includes non-chat models, since nothing in OpenAI's rows says which is which. With no key it sends no
+    `authorization` header, so a local server or OpenRouter, which list without one, are not refused.
   - Google reads the native `/models`, keeping only models that `generateContent`. Every id is returned
     without its `models/` prefix.
 - **`tool-plugin`, `browser`** — `provider add` and `provider update` check the model against the endpoint's
   list. One it does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`), not a
   refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A refusal
   names the closest listed ids, and an endpoint that cannot list is accepted unchecked, saying so. On
-  node, `add-unlisted` is asked after `add`, because listing sends the credential and only `add` agrees
-  that it may go there. `update` checks only when the model or endpoint changes, and only where `cur`'s
+  node, `add` first lists without the credential, before its own approval, since that sends nothing
+  secret. Only if that fails (every hosted API but OpenRouter needs a key) is the list fetched with the
+  credential, after the approval, because only `add` agrees that it may go there. `update` checks only when the model or endpoint changes, and only where `cur`'s
   credential already went: one that would have followed the endpoint to another origin is already
   detached. The browser's `ProviderAdmin` takes an optional `get(name)` so an update can be checked.
 - **`cli`** — the first-run setup wizard checks the model once the endpoint and key are entered. An unlisted
   one names the closest ids and asks again; Enter keeps the name as typed.
-- **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field, once the
-  endpoint and key are typed (the key now comes before the model). An unlisted model is warned about once
+- **`cli`** — the first-run setup wizard tested an endpoint's reachability only when it did *not* start with
+  `http`, so a real URL was never tested. It now tests every endpoint, and asks again for one that is not an
+  `http(s)` URL. A blank endpoint (the adapter's default) was written as `endpoint:` and carried as `''`,
+  which the adapter used in place of its default, so the first turn failed. It is now left out.
+- **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field: once the
+  endpoint is typed if it lists without a key, and again once the key is typed (the key now comes before
+  the model). An unlisted model is warned about once
   on save, naming the closest ids, and saving again keeps it.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.

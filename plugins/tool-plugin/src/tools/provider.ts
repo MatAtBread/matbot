@@ -274,31 +274,33 @@ async function checkEndpoint(url: string): Promise<string | null> {
 
 // A model the endpoint does not list is put to a gate rather than refused: an endpoint accepts names it
 // does not list (an Azure deployment, an alias the matching does not know), and those must stay usable.
-// Returns the refusal to report, or undefined to go ahead.
+// `retry`: a keyed attempt follows if this one cannot list, so it does not report giving up.
+type ModelVerdict = 'checked' | 'unchecked' | { refusal: string };
+
 async function* confirmModel(
   plugin: MatbotPlugin,
   cfg:    ProviderConfig,
   ctx:    ToolContext,
   gate:   'add-unlisted' | 'update-unlisted',
   verb:   'Add' | 'Update',
-): AsyncGenerator<ToolEvent<ToolResultOf<'provider'>>, string | undefined> {
+  retry = false,
+): AsyncGenerator<ToolEvent<ToolResultOf<'provider'>>, ModelVerdict> {
   const adapter = plugin.provider?.(cfg);
-  if (adapter?.models === undefined) return undefined;
-  yield { type: 'stdout', chunk: `Checking "${cfg.model}" against the endpoint's models …\n` };
+  if (adapter?.models === undefined) return 'unchecked';
   const check = await checkProviderModel(adapter, cfg, ctx.vault);
   switch (check.kind) {
     case 'listed':
-      yield { type: 'stdout', chunk: `Model listed.\n` };
-      return undefined;
+      yield { type: 'stdout', chunk: `"${cfg.model}" is among the endpoint's models.\n` };
+      return 'checked';
     case 'unchecked':
-      yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
-      return undefined;
+      if (!retry) yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
+      return 'unchecked';
     case 'unlisted': {
       const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
       const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
                                       label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
-      if (permit.allowed) return undefined;
-      return `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}`;
+      if (permit.allowed) return 'checked';
+      return { refusal: `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}` };
     }
   }
 }
@@ -437,6 +439,16 @@ function makeExecutor(
           }
         }
 
+        // Without the credential first, and so before the approval: that sends nothing secret, and the
+        // reachability probe above has already contacted the endpoint. One that lists without a key
+        // (OpenRouter, a local server) is then checked at the cost of no extra question.
+        const bare: ProviderConfig = { name, module: yamlModule, model, ...(endpoint !== undefined ? { endpoint } : {}) };
+        const keyless = yield* confirmModel(adapterPlugin, bare, ctx, 'add-unlisted', 'Add', envVarName !== undefined);
+        if (typeof keyless === 'object') {
+          yield { type: 'result', value: { message: keyless.refusal } };
+          return;
+        }
+
         const permit = await ctx.gate({ gate: 'add', subject: name, fallback: false,
                                         label: `Add provider profile **"${name}"** (${model} via ${yamlModule})?` });
         if (!permit.allowed) {
@@ -448,16 +460,13 @@ function makeExecutor(
           ? { [credentialKey ?? 'apiKey']: `\${${envVarName}}` }
           : undefined;
 
-        // After the approval, never before it: listing sends the credential to the endpoint, and until
-        // the profile is approved nothing has agreed that it may go there.
-        const refusal = yield* confirmModel(adapterPlugin, {
-          name, module: yamlModule, model,
-          ...(endpoint    !== undefined ? { endpoint    } : {}),
-          ...(credentials !== undefined ? { credentials } : {}),
-        }, ctx, 'add-unlisted', 'Add');
-        if (refusal !== undefined) {
-          yield { type: 'result', value: { message: refusal } };
-          return;
+        // With the credential only after the approval: until then nothing has agreed it may go there.
+        if (keyless === 'unchecked' && credentials !== undefined) {
+          const keyed = yield* confirmModel(adapterPlugin, { ...bare, credentials }, ctx, 'add-unlisted', 'Add');
+          if (typeof keyed === 'object') {
+            yield { type: 'result', value: { message: keyed.refusal } };
+            return;
+          }
         }
 
         const block = buildProviderBlock({
@@ -547,9 +556,9 @@ function makeExecutor(
         if (patch.model !== undefined || patch.endpoint !== undefined) {
           const plugin = findLoadedAdapter(cur.module, path.dirname(configPath), pluginNameToOrigPath);
           if (plugin !== undefined) {
-            const refusal = yield* confirmModel(plugin, next, ctx, 'update-unlisted', 'Update');
-            if (refusal !== undefined) {
-              yield { type: 'result', value: { message: refusal } };
+            const verdict = yield* confirmModel(plugin, next, ctx, 'update-unlisted', 'Update');
+            if (typeof verdict === 'object') {
+              yield { type: 'result', value: { message: verdict.refusal } };
               return;
             }
           }

@@ -96,7 +96,8 @@ export async function checkProviderModel(
       new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(new Error(`no answer within ${timeoutMs / 1000}s`)), { once: true })),
     ]);
   } catch (e) {
-    const why = e instanceof Error ? e.message : String(e);
+    // An endpoint's error body is often pretty-printed JSON; the reason is shown on one line.
+    const why = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ');
     return { kind: 'unchecked', reason: why.length > 200 ? `${why.slice(0, 200)}…` : why };
   }
   if (ids.length === 0) return { kind: 'unchecked', reason: 'the endpoint listed no models' };

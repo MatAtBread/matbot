@@ -69,8 +69,8 @@ test('openai-compat lists beside its chat-completions URL, or under a bare base'
     const a = new OpenAICompatAdapter();
     assert.deepEqual(await a.models(cfg({ endpoint: `${s.base}/v1/chat/completions`, credentials: { apiKey: 'sk-o' } })),
                      ['gpt-4o', 'gemini-2.5-flash']);
-    await a.models(cfg({ endpoint: `${s.base}/v1beta/openai/` }));
-    assert.deepEqual(s.seen, ['/v1/models Bearer sk-o', '/v1beta/openai/models Bearer']);
+    await a.models(cfg({ endpoint: `${s.base}/v1beta/openai/`, credentials: { apiKey: 'g' } }));
+    assert.deepEqual(s.seen, ['/v1/models Bearer sk-o', '/v1beta/openai/models Bearer g']);
   } finally { await s.close(); }
 });
 
@@ -107,12 +107,12 @@ test('a list that never answers is given up on, even by an adapter that ignores 
 
 // ── provider add ─────────────────────────────────────────────────────────────
 
-async function runAdd(model: string, answers: string[], models: () => Promise<string[]>) {
+async function runAdd(model: string, answers: string[], models: (c: ProviderConfig) => Promise<string[]>) {
   const dir  = await mkdtemp(join(tmpdir(), 'mb-provider-model-'));
   const file = join(dir, 'matbot.yaml');
   await writeFile(file, 'providers:\n  other:\n    module: x\n    model: y\n', 'utf8');
   const listedWith: ProviderConfig[] = [];
-  const adapter = { models: async (c: ProviderConfig) => { listedWith.push(c); return models(); } } as unknown as ProviderAdapter;
+  const adapter = { models: async (c: ProviderConfig) => { listedWith.push(c); return models(c); } } as unknown as ProviderAdapter;
   const prompts: string[] = [];
   const ask = (async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answers.shift() ?? CONFIRM_YES; }) as PromptFn;
   const ctx = {
@@ -132,14 +132,22 @@ async function runAdd(model: string, answers: string[], models: () => Promise<st
   return { prompts, providers, listedWith, message: result.value?.message ?? '', yaml: await readFile(file, 'utf8'), events };
 }
 
-test('add: an unlisted model is asked about only after the profile is approved, and a no names the closest', async () => {
-  const r = await runAdd('gpt-4o-mni', [CONFIRM_YES, CONFIRM_NO], async () => ['gpt-4o', 'gpt-4o-mini']);
+// As every hosted API does: OpenAI, Anthropic, Google, DeepSeek, Groq, Mistral and Together all refuse
+// to list without a key. OpenRouter and a local server do not.
+const keyed = (ids: string[]) => async (c: ProviderConfig): Promise<string[]> => {
+  if (c.credentials?.['apiKey'] === undefined) throw new Error('OpenAI-compat 401: Missing bearer authentication');
+  return ids;
+};
+const keyless = (ids: string[]) => async (): Promise<string[]> => ids;
 
-  // Listing sends the key, so the profile's own approval comes first.
+test('add: an endpoint that needs the key is asked about only after the profile is approved', async () => {
+  const r = await runAdd('gpt-4o-mni', [CONFIRM_YES, CONFIRM_NO], keyed(['gpt-4o', 'gpt-4o-mini']));
+
   assert.equal(r.prompts.length, 2);
   assert.match(r.prompts[0]!, /Add provider profile \*\*"oai"\*\*/);
   assert.match(r.prompts[1]!, /"gpt-4o-mni"\*\* is not among the 2 models the endpoint lists\. Closest: gpt-4o-mini/);
-  assert.deepEqual(r.listedWith[0]!.credentials, { apiKey: 'sk-real' });
+  // The first attempt carried no credential; only the one after the approval did.
+  assert.deepEqual(r.listedWith.map(c => c.credentials), [undefined, { apiKey: 'sk-real' }]);
 
   assert.match(r.message, /the user declined/);
   assert.match(r.message, /Closest: gpt-4o-mini/);
@@ -147,24 +155,42 @@ test('add: an unlisted model is asked about only after the profile is approved, 
   assert.doesNotMatch(r.yaml, /oai:/);
 });
 
-test('add: declining the profile itself lists nothing', async () => {
-  const r = await runAdd('gpt-4o', [CONFIRM_NO], async () => ['gpt-4o']);
-  assert.equal(r.listedWith.length, 0);
+test('add: an endpoint that lists without a key is checked before the approval, sending none', async () => {
+  const r = await runAdd('gpt-4o-mni', [CONFIRM_NO], keyless(['gpt-4o', 'gpt-4o-mini']));
+  assert.equal(r.prompts.length, 1);
+  assert.match(r.prompts[0]!, /is not among the 2 models/);
+  assert.ok(r.listedWith.every(c => c.credentials === undefined));
+  assert.equal(r.providers.has('oai'), false);
+});
+
+test('add: declining the profile itself sends the key nowhere', async () => {
+  const r = await runAdd('gpt-4o', [CONFIRM_NO], keyed(['gpt-4o']));
+  assert.ok(r.listedWith.every(c => c.credentials === undefined));
   assert.equal(r.providers.has('oai'), false);
 });
 
 test('add: a listed model needs no second question, and an unlisted one confirmed is added as typed', async () => {
-  const listed = await runAdd('gpt-4o', [CONFIRM_YES], async () => ['gpt-4o']);
-  assert.equal(listed.prompts.length, 1);
-  assert.equal(listed.providers.get('oai')?.model, 'gpt-4o');
+  for (const models of [keyed(['gpt-4o']), keyless(['gpt-4o'])]) {
+    const listed = await runAdd('gpt-4o', [CONFIRM_YES], models);
+    assert.equal(listed.prompts.length, 1);
+    assert.equal(listed.providers.get('oai')?.model, 'gpt-4o');
 
-  const confirmed = await runAdd('my-azure-deployment', [CONFIRM_YES, CONFIRM_YES], async () => ['gpt-4o']);
-  assert.equal(confirmed.prompts.length, 2);
-  assert.equal(confirmed.providers.get('oai')?.model, 'my-azure-deployment');
+    const confirmed = await runAdd('my-azure-deployment', [CONFIRM_YES, CONFIRM_YES], models);
+    assert.equal(confirmed.prompts.length, 2);
+    assert.equal(confirmed.providers.get('oai')?.model, 'my-azure-deployment');
+  }
 });
 
-test('add: an endpoint that cannot list is not a reason to refuse', async () => {
+test('add: an endpoint that cannot list is not a reason to refuse, and says so once', async () => {
   const r = await runAdd('gpt-4o', [CONFIRM_YES], async () => { throw new Error('OpenAI-compat 404: not found'); });
   assert.equal(r.providers.get('oai')?.model, 'gpt-4o');
-  assert.ok(r.events.some(e => e.type === 'stdout' && /not checked/.test((e as { chunk: string }).chunk)));
+  assert.equal(r.events.filter(e => e.type === 'stdout' && /not checked/.test((e as { chunk: string }).chunk)).length, 1);
+});
+
+test('openai-compat sends no authorization header without a key', async () => {
+  const s = await serve((_q, r) => json(r, { data: [{ id: 'llama3:latest' }] }));
+  try {
+    assert.deepEqual(await new OpenAICompatAdapter().models(cfg({ endpoint: `${s.base}/v1/chat/completions` })), ['llama3:latest']);
+    assert.deepEqual(s.seen, ['/v1/models ']);
+  } finally { await s.close(); }
 });
