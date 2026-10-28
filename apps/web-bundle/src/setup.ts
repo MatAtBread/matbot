@@ -3,6 +3,7 @@
 // are unchanged.
 import type { AvailableProvider, ProviderDraft } from '@matatbread/matbot-browser';
 import type { MatbotPluginSpec, ProviderAdapter, ProviderConfig } from '@matatbread/matbot-plugin-api';
+import { MODEL_LIST_TIMEOUT_MS, closestIds, modelListed } from '@matatbread/matbot-plugin-api';
 export type { AvailableProvider, ProviderDraft };
 
 const CSS = `
@@ -31,20 +32,18 @@ function ensureStyles(): void {
 }
 
 // Imported by package name, which resolves through the bundle's import map as the boot load will, so this
-// is the same module instance the provider later runs in. Only for a self-contained adapter: an endpoint
-// adapter could list nothing before the URL and key it would list with have been typed.
-const adapters = new Map<string, Promise<ProviderAdapter | undefined>>();
-function adapterFor(a: AvailableProvider, config: ProviderConfig): Promise<ProviderAdapter | undefined> {
-  let p = adapters.get(a.module);
+// is the same module instance the provider later runs in. The spec is cached rather than an adapter, since
+// a factory may pick its adapter by the config (google, by the endpoint's path).
+const specs = new Map<string, Promise<MatbotPluginSpec | undefined>>();
+async function adapterFor(a: AvailableProvider, config: ProviderConfig): Promise<ProviderAdapter | undefined> {
+  let p = specs.get(a.module);
   if (!p) {
-    p = (import(/* @vite-ignore */ a.module) as Promise<Record<string, unknown>>).then(mod => {
-      const spec = (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined;
-      return spec?.provider?.(config);
-    });
-    p.catch(() => adapters.delete(a.module));
-    adapters.set(a.module, p);
+    p = (import(/* @vite-ignore */ a.module) as Promise<Record<string, unknown>>).then(mod =>
+      (mod['plugin'] ?? (mod['default'] as Record<string, unknown> | undefined)?.['plugin']) as MatbotPluginSpec | undefined);
+    p.catch(() => specs.delete(a.module));
+    specs.set(a.module, p);
   }
-  return p;
+  return (await p)?.provider?.(config);
 }
 
 function field(labelText: string, input: HTMLElement): HTMLLabelElement {
@@ -100,6 +99,40 @@ export function runProviderSetup(
     modelField.appendChild(modelList);
     const apiKeyField   = field('API key', apiKey);
 
+    // An endpoint adapter can list nothing before the URL and key it lists with are typed, so its models
+    // are suggestions under the text field rather than a drop-down: an endpoint accepts names it does not
+    // list (an alias, an Azure deployment), which a free field still allows.
+    const suggestions = document.createElement('datalist');
+    suggestions.id = `mb-setup-models-${crypto.randomUUID()}`;
+    model.setAttribute('list', suggestions.id);
+    modelField.appendChild(suggestions);
+    let listed: string[] | undefined;
+    let warnedFor: string | undefined;
+    let listing = 0;
+    const listRemote = (): void => {
+      const a = available[Number(type.value)];
+      const asked = ++listing;
+      listed = undefined;
+      suggestions.replaceChildren();
+      const ep = endpoint.value.trim(), key = apiKey.value.trim();
+      if (!a || a.selfContained || !ep || !key) return;
+      const config: ProviderConfig = { name: name.value.trim(), module: a.module, model: model.value.trim(),
+                                       endpoint: ep, credentials: { apiKey: key } };
+      void adapterFor(a, config).then(async adapter => {
+        if (asked !== listing || !adapter?.models) return;
+        const ids = await adapter.models(config, AbortSignal.timeout(MODEL_LIST_TIMEOUT_MS));
+        if (asked !== listing || ids.length === 0) return;
+        listed = ids;
+        suggestions.replaceChildren(...[...ids].sort(new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare).map(id => {
+          const o = document.createElement('option');
+          o.value = id;
+          return o;
+        }));
+      }).catch((e: unknown) => console.warn(`[matbot] could not list the models of ${a.label}:`, e));
+    };
+    endpoint.addEventListener('change', listRemote);
+    apiKey.addEventListener('change', listRemote);
+
     const showModels = (ids: string[] | undefined, hint: string | undefined): void => {
       modelList.replaceChildren(...(ids ?? ['Loading models…']).map(id => {
         const o = document.createElement('option');
@@ -148,7 +181,7 @@ export function runProviderSetup(
         }
       }, (e: unknown) => console.warn(`[matbot] could not load ${a.module}:`, e));
     };
-    type.addEventListener('change', applyHints);
+    type.addEventListener('change', () => { applyHints(); listRemote(); });
     applyHints();
 
     const err = document.createElement('div');
@@ -180,12 +213,20 @@ export function runProviderSetup(
         if (!draft.endpoint) { err.textContent = 'An endpoint URL is required.'; return; }
         if (!draft.model)  { err.textContent = 'A model name is required.'; return; }
         if (!draft.apiKey) { err.textContent = 'An API key is required.';  return; }
+        // Once per spelling, so a name the endpoint accepts without listing it is a second click away.
+        if (listed !== undefined && !modelListed(draft.model, listed) && warnedFor !== draft.model) {
+          warnedFor = draft.model;
+          const near = closestIds(draft.model, listed);
+          err.textContent = `"${draft.model}" is not among the ${listed.length} models this endpoint lists.`
+            + (near.length > 0 ? ` Closest: ${near.join(', ')}.` : '') + ' Save again to use it anyway.';
+          return;
+        }
       }
       overlay.remove();
       resolve(draft);
     };
     save.addEventListener('click', submit);
-    apiKey.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+    for (const input of [apiKey, model]) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
     row.appendChild(save);
 
     if (opts.cancelable) {
@@ -201,8 +242,8 @@ export function runProviderSetup(
       field('Name', name),
       field('Adapter', type),
       endpointField,
-      modelField,
       apiKeyField,
+      modelField,
       err, row,
     );
     overlay.appendChild(card);

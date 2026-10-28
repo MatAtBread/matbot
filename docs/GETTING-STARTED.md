@@ -404,8 +404,8 @@ simply not reported; pass a `gate` to ask about one by name.
 
 The gate ids are `tools.overwrite` (subject: the tool name), `plugin.add` /
 `plugin.provision-deps` / `plugin.remove` / `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load`,
-`provider.add` / `provider.add-unverified` / `provider.update` / `provider.update-unverified` /
-`provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the
+`provider.add` / `provider.add-unverified` / `provider.add-unlisted` / `provider.update` /
+`provider.update-unverified` / `provider.update-unlisted` / `provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the
 name it is *registered* under, so one answer covers both the node and browser implementations of a
 tool. The list is open: a plugin can declare ids of its own, and an id the policy does not recognise
 is asked about rather than allowed.

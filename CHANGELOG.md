@@ -40,9 +40,17 @@ churn and less likely to affect a consumer who doesn't use them.
   beside the `validate` hooks, so a validator registered there keeps working until then. Removing it in
   0.5.0 is a breaking change: a validator still registered under the key will silently stop being consulted.
   Register a `validate` hook instead.
-- **`ProviderAdapter.models?(config)`** — the model ids an adapter can run, for a person choosing one. The
-  browser setup wizard offers them as a drop-down for a self-contained adapter; absent, or rejecting, it
-  asks for a model name as before.
+- **`ProviderAdapter.models?(config, signal?)`** — the model ids an adapter can run, for a person choosing
+  one and for catching a mistyped one. The browser setup wizard offers them as a drop-down for a
+  self-contained adapter; absent, or rejecting, it asks for a model name as before.
+- **`checkProviderModel(adapter, config, vault, timeoutMs?)`** — whether a profile's model is one its
+  endpoint lists: `listed`, `unlisted` (with the closest ids), or `unchecked` with the reason. It never
+  throws, and gives up after 8s (`MODEL_LIST_TIMEOUT_MS`) even for an adapter that ignores the signal.
+  Credentials are resolved through the vault, so one the vault does not hold sends nothing. Listing sends
+  the credential, so a caller asks only once it may go to that endpoint. `modelListed(model, ids)` counts
+  names an endpoint accepts without listing them: an undated alias of a dated id, a `-latest` alias, a bare
+  name for an Ollama `:latest` tag, and Gemini's `models/` prefix. `closestIds(id, ids, n?)` ranks a near
+  spelling first, then shared name segments.
 - **`originGatedFetch(admit, input, init?)`** — `fetch`, with each URL a request reaches put to `admit`
   first: the one asked for, and each one a redirect leads to (#111). A `follow` request is followed one hop
   at a time as the platform would (303, and 301/302 after a POST, become a bodiless GET; 307/308 resend the
@@ -145,6 +153,25 @@ churn and less likely to affect a consumer who doesn't use them.
     `tools: false` too.
   - Sampling defaults to greedy (`topK: 1`) when tools are offered; a profile's own `topK` still wins.
   - `debug: true` logs each exchange whole.
+- **`provider-anthropic`, `provider-openai-compat`, `provider-google`** — implement `models`.
+  - Anthropic reads `/v1/models`, every page.
+  - OpenAI-compat reads the `/models` sibling of the chat-completions URL (or `<base>/models`). The list
+    includes non-chat models, since nothing in OpenAI's rows says which is which.
+  - Google reads the native `/models`, keeping only models that `generateContent`. Every id is returned
+    without its `models/` prefix.
+- **`tool-plugin`, `browser`** — `provider add` and `provider update` check the model against the endpoint's
+  list. One it does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`), not a
+  refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A refusal
+  names the closest listed ids, and an endpoint that cannot list is accepted unchecked, saying so. On
+  node, `add-unlisted` is asked after `add`, because listing sends the credential and only `add` agrees
+  that it may go there. `update` checks only when the model or endpoint changes, and only where `cur`'s
+  credential already went: one that would have followed the endpoint to another origin is already
+  detached. The browser's `ProviderAdmin` takes an optional `get(name)` so an update can be checked.
+- **`cli`** — the first-run setup wizard checks the model once the endpoint and key are entered. An unlisted
+  one names the closest ids and asks again; Enter keeps the name as typed.
+- **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field, once the
+  endpoint and key are typed (the key now comes before the model). An unlisted model is warned about once
+  on save, naming the closest ids, and saving again keeps it.
 - **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
   page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
   - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a

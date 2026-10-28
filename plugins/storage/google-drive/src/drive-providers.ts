@@ -105,5 +105,6 @@ export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotM
       await driveSet.remove(name);
       return services.providers.remove(name);
     },
+    get: name => services.providers.get(name),
   };
 }

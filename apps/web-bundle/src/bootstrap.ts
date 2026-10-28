@@ -324,6 +324,7 @@ export async function boot(env: BootEnv): Promise<void> {
     add:    applyDraft,
     update: updateProvider,
     remove: removeProvider,
+    get:    name => providers.get(name),
   }));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).

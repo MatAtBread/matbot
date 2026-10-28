@@ -259,4 +259,26 @@ export class AnthropicAdapter implements ProviderAdapter {
     // Lightweight check — just verify credentials key is present
     return { status: 'ok', latencyMs: 0 };
   }
+
+  async models(config: ProviderConfig, signal?: AbortSignal): Promise<string[]> {
+    const endpoint = config.endpoint ?? DEFAULT_ENDPOINT;
+    const ids: string[] = [];
+    let after: string | undefined;
+    // Bounded: a page cursor an endpoint keeps returning would otherwise loop for ever.
+    for (let page = 0; page < 10; page++) {
+      const url = new URL(`${endpoint}/v1/models`);
+      url.searchParams.set('limit', '1000');
+      if (after !== undefined) url.searchParams.set('after_id', after);
+      const res = await fetch(url, {
+        headers: { 'x-api-key': config.credentials?.['apiKey'] ?? '', 'anthropic-version': ANTHROPIC_VERSION },
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      const body = await res.json() as { data?: Array<{ id?: unknown }>; has_more?: boolean; last_id?: string };
+      for (const m of body.data ?? []) if (typeof m.id === 'string') ids.push(m.id);
+      if (body.has_more !== true || body.last_id === undefined) break;
+      after = body.last_id;
+    }
+    return ids;
+  }
 }

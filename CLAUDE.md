@@ -751,8 +751,10 @@ no human behind them — `invokeTool`, a trigger, `POST /tools/:name`. "Always a
 therefore means anything that can reach the HTTP endpoint (the model itself, through its own `http`
 or `bash` tool) can install any specifier with nobody asked. That is what the answer *says*, and it is
 why the per-subject form is offered first and is the one to reach for. Two other things a policy
-author should be told rather than discover: the provider path **chains two gates**
-(`add-unverified` → `add`), so one user-visible operation can cost two decisions; and a collision
+author should be told rather than discover: the provider path **chains gates**
+(`add-unverified` → `add` → `add-unlisted`), so one user-visible operation can cost up to three
+decisions — `add-unlisted` last because listing the endpoint's models sends the profile's credential,
+which nothing has agreed may go there until `add` is answered; and a collision
 raised while a *replacement* policy plugin is itself loading falls to the host's seeded default.
 
 ---

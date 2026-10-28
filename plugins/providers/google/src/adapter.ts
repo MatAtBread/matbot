@@ -169,4 +169,38 @@ export class GoogleAdapter implements ProviderAdapter {
   async health(): Promise<HealthStatus> {
     return { status: 'ok' };
   }
+
+  async models(config: ProviderConfig, signal?: AbortSignal): Promise<string[]> {
+    const ids: string[] = [];
+    let token: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const url = modelsUrl(config.endpoint ?? DEFAULT_ENDPOINT);
+      url.searchParams.set('pageSize', '1000');
+      if (token !== undefined) url.searchParams.set('pageToken', token);
+      const res = await fetch(url, {
+        headers: { 'x-goog-api-key': config.credentials?.['apiKey'] ?? '' },
+        ...(signal !== undefined ? { signal } : {}),
+      });
+      if (!res.ok) throw new Error(`Google ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      const body = await res.json() as { models?: Array<{ name?: unknown; supportedGenerationMethods?: unknown }>; nextPageToken?: string };
+      for (const m of body.models ?? []) {
+        if (typeof m.name !== 'string') continue;
+        // Embedding and token-counting models are listed beside the generative ones.
+        const methods = m.supportedGenerationMethods;
+        if (Array.isArray(methods) && !methods.includes('generateContent')) continue;
+        ids.push(m.name.replace(/^models\//, ''));
+      }
+      if (!body.nextPageToken) break;
+      token = body.nextPageToken;
+    }
+    return ids;
+  }
+}
+
+// The API base, from either form `buildUrl` accepts: a base, or a full native URL naming a model.
+function modelsUrl(endpoint: string): URL {
+  const u = new URL(endpoint);
+  u.search = '';
+  u.pathname = `${u.pathname.replace(/\/models\/.*$/, '').replace(/\/+$/, '')}/models`;
+  return u;
 }

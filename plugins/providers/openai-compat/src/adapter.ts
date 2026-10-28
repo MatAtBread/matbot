@@ -262,4 +262,33 @@ export class OpenAICompatAdapter implements ProviderAdapter {
   async health(): Promise<HealthStatus> {
     return { status: 'ok' };
   }
+
+  // Every model the key can reach, chat or not: OpenAI's own list includes embeddings, TTS and image
+  // models, and nothing in a row says which is which. That is no obstacle to telling whether a name
+  // exists, which is what it is mostly asked.
+  async models(config: ProviderConfig, signal?: AbortSignal): Promise<string[]> {
+    const res = await fetch(modelsUrl(config.endpoint ?? DEFAULT_ENDPOINT), {
+      headers: {
+        'authorization': `Bearer ${config.credentials?.['apiKey'] ?? ''}`,
+        ...(config.credentials?.['organization']
+          ? { 'openai-organization': config.credentials['organization'] }
+          : {}),
+      },
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (!res.ok) throw new Error(`OpenAI-compat ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+    const body = await res.json() as { data?: Array<{ id?: unknown }> };
+    // Gemini's compat layer says `models/<id>`; the request names the bare id.
+    return (body.data ?? []).flatMap(m => typeof m.id === 'string' ? [m.id.replace(/^models\//, '')] : []);
+  }
+}
+
+// The endpoint is the chat-completions URL itself, so the list is its sibling. One that does not end in
+// `/chat/completions` is taken as the API base.
+function modelsUrl(endpoint: string): string {
+  const u = new URL(endpoint);
+  u.pathname = /\/chat\/completions\/?$/.test(u.pathname)
+    ? u.pathname.replace(/\/chat\/completions\/?$/, '/models')
+    : `${u.pathname.replace(/\/+$/, '')}/models`;
+  return u.toString();
 }

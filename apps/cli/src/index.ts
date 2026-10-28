@@ -4,7 +4,7 @@ import { installPlugin }                    from './install.js';
 import { MemoryStore }                     from '@matatbread/matbot-core/storage-base';
 import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
 import { nodePluginResolver }               from './plugin-resolver.js';
-import type { Principal, ProviderConfig, Session,
+import type { Principal, ProviderConfig, MatbotPluginSpec, Session,
               Store,
               MessageContent, UserContent, Usage } from '@matatbread/matbot-core';
 import { appendMessage, createMessage,
@@ -21,6 +21,7 @@ import { appendMessage, createMessage,
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
 import { defaultGate }                     from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
+import { checkProviderModel }              from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
 import { createAlsUsageCarrier }           from './usage-als.js';
 import { EnvFileVault }                     from './env-vault.js';
@@ -708,6 +709,27 @@ async function runSetupWizard(configPath: string): Promise<import('./config.js')
     );
     // Written to .env, which the boot vault reads after this.
     const keyName = apiKey ? await wizardVault.createSecret(varName, apiKey) : undefined;
+
+    // The model was typed before the endpoint and key it can be checked with, so it is checked here. An
+    // unlisted name may still be right (an alias, a deployment), so Enter keeps it.
+    const spec = (await import(chosen.name).catch(() => undefined) as { plugin?: MatbotPluginSpec } | undefined)?.plugin;
+    for (;;) {
+      const cfg: ProviderConfig = {
+        name: providerName, module: chosen.name, model,
+        ...(endpoint ? { endpoint } : {}),
+        ...(keyName !== undefined ? { credentials: { apiKey: `\${${keyName}}` } } : {}),
+      };
+      const adapter = spec?.provider?.(cfg);
+      if (adapter?.models === undefined) break;
+      const check = await checkProviderModel(adapter, cfg, wizardVault);
+      if (check.kind === 'unchecked') process.stderr.write(yellow(`Could not list the endpoint's models (${check.reason}); "${model}" is not checked.\n`));
+      if (check.kind !== 'unlisted') break;
+      process.stderr.write(yellow(`"${model}" is not among the ${check.count} models this endpoint lists.`
+        + (check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '') + '\n'));
+      const again = await ask(`Model name (Enter keeps "${model}")`);
+      if (!again || again === model) break;
+      model = again;
+    }
 
     // Reference the provider by package name — the location-independent form. It resolves via
     // node_modules when matbot is installed, and in a source checkout via resolvePluginSpecifiers'

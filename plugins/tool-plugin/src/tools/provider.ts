@@ -1,4 +1,4 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ProviderRegistry, MatbotPlugin,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ProviderRegistry, MatbotPlugin,
               ProviderToolContract, ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
 
 // Shared with the browser implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
@@ -7,7 +7,7 @@ declare module '@matatbread/matbot-plugin-api' {
     provider: ProviderToolContract;
   }
 }
-import { applyProviderPatch, credentialKeyName, movedCredentialKeys, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, credentialKeyName, movedCredentialKeys, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -270,6 +270,39 @@ async function checkEndpoint(url: string): Promise<string | null> {
   }
 }
 
+// ── Model check ───────────────────────────────────────────────────────────────
+
+// A model the endpoint does not list is put to a gate rather than refused: an endpoint accepts names it
+// does not list (an Azure deployment, an alias the matching does not know), and those must stay usable.
+// Returns the refusal to report, or undefined to go ahead.
+async function* confirmModel(
+  plugin: MatbotPlugin,
+  cfg:    ProviderConfig,
+  ctx:    ToolContext,
+  gate:   'add-unlisted' | 'update-unlisted',
+  verb:   'Add' | 'Update',
+): AsyncGenerator<ToolEvent<ToolResultOf<'provider'>>, string | undefined> {
+  const adapter = plugin.provider?.(cfg);
+  if (adapter?.models === undefined) return undefined;
+  yield { type: 'stdout', chunk: `Checking "${cfg.model}" against the endpoint's models …\n` };
+  const check = await checkProviderModel(adapter, cfg, ctx.vault);
+  switch (check.kind) {
+    case 'listed':
+      yield { type: 'stdout', chunk: `Model listed.\n` };
+      return undefined;
+    case 'unchecked':
+      yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
+      return undefined;
+    case 'unlisted': {
+      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
+      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
+                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
+      if (permit.allowed) return undefined;
+      return `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}`;
+    }
+  }
+}
+
 // ── Current provider detection ────────────────────────────────────────────────
 
 function currentProviderName(ctx: ToolContext): string | undefined {
@@ -334,9 +367,11 @@ function makeExecutor(
         // always the source string, and instantiateProvider resolves it to the adapter factory at use time.
         // We never write the raw `mod` the LLM supplied unless it resolves as-is.
         let yamlModule: string;
+        let adapterPlugin: MatbotPlugin;
 
         const loaded = findLoadedAdapter(mod, projectDir, pluginNameToOrigPath);
         if (loaded !== undefined) {
+          adapterPlugin = loaded;
           const spec = yamlSpecifierFor(loaded.name, projectDir, pluginNameToOrigPath, nameResolves);
           if (spec === undefined) {
             yield { type: 'error', message: `Adapter "${loaded.name}" is loaded but its module path could not be determined.` };
@@ -351,6 +386,7 @@ function makeExecutor(
               yield { type: 'error', message: `Module "${mod}" loaded but is not a provider adapter.` };
               return;
             }
+            adapterPlugin = justLoaded;
             // Prefer the canonical package name (location-independent) when it resolves; otherwise the
             // just-supplied `mod` resolved and loaded, so it is YAML-valid as written.
             yamlModule = nameResolves?.(justLoaded.name) ? justLoaded.name : mod;
@@ -411,6 +447,18 @@ function makeExecutor(
         const credentials = envVarName !== undefined
           ? { [credentialKey ?? 'apiKey']: `\${${envVarName}}` }
           : undefined;
+
+        // After the approval, never before it: listing sends the credential to the endpoint, and until
+        // the profile is approved nothing has agreed that it may go there.
+        const refusal = yield* confirmModel(adapterPlugin, {
+          name, module: yamlModule, model,
+          ...(endpoint    !== undefined ? { endpoint    } : {}),
+          ...(credentials !== undefined ? { credentials } : {}),
+        }, ctx, 'add-unlisted', 'Add');
+        if (refusal !== undefined) {
+          yield { type: 'result', value: { message: refusal } };
+          return;
+        }
 
         const block = buildProviderBlock({
           name,
@@ -491,6 +539,19 @@ function makeExecutor(
             }
           } else {
             yield { type: 'stdout', chunk: `Endpoint reachable.\n` };
+          }
+        }
+
+        // Before the confirmation, unlike add: `next` sends its credential only where `cur` already did,
+        // since one that would have followed the endpoint to another origin has been detached above.
+        if (patch.model !== undefined || patch.endpoint !== undefined) {
+          const plugin = findLoadedAdapter(cur.module, path.dirname(configPath), pluginNameToOrigPath);
+          if (plugin !== undefined) {
+            const refusal = yield* confirmModel(plugin, next, ctx, 'update-unlisted', 'Update');
+            if (refusal !== undefined) {
+              yield { type: 'result', value: { message: refusal } };
+              return;
+            }
           }
         }
 
@@ -698,7 +759,7 @@ When a user asks to add a new LLM or provider, ask for:
         },
         model: {
           type:        'string',
-          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update).',
+          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update). Checked against the models the endpoint lists, where it lists them; one it does not list needs the user to confirm it, and the refusal names the closest listed ids.',
         },
         endpoint: {
           // `['string','null']`, and likewise for parameters/maxRounds below: null is update's clear

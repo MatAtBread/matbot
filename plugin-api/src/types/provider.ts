@@ -265,9 +265,10 @@ export interface ProviderAdapter {
   ): AsyncIterable<CompletionEvent>;
   health(): Promise<HealthStatus>;
   /**
-   * The model ids this adapter can run under `config`, for a person choosing one (the browser setup
-   * wizard). Absent where the adapter cannot enumerate them, and a rejection means the same: the caller
-   * asks for a model name instead.
+   * The model ids this adapter can run under `config`, for a person choosing one (the setup wizards) and
+   * for `checkProviderModel`, which catches a mistyped one. Absent where the adapter cannot enumerate
+   * them, and a rejection means the same: the caller asks for a model name instead, or accepts it
+   * unchecked. `config` carries resolved credentials, which a remote list is sent with.
    */
-  models?(config: ProviderConfig): Promise<string[]>;
+  models?(config: ProviderConfig, signal?: AbortSignal): Promise<string[]>;
 }
