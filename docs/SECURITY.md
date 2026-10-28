@@ -127,6 +127,34 @@ authority, so it is not gated. A different profiles implementation could choose 
 - **Treat the UI's network as the authentication boundary.** Everyone who can reach the port can use the
   installation, by principle 1.
 - **An egress proxy** is the deployment-level control for where matbot may connect. The gates decide per
-  request; a proxy can enforce a policy that nothing in the process can lift.
+  request; a proxy can enforce a policy that nothing in the process can lift. See below.
+
+### When egress is controlled outside matbot
+
+An installation whose proxy or firewall decides where matbot may connect can turn off the per-origin
+gates. A gate set to `true` allows every subject:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-default-gate':
+    'http.request': true              # the http tool, any origin
+    'tool_function.connect': true     # a function's fetch / WebSocket, any function, any origin
+```
+
+These are two settings, not one switch, because the questions differ: an installation may let the `http`
+tool reach anything its proxy allows and still be asked about model-written functions. Other gates are not
+affected and should stay: `http.secret` (sending a vault key to an origin) and `tool_function.import`
+(including `node:http` and `node:net`) are not about where traffic may go.
+
+- **There is nothing between `true` and exact subjects.** A list matches whole strings. There is no
+  `https://*.example.com`, and `* <origin>` under `tool_function.connect` means any function reaching
+  that one origin. Patterns would be a different policy: replace `PermissionGate` with one that has them.
+- **A stored answer overrides the configured value.** Settings are layered per key: a stored answer wins
+  over `default_settings:` as a whole, not merged with it. If someone answered "Always allow requests to
+  `https://x`" before `true` was configured, the stored `['https://x']` is what applies, and other
+  origins are still asked about. `gate_action` `clear` for that gate restores the configured value.
+- **Enforce the proxy outside the process.** Node's `fetch` does not use `HTTP_PROXY`/`HTTPS_PROXY`
+  unless its proxy support is switched on, and code that escapes the in-process runner can open sockets
+  directly. A firewall that lets matbot's user out only through the proxy holds either way.
 - **Prefer narrow standing answers.** "Always allow every `plugin.add`" means anything that reaches the
   tool endpoint can install any plugin with nobody asked, and a loaded plugin has full access.
