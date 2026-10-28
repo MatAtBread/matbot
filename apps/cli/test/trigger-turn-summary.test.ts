@@ -39,9 +39,9 @@ test('an assistant message lists every tool call in its turn, across rounds, and
   assert.equal(turnSummary(messages, earlier[3]), '[Tool calls in this turn: bash]');
 });
 
-test('an assistant turn with no tool calls says so', () => {
+test('an assistant turn with no tool calls has no summary', () => {
   const reply = msg('assistant', [text('a')]);
-  assert.equal(turnSummary([msg('user', [text('q')]), reply], reply), '[Tool calls in this turn: none]');
+  assert.equal(turnSummary([msg('user', [text('q')]), reply], reply), undefined);
   assert.equal(turnSummary([], undefined), undefined);
 });
 

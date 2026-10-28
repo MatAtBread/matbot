@@ -206,8 +206,7 @@ export class TriggerManager implements Triggers {
         'Where a condition spans more than one basis, every requirement it states still applies.\n\n' +
         // The classifier sees text only; the rest of a turn reaches it as these summaries (turnSummary).
         'A bracketed line closing a message — "[Tool calls in this turn: …]", "[Files in this turn: …]" — ' +
-        'is a summary of what that message\'s turn held besides its text, and is evidence like the text. ' +
-        '"none" means no tool was called.\n\n' +
+        'is a summary of what that message\'s turn held besides its text, and is evidence like the text.\n\n' +
         'Match only on evidence actually present in the text above. A condition that stays silent costs ' +
         'nothing; one that fires wrongly is disruptive and expensive.\n\n' +
         `Judge only the "${subject.label}" — the other message is context for relational conditions, ` +
