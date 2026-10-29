@@ -310,6 +310,7 @@ export async function* runFunction(
   let wake: (() => void) | null = null;
   const emit = (ev: ToolEvent): void => { queue.push(ev); const w = wake; wake = null; w?.(); };
 
+  const runner = machine.FunctionRunner;
   const { tool, toolInContext } = makeToolBox(machine, {
     session: ctx.session,
     signal:  ctx.signal,
@@ -318,7 +319,12 @@ export async function* runFunction(
     // How a body reaches this session's own functions: they are never registered, so `tool.x()` finds
     // them only by carrying the turn's tools down, as the runner handed them to this call.
     ...(ctx.turnTools !== undefined ? { turnTools: ctx.turnTools } : {}),
-  }, { onEvent: emit });
+  }, {
+    onEvent: emit,
+    // The runner's, read once for this call: its tool calls are host code acting for the body, which a
+    // runner that tells the two apart must not count as the body's.
+    ...(runner?.hostCall !== undefined ? { hostCall: <T>(fn: () => T): T => runner.hostCall!(fn) } : {}),
+  });
 
   const context: ComposedCallContext = {
     callId:    ctx.callId,
@@ -329,7 +335,9 @@ export async function* runFunction(
     progress:  (pct, message) => emit({
       type: 'progress',
       pct:  Number.isFinite(pct) ? Math.max(0, Math.min(100, Math.round(pct))) : 0,
-      ...(message !== undefined && message !== '' ? { message } : {}),
+      // A string now, while the body is the caller: an object here would be stringified later, by
+      // whoever draws the event, running the body's `toString` as theirs.
+      ...(message !== undefined && message !== '' ? { message: String(message) } : {}),
     }),
     ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),

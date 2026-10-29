@@ -258,16 +258,19 @@ export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'>) => ToolProxy;
  *   await tool.some_tool(params);                     // bound context; a bad name is a compile error
  *   await toolInContext({ provider }).some_tool(...); // override one field for this call
  *
- * `tool` is a {@link ToolProxy} bound to `callContext`; `toolInContext(override)` returns a fresh proxy
- * with `override` merged over it (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
- * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. Built on
- * {@link invokeTool}/{@link toolResult}, which remain the low-level, dynamic-name seam.
+ * `tool` is a {@link ToolProxy} bound to `callContext`; `toolInContext({ provider })` returns a fresh proxy
+ * under that provider (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
+ * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. `hostCall` is
+ * a `FunctionRunner`'s, for a box whose caller is a body that runner runs: each call's params are
+ * copied and the call made through it. Built on {@link invokeTool}/{@link toolResult}, which remain the
+ * low-level, dynamic-name seam.
  */
 export function makeToolBox(
   machine:     MatbotMachine,
   defaultCall: InvokeToolOptions,
-  opts?:       { onEvent?: (event: ToolEvent) => void },
+  opts?:       { onEvent?: (event: ToolEvent) => void; hostCall?: <T>(fn: () => T) => T },
 ): { tool: ToolProxy; toolInContext: ToolBox } {
+  const host = opts?.hostCall;
   const build = (call: InvokeToolOptions): ToolProxy =>
     new Proxy({}, {
       get(_target, prop) {
@@ -276,7 +279,15 @@ export function makeToolBox(
         if (typeof prop !== 'string' || prop === 'then') return undefined;
         return async (params?: unknown): Promise<unknown> => {
           opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-          const value = await drainProxyResult(invokeTool(machine, prop, params ?? {}, call));
+          const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
+          let value: unknown;
+          if (host === undefined) value = await run(params ?? {});
+          else {
+            // Copied here, in the caller's code, so a getter or `toJSON` among the params runs as the
+            // caller's and nothing of the caller's is left to run past `hostCall` (FunctionRunner.hostCall).
+            const copy: unknown = structuredClone(params ?? {});
+            value = await host(() => run(copy));
+          }
           opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
           return value;
         };

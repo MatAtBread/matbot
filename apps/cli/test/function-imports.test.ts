@@ -327,10 +327,11 @@ test('the withheld globals are undefined, and a real import() is inert', async (
   const routed = runner.compile(`(async function () { return import('node:os'); })`);
   await assert.rejects(routed({} as never), /not a function/);
 
-  // And an import that gets past the routing — the published escape, since `Function` is only shadowed —
-  // is dead anyway: no vm import callback is installed.
+  // The published escape — code compiled in the global scope, reached through any function's
+  // `.constructor` — is refused before it compiles. (Were it to compile, its `import()` would be dead
+  // too: no vm import callback is installed.)
   const escaped = runner.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
-  await assert.rejects(escaped(noLoader), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING');
+  await assert.rejects(escaped(noLoader), /Function is not available to a function body/);
 });
 
 test('a body has no `this`, so the global it would be cannot hand back what is withheld', async () => {
@@ -358,8 +359,7 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
 
   const escaped = unbounded.compile(`(async function () { return (() => {}).constructor('return import("node:os")')(); })`);
-  await assert.rejects(escaped(noLoader), (e: { code?: string }) => e.code === 'ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING',
-                       'an unrouted import is still inert');
+  await assert.rejects(escaped(noLoader), /Function is not available to a function body/, 'the escape is still refused');
 
   // …and the bound really is off: this would be stopped under any positive limit.
   const slow = unbounded.compile(`(async function () { const until = Date.now() + 250; while (Date.now() < until) {} return 'done'; })`);

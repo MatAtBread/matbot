@@ -2,6 +2,7 @@ import { isBuiltin } from 'node:module';
 import vm from 'node:vm';
 import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
+import { BODY_FILE, hostCall, inBody } from './host-only.js';
 
 // The default, when this plugin's `timeout_ms` setting is absent. Far past any legitimate stretch of
 // computation between two awaits, and short enough that the daemon is back before anyone concludes it died.
@@ -12,8 +13,10 @@ const PENDING = 'matbot.functionRunner.pending';
 /**
  * Globals bound to `undefined` for a body, in two kinds because a consumer may want to word them
  * differently.
- * {@link WITHHELD} genuinely EXIST here and are being kept away — `eval` and `Function` among them,
- * knowing that `.constructor` reaches the latter anyway. {@link PHANTOM} never existed in a bare function
+ * {@link WITHHELD} genuinely EXIST here and are being kept away. `Function` is not among them: a name
+ * cannot keep a body from it, every function's `.constructor` being the same object, so the object itself
+ * refuses a body instead (`host-only.ts`). `eval` is, because replacing the global would change what a
+ * DIRECT `eval(…)` means in every library that uses one. {@link PHANTOM} never existed in a bare function
  * expression at all, and are shadowed so that node's types — which the check gate loads to type
  * `import('node:…')` — cannot make one of them typecheck and then fail at the first call.
  *
@@ -32,14 +35,14 @@ const PENDING = 'matbot.functionRunner.pending';
  * zeroed, so a body can read leftover bytes of other recent allocations in this process. That was equally
  * true after the import, and a body that can `fetch` is not being kept from data.
  */
-const WITHHELD = ['process', 'globalThis', 'global', 'eval', 'Function'] as const;
+const WITHHELD = ['process', 'globalThis', 'global', 'eval'] as const;
 const PHANTOM  = ['require', 'module', 'exports', '__dirname', '__filename'] as const;
 const SHADOWED = [...WITHHELD, ...PHANTOM] as const;
 
 // A vm timeout bounds only code started by a vm script, so each call runs through this one: it pops the
 // thunk pushed just before it runs. LIFO is what makes a nested call safe — one body's tool call can start
 // another function before its first await, inside the outer script — each run taking its own thunk.
-const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})].pop()()`, { filename: 'tool_function' });
+const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})].pop()()`, { filename: BODY_FILE });
 
 /** This runner's reading of its settings: the declared restriction, plus the time bound only it reads. */
 export interface VmRunSettings extends FunctionRunSettings {
@@ -63,7 +66,7 @@ export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: read
  *
  * It also narrows what a body can reach. `vm` is not a capability boundary — this runs in THIS context —
  * but a body is meant to be a constrained place to compute, and an install that chose `docker-bash` over
- * `bash` has not chosen to hand `node:fs` to model-authored code. Two parts:
+ * `bash` has not chosen to hand `node:fs` to model-authored code. Three parts:
  *
  *   - {@link SHADOWED} globals are bound to `undefined` in the wrapper. `process.getBuiltinModule('node:fs')`
  *     reaches every builtin with no import at all, so without this the import gate would be decorative.
@@ -76,11 +79,15 @@ export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: read
  *     `--experimental-vm-modules`, and `USE_MAIN_CONTEXT_DEFAULT_LOADER` is accepted only as the option
  *     itself, where it gates nothing.)
  *
- * Stated honestly, because it is not a sandbox: `(()=>{}).constructor('return process')()` recovers the
- * real `process` in one line, and the idiom is in every escape writeup ever published. This raises the
- * cost of unauthorised access from "call a documented API" to "know a published trick", and makes the
- * intended path gated, configurable and revocable. An install needing a real boundary runs bodies in
- * another process.
+ *   - the function constructors and `process.getBuiltinModule` refuse a body, however it reaches them
+ *     (`(()=>{}).constructor('return process')()` recovered the real `process` in one line). That
+ *     closes the global scope to it, and with it every name shadowed above; see `host-only.ts`.
+ *
+ * Stated honestly, because it is not a sandbox: a body shares this process's built-ins and can rewrite
+ * them — `Object.prototype`, `JSON`, `Headers.prototype` — so code that is trying to interfere with matbot
+ * can. What this stops is a body REACHING past the gates, which is what an over-eager model does: the
+ * intended path is gated, configurable and revocable, and the other one says why it is closed. A boundary
+ * against deliberate tampering needs a context, or a process, of its own.
  *
  * `limitMs` of `0` removes the TIME bound and nothing else. That matters because the two were once the
  * same switch: a timeout of `0` seeded no runner at all, which is a documented way to run bodies
@@ -142,9 +149,11 @@ export function createVmFunctionRunner(
         throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it.${
           projectDir !== undefined ? ` Install it in ${projectDir}, where matbot.yaml is.` : ''}`);
       }
-      return import(target, options);
+      // As host code: a module's own top-level may compile code, and it is not the body's.
+      return hostCall(() => import(target, options));
     },
     canonicalImport: canonical,
+    hostCall,
     withheldGlobals: SHADOWED,
     compile(source) {
       // Erasure and the import routing are both this runner's: it is handed a TypeScript expression and
@@ -156,7 +165,9 @@ export function createVmFunctionRunner(
       // name its own rewrite used; that name is private to this file, which is why a body may have a
       // parameter called the same thing. It binds `fetch` and `WebSocket` too, to the gated pair the call
       // is handed, so a body's own spelling reaches them; `globalThis.fetch` is out of reach with
-      // `globalThis`, and the constructor escape reaches everything regardless.
+      // `globalThis`, and code compiled in the global scope, which would see the real ones, is refused.
+      // Compiled under BODY_FILE, which is how a function the body declares is told from host code when it
+      // is called later — as a `toJSON`, a getter or a listener — outside the call.
       //
       // The inner one is strict, so the body is: called with no receiver, a sloppy body's `this` is the
       // real global, and `this.process` would hand back everything the outer one shadows. Strictness goes
@@ -165,7 +176,7 @@ export function createVmFunctionRunner(
       // from swallowing the closing parenthesis.
       const outer = vm.runInThisContext(
         `(function (${SHADOWED.join(', ')}) { return function (${ROUTE}, fetch, WebSocket) { 'use strict'; return (${fnExpr}\n); }; })`,
-        { filename: 'tool_function' },
+        { filename: BODY_FILE },
       ) as (...shadows: undefined[]) => (route: unknown, f: typeof fetch, ws: typeof WebSocket) => (...args: unknown[]) => Promise<unknown>;
       const bind = outer();
       return (call, ...args) => {
@@ -183,7 +194,7 @@ export function createVmFunctionRunner(
         try {
           // No `timeout` key at all when the bound is off: vm rejects a non-positive one, and this is the
           // only thing a bound of 0 turns off.
-          pending = invoke.runInThisContext(limit > 0 ? { timeout: limit } : {}) as Promise<unknown>;
+          pending = inBody(() => invoke.runInThisContext(limit > 0 ? { timeout: limit } : {}) as Promise<unknown>);
         } catch (e) {
           if ((e as { code?: unknown }).code !== 'ERR_SCRIPT_EXECUTION_TIMEOUT') return Promise.reject(e);
           pending = Promise.reject(Object.assign(

@@ -144,8 +144,18 @@ export interface FunctionRunner {
    */
   canonicalImport?(spec: string): string;
   /**
+   * Run `fn` as host code acting for a body — a tool call the body made. A runner that tells a body's code
+   * from the host's (node's refuses a body the function constructors and `process.getBuiltinModule`,
+   * however it reaches them) must not count `fn` as the body's, or a tool that compiles code of its own
+   * would be refused for being called from one.
+   *
+   * The consumer copies what the body handed it BEFORE calling this, so nothing of the body's — a getter,
+   * a `toString`, a `toJSON` — runs inside `fn`. Absent ⇒ the consumer calls `fn` directly.
+   */
+  hostCall?<T>(fn: () => T): T;
+  /**
    * Identifiers a body does NOT have — anything this runner withholds, shadows or never binds (node's
-   * withholds `process`, `globalThis`, `global`, `eval` and `Function`, and names the phantom
+   * withholds `process`, `globalThis`, `global` and `eval`, and names the phantom
    * `require`/`module`/`__dirname` too, which never existed in a bare function expression but whose node
    * types would otherwise make one typecheck and then fail at the first call).
    *
