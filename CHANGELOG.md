@@ -31,9 +31,11 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`function-runner-node`** — the function constructors (`Function`, and every function's
   `.constructor`) and `process.getBuiltinModule` refuse a body however it reaches them, and are unchanged
   for everything else. `(()=>{}).constructor('return process')()` compiled code in the global scope,
-  around every withheld global and gate. A body is told by its frames on the stack and by an
-  `AsyncLocalStorage` span, so a `toJSON`, getter or listener run by matbot after the body returned is
-  still the body's; a tool it calls, or a module it imports, is not. `Function` is no longer withheld by
+  around every withheld global and gate. Whose call it is is decided by the nearest code on the stack, so
+  a `toJSON`, getter or listener of the body's run by matbot after it returned is still the body's, while
+  a tool it calls, or a package it was granted, is trusted as itself: a granted package may compile code
+  when the body calls it, but a callback of the body's that it runs may not. With no code above it, an
+  `AsyncLocalStorage` span decides (a constructor handed to `promise.then`). `Function` is no longer withheld by
   name, which changes the environment fingerprint: stored functions report `checkedElsewhere` until
   checked again.
 - **`tool-types`** — `ESCAPE-GATE`, with a runner loaded: a body is refused `Function`, `.constructor` on

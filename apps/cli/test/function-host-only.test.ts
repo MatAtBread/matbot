@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { makeToolBox } from '../../../plugin-api/src/index.ts';
 import type { MatbotMachine, Tool, InvokeToolOptions } from '../../../plugin-api/src/index.ts';
 import { createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 // The runner's one hole: shadowing `process` and `globalThis` by NAME left every function's `.constructor`
 // — a property, not a name — compiling strings in the global scope, where the real ones are. So the
@@ -26,8 +30,8 @@ test('every route to a function constructor is refused to a body', async () => {
     `await null; await new Promise(r => setTimeout(r, 1)); return console.log.constructor('return 1')();`,
     `return new Promise((res, rej) => setTimeout(() => { try { res(console.log.constructor('return 1')()); } catch (e) { rej(e); } }, 1));`,
     `return Promise.resolve('return 1').then(Function).then(g => g());`,
-    // A function the body names after the runner's own boundary is still body code.
-    `function matbotHostCall() { return console.log.constructor('return 1')(); } return matbotHostCall();`,
+    // Named as anything at all, a function the body declares is body code.
+    `function hostCall() { return console.log.constructor('return 1')(); } return hostCall();`,
     // Tampering with the stack it is judged by makes it unreadable, which is refused.
     `Error.stackTraceLimit = 0; return console.log.constructor('return 1')();`,
     `Error.prepareStackTrace = () => []; return console.log.constructor('return 1')();`,
@@ -85,6 +89,26 @@ test("a tool the body calls keeps the constructors, and the body's params cannot
   await assert.rejects(body(`return a.compiles({ get x() { return console.log.constructor('return 1')(); } });`)(noLoader, tool), REFUSED);
   // A function cannot be copied at all, so none reaches the tool to be called as host code.
   await assert.rejects(body(`return a.compiles({ toString() { return 'x'; } });`)(noLoader, tool), /could not be cloned/);
+});
+
+// A package the user granted is trusted as ITSELF: its own code may compile strings when the body calls it
+// (a schema compiler, a template engine), but a callback of the body's that it runs is still the body's.
+// Written to a real file, because that is what a granted package is and what the check looks for.
+const pkgFile = join(await mkdtemp(join(tmpdir(), 'host-only-pkg-')), 'pkg.mjs');
+await writeFile(pkgFile, `
+export const compile = src => new Function(src);
+export const callBack = cb => cb();
+export const later = cb => new Promise((res, rej) => setTimeout(() => { try { res(cb()); } catch (e) { rej(e); } }, 1));
+`);
+const pkg = await import(pathToFileURL(pkgFile).href) as Record<string, unknown>;
+
+test("a granted package's own code may compile strings; the body's code through it may not", async () => {
+  assert.equal(await body(`return a.compile('return 41 + 1')();`)(noLoader, pkg), 42);
+  await assert.rejects(body(`return a.callBack(() => console.log.constructor('return 1')());`)(noLoader, pkg), REFUSED);
+  await assert.rejects(body(`return a.later(() => console.log.constructor('return 1')());`)(noLoader, pkg), REFUSED);
+  // Handing the package the constructor itself is the body's call, made by the package's code: allowed,
+  // as anything the trusted package does with what it is given is.
+  assert.equal(typeof await body(`return a.callBack(() => 1);`)(noLoader, pkg), 'number');
 });
 
 test('a granted import loads as host code', async () => {
