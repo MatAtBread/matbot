@@ -39,9 +39,9 @@ test('an assistant message lists every tool call in its turn, across rounds, and
   assert.equal(turnSummary(messages, earlier[3]), '[Tool calls in this turn: bash]');
 });
 
-test('an assistant turn with no tool calls has no summary', () => {
+test('an assistant turn with no tool calls says so', () => {
   const reply = msg('assistant', [text('a')]);
-  assert.equal(turnSummary([msg('user', [text('q')]), reply], reply), undefined);
+  assert.equal(turnSummary([msg('user', [text('q')]), reply], reply), '[Tool calls in this turn: none]');
   assert.equal(turnSummary([], undefined), undefined);
 });
 
@@ -85,4 +85,14 @@ test('a user message that is only an attachment is still judged', async () => {
   assert.equal(prompts.length, 1);
   assert.match(prompts[0]!, /PRECEDING ASSISTANT MESSAGE \(earlier\) ===\n\(none\)\n\n/);
   assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\n\[Files in this turn: def\.pdf \(application\/pdf\)\]\n\n/);
+});
+
+test('on the user surface, the preceding reply says it called no tools', async () => {
+  const { services, hooks, prompts } = machine(trigger('ephemeral'));
+  await setupTriggers(services);
+  const messages = [msg('user', [text('q0')]), msg('assistant', [text('a0')]), msg('user', [text('q1')])];
+  await hooks.get('screen')!({ session: { id: 's', version: '1', messages }, signal, config: { provider: 'p', traceId: 'tr' } } as never);
+  await hooks.get('followup')!({ session: { id: 's', version: '1', messages: [...messages, msg('assistant', [text('a1')])] }, signal, resubmitDepth: 0, config: { provider: 'p', traceId: 'tr' } } as never);
+  assert.match(prompts[0]!, /PRECEDING ASSISTANT MESSAGE \(earlier\) ===\na0\n\n\[Tool calls in this turn: none\]\n\n/);
+  assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\nq1\n\n=== CONDITIONS/);
 });

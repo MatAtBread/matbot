@@ -9,6 +9,16 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.4.24
+
+### Optional
+
+- **`triggers`** — an assistant message with no tool calls in its turn is summarised to the classifier as
+  `[Tool calls in this turn: none]`, on both surfaces: as the reply being judged, and as the preceding
+  message beside a judged user message. In 0.4.23 such a turn had no line, which the classifier could not
+  tell from a summary it was not shown, so a condition on a reply made without tools could only be
+  guessed at. A user message still reports only the files attached to it, with no line when there are none.
+
 ## 0.4.23
 
 ### Optional

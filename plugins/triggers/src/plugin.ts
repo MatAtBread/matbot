@@ -327,9 +327,9 @@ function listing(items: string[]): string {
  * shown text alone, to stay small and quick, but conditions turn on the rest — "no tool was called",
  * "the attachment is a PDF" — and without this it can only guess. A user message reports the files
  * attached to it. An assistant message reports every tool call between the genuine user messages either
- * side of it (its turn, across rounds), plus any file blocks in that turn's non-user messages; the
- * user's own attachments belong to the user message, so they are not repeated here. Nothing to report
- * ⇒ no line.
+ * side of it (its turn, across rounds), stating `none` outright because conditions turn on a reply made
+ * without tools, and an absent line cannot say that; plus any file blocks in that turn's non-user
+ * messages, where the user's own attachments are not repeated. No other absence is reported.
  */
 export function turnSummary(messages: readonly Message[], msg: Message | undefined): string | undefined {
   const i = msg ? messages.indexOf(msg) : -1;
@@ -347,7 +347,7 @@ export function turnSummary(messages: readonly Message[], msg: Message | undefin
     while (end < messages.length && !isGenuineUser(messages[end]!)) end++;
     const turn  = messages.slice(isGenuineUser(messages[start]!) ? start + 1 : start, end);
     const calls = turn.flatMap(m => m.content.flatMap(c => c.type === 'tool-call' ? [c.name] : []));
-    if (calls.length > 0) lines.push(`[Tool calls in this turn: ${listing(calls)}]`);
+    lines.push(`[Tool calls in this turn: ${calls.length > 0 ? listing(calls) : 'none'}]`);
     const f = files(turn.filter(m => m.role !== 'user'));
     if (f.length > 0) lines.push(`[Files in this turn: ${listing(f)}]`);
   }
