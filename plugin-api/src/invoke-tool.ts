@@ -242,12 +242,14 @@ async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise
 
 /**
  * A factory for a context-overridden {@link ToolProxy}: `toolInContext({ provider }).some_tool(params)`
- * runs `some_tool` with the given fields merged over the box's bound context (omitted fields inherited).
- * Keyed on `ToolContracts`, so a hallucinated tool name is a **compile error**. This is the explicit
- * escape hatch beside the default `tool` proxy — reach for it only when a call needs a different provider,
- * signal, prompt or session.
+ * runs `some_tool` under another provider, everything else inherited. Keyed on `ToolContracts`, so a
+ * hallucinated tool name is a **compile error**.
+ *
+ * The provider and nothing else, because the caller is often model-authored code. It took any field of the
+ * call context, so a body could hand a callee its own `prompt` and answer every gate that callee asked —
+ * or swap the session it acted on — through the documented surface, with no escape at all.
  */
-export type ToolBox = (call?: Partial<InvokeToolOptions>) => ToolProxy;
+export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'>) => ToolProxy;
 
 /**
  * Build the typed calling surface both `function-tools` compositions and compiled skills use:
@@ -280,6 +282,10 @@ export function makeToolBox(
         };
       },
     }) as ToolProxy;
-  const toolInContext: ToolBox = (override) => build(override === undefined ? defaultCall : { ...defaultCall, ...override });
+  // Read off the override by name, never spread: whatever else the object carries stays with the caller.
+  const toolInContext: ToolBox = (override) => {
+    const provider = override?.provider;
+    return build(provider === undefined ? defaultCall : { ...defaultCall, provider });
+  };
   return { tool: build(defaultCall), toolInContext };
 }

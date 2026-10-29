@@ -9,6 +9,15 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **`toolInContext` overrides the provider and nothing else** (`ToolBox` takes `Pick<InvokeToolOptions,
+  'provider'>`). It merged any field over the call context, so a `tool_function` body could hand a callee
+  its own `prompt` — and answer every gate that callee asked — or change the session it acted on, through
+  the documented surface and with no escape. Every documented use was `{ provider }`.
+
 ## 0.4.24
 
 ### Optional
