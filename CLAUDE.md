@@ -717,7 +717,12 @@ The bare asking gate (`askPermissionGate`, `plugin-api/host`) remains the floor 
 hand-assembled machine.
 
 It reproduces today's behaviour — ask, offer standing answers, remember them — keyed
-`(gate, subject)`, in its own settings namespace, so an installation authors defaults the ordinary
+`(gate, subject)`, in its own settings namespace, plus one **"Always deny"**: the exact subject being
+asked about and nothing broader, stored under `deny:<gate>` (a key no gate id can have, so the allow keys
+keep their format) and checked before the allows. One button rather than a deny per scope, because the
+prompt was already six options and the case it exists for is a model asking the same thing again;
+broader denials are installation authoring. Like everything else here it is `default-gate`'s: the gate
+itself is still yes or no, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
 the "names no loaded plugin" warning exempts that one key, since nothing loads it).
 `gate_action` (`get` / `clear`) reports the standing answers **in effect** and forgets them; there is
@@ -794,8 +799,8 @@ Within that, three parts, and only the first two enforce anything:
    long a body may compute is not an answer to what a body may reach. **Absent means no restriction**, because a gate that is never
    reached is not a gate: an allow-list defaulting to empty refuses before anyone can be asked, which is
    exactly the behaviour a prompt exists to replace. `permit: []` is the opposite of absent and switches
-   imports off. What it is FOR is the one thing a prompt cannot express — forbidding a module outright,
-   so that nobody is asked, since a policy has no stored "always deny". It lives on the runner
+   imports off. What it is FOR is forbidding modules by rule — a prefix, a set — so that nobody is asked;
+   the default policy's "Always deny" refuses one function's one import, which is a different thing. It lives on the runner
    because the runner IS the execution environment and two consumers need one answer: the capability that
    imports, and `ToolTypeIndex`, which types the reachable set.
 

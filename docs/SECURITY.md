@@ -72,43 +72,49 @@ A gate is a question with a yes-or-no answer. The plugin doing the work **declar
 asked. The registered `PermissionGate` **decides** it. The default policy
 (`@matatbread/matbot-default-gate`, always present) decides in this order:
 
-1. **A standing answer that covers the subject** allows it, without asking.
-2. **Otherwise, if someone can be asked** (the web UI or the terminal of the turn that raised it), it
+1. **A standing denial of exactly this subject** refuses it, without asking.
+2. **A standing answer that covers the subject** allows it, without asking.
+3. **Otherwise, if someone can be asked** (the web UI or the terminal of the turn that raised it), it
    asks, offering:
-   - **Deny**;
+   - **Deny**, this once;
+   - **Always deny** this exact act;
    - **Allow**, this once;
    - **Always allow** the subject, or one of the broader subjects the plugin offers, narrowest first
      ("any builtin", "any function");
    - **Always allow every** `<gate>`.
-3. **Otherwise** it does what the plugin declared for nobody being there, which for every gate above is
+4. **Otherwise** it does what the plugin declared for nobody being there, which for every gate above is
    to refuse, and logs the refusal.
 
 A refusal tells the model which of these refused, and, where nothing in the turn can change that, says
 so, so that it does not go looking for a way round.
 
 **Standing answers** are kept in the default policy's plugin settings: `true` for every subject of a
-gate, or a list of exact subjects. An installation can configure them under `default_settings:` (see
+gate, or a list of exact subjects. Denials sit beside them under `deny:<gate>`, in the same shapes. An installation can configure them under `default_settings:` (see
 [egress controlled outside matbot](#when-egress-is-controlled-outside-matbot) for an example). Settings
 are layered per gate: answering a prompt stores the subjects in effect plus the new one, and from then on
 the stored list is what applies, so a later edit to that gate's configured value has no effect until the
-stored one is cleared. `gate_action get` reports the answers in effect, and `clear` forgets them,
-reverting a gate to its configured value. There is no `set`: the one way to give a standing answer at run time is a person
-answering the prompt that names the act.
+stored one is cleared. `gate_action get` reports the answers in effect (and any `denials`), and `clear`
+forgets both, reverting a gate to its configured value. There is no `set`: the one way to give a
+standing answer at run time is a person answering the prompt that names the act.
 
-### Gates only relax
+### What an answer can change
 
-Every gate starts closed: asked, or refused where nobody can be asked. Each answer a person gives, and
-each standing answer an installation configures, **widens** what matbot may do. Nothing a gate stores
-narrows it: **Deny** applies to that one occurrence and the next is asked again, and there is no "always
-deny". So the gates are how a user **relaxes** the defaults. The point is that model-written code does
-nothing the user has not permitted, not to judge what a user permits: an answer means what it says.
-"Always allow every `plugin.add`" means anything that reaches the tool endpoint installs any plugin,
-with full access, unasked.
+Every gate starts closed: asked, or refused where nobody can be asked. The allows a person gives, and
+those an installation configures, **widen** what matbot may do: the gates are how a user relaxes the
+defaults. The point is that model-written code does nothing the user has not permitted, not to judge
+what a user permits: an answer means what it says. "Always allow every `plugin.add`" means anything that
+reaches the tool endpoint installs any plugin, with full access, unasked.
 
-A restriction is expressed somewhere else:
+**Always deny** narrows one thing: the exact act asked about, refused from then on without asking,
+which is what stops a model asking the same question again. It is never broader. A denial wins over an
+allow that also covers the act, which arises only where the denial came first and a broader allow
+after, or both are configured, since an allow that covers an act keeps it from being asked about.
+
+A broader restriction is expressed somewhere else:
 
 - **don't load the plugin**, or the tool, that does the thing;
-- **the function runner's `permit_imports`**, which forbids modules outright, so nobody is asked;
+- **a configured denial**, `deny:<gate>`, a list of subjects or `true` for all of them;
+- **the function runner's `permit_imports`**, which forbids modules by rule, so nobody is asked;
 - **a replacement `PermissionGate`** with its rules compiled in, which can refuse what the default would
   ask about, and whose rules are out of reach of anything that can write settings;
 - **the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.

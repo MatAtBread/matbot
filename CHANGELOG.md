@@ -42,6 +42,27 @@ churn and less likely to affect a consumer who doesn't use them.
   a function, `getBuiltinModule`, `__proto__`, and changes to what it did not create (a built-in, a
   prototype, `tool` or `context`), whether by assignment, `delete` or `Object.defineProperty` and its
   kin. The declarations say that code cannot be built from a string.
+- **`default-gate`** — an **Always deny** answer. The prompt offers it beside *Deny*, for the exact act
+  being asked about and nothing broader; from then on that act is refused without asking, at every door,
+  with source `configuration`, so the model is told nothing in the turn can change it. A denial is
+  checked before the allows and wins over one that also covers the act. An installation can configure
+  denials under `default_settings:` as `deny:<gate>` — a list of subjects, or `true` for all of them.
+  `gate_action get` reports them as `denials`; `clear` forgets them with the allows.
+  - **For downstream consumers of `default-gate`** (a frontend rendering its prompt, a policy composing
+    over it, anything reading its settings or `gate_action`). Every change is additive, and nothing in
+    `PermissionRequest`, `PermissionGate` or `PermissionDecision` changed:
+    - the prompt's `select` field has one more option, value **`deny-always`**, label *Always deny*,
+      second in the list (`deny`, `deny-always`, `allow`, `always-<n>`…, `always-gate`). A frontend
+      that renders the options generically shows it; one that matches option values must answer
+      with `deny-always` to choose it, and is otherwise unaffected. The `default` is unchanged;
+    - its settings namespace gains keys **`deny:<gate>`**, holding `true` or a list of strings, beside
+      the unchanged per-gate allow keys. A gate id cannot contain `:`, so no existing key changes
+      meaning; an older `default-gate` ignores them when deciding, though its `gate_action get` lists
+      one as a gate named `deny:<gate>`;
+    - `gate_action get`'s result gains an optional **`denials: GateAnswer[]`**, present only when one
+      exists; `GateAnswer` and its `effect` union are unchanged. `gate_action clear` also removes
+      denials, for a gate, a subject within one, or everything;
+    - `denyKey(gate)` is exported beside `toStandingAnswer`.
 - **`docker-bash`** — uses or removes a container only if it made it for this project: labelled with the
   project's root, or (made before that label) mounting it at `/app`. The container's name is settable
   through `bash_config`, and every path that reuses, replaces or removes the container found it by name

@@ -214,12 +214,13 @@ but what it protects depends on the Docker installation underneath it (rootful D
 user root-equivalent on the host). As shipped, its container also reaches the network and the host,
 runs as root inside, and has no resource limits. See [SECURITY.md](docs/SECURITY.md#shells).
 
-**Permission gates start closed, and answers only open them.** A privileged act (installing a
-plugin, reaching an origin, a function importing a module) asks a human, and is refused when nobody can
+**Permission gates start closed, and the user decides what opens them.** A privileged act (installing
+a plugin, reaching an origin, a function importing a module) asks a human, and is refused when nobody can
 be asked. What model-written code may do beyond that is what a user has permitted: each "Always allow…"
-answer widens it from then on, for every route including background jobs and the HTTP tool endpoint.
-To forbid something outright, don't load the plugin that does it, or see
-[SECURITY.md](docs/SECURITY.md#gates-only-relax) for the other ways.
+answer widens it from then on, for every route including background jobs and the HTTP tool endpoint, and
+"Always deny" refuses that exact act from then on without asking. To forbid something more broadly,
+don't load the plugin that does it, or see
+[SECURITY.md](docs/SECURITY.md#what-an-answer-can-change) for the other ways.
 
 **These are one strategy, not the only one.** Everything is a plugin, so each of these is a choice
 an installation can replace — by hand, or by asking the model to write the replacement. The node
