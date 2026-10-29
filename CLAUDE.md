@@ -944,15 +944,24 @@ in the global scope, where the real ones are, and `(()=>{}).constructor('return 
 one-line way round all of it. So the node runner replaces the four function constructors and
 `process.getBuiltinModule` process-wide with ones that refuse when the caller is a body, and are the
 originals to everything else (`host-only.ts`; identity, `instanceof` and `.name` preserved). "The caller is
-a body" is decided twice, because each misses what the other sees: a body frame (its code is compiled
-under a filename no module has) nearer the top of the stack than the runner's `hostCall` frame — which
-catches a `toJSON`, getter or listener the host calls long after the body returned — and an
-`AsyncLocalStorage` span, for a constructor handed straight to a callback with no body frame at all.
+a body" is decided by the **nearest code on the stack**, skipping builtins and node's internals: the body's
+own (compiled under a filename no module has) is refused — which catches a `toJSON`, getter or listener
+the host calls long after the body returned — and a real module file's is allowed. With no code of
+anyone's above it (a constructor handed straight to `promise.then` or a timer), an `AsyncLocalStorage`
+span the call runs in decides.
+
+**A granted package is trusted as itself.** "A real module file" is matbot's own code — a tool the body
+called — or a package the user granted the body. Granting `imapflow` trusts imapflow, and the two dozen
+modules it brings, to compile or patch what they like; it trusts neither the body that imported it nor
+anything else installed. So a package's own code compiling a string when the body calls it is allowed,
+and a callback of the body's that the package runs is still the body's. The corollary is stated rather
+than closed: a package that EVALUATES its input (a template engine) evaluates the body's strings, and
+granting it grants that.
 
 `hostCall` (`FunctionRunner.hostCall`) is where control passes back to the host on the body's behalf —
-its tool calls and a granted import — so a tool that compiles code of its own (the `tool-types`
-validators do) is not refused for being called from a body. Its params are **copied before it**, in the
-body's code: anything of the body's that crossed would run past the boundary as the host's. Hence the
+its tool calls and a granted import — and leaves the span, so a tool's continuations, which have no code
+of the body's above them, are its own. Its params are **copied before it**, in the body's code: anything of
+the body's that crossed would run past the boundary as the host's. Hence the
 invariant this rests on: **a tool that evaluates code its caller supplied must gate it or run it as a
 body** — a tool runs as host code, so one that compiled what it was handed would be the escape. The check
 itself reads nothing a body can replace (primordials captured at load; `Error`'s stack settings swapped by
@@ -966,7 +975,11 @@ is deliberate interference, and no in-process runner can stop it: `--frozen-intr
 them, and wrapping everything a body is handed is the `vm2` road. `ESCAPE-GATE` refuses the plain spellings
 (`JSON.stringify = …`, `Object.defineProperty(Object.prototype, …)`, `__proto__`), and a computed one gets
 past it. What the runner stops is a body REACHING past the gates, which is what an over-eager model does;
-a boundary against tampering is a context, or a process, of its own.
+a boundary against tampering is a process of its own — a child that is not a matbot, handed a tool proxy
+that runs tools in the parent, where whatever a body or its packages change is thrown away with it. A
+separate `vm` context was weighed and dropped: a body holding a granted package's objects reaches the
+parent's built-ins through them, and closing that is a membrane — the `vm2` road. A more thorough
+in-process runner is possible; finding and closing what V8 exposes is that runner's project, not this one.
 
 **The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
 and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of

@@ -168,8 +168,14 @@ replace it.
   spellings of that too, and a computed spelling gets past it. Code that arrives through prompt injection
   (an email, a web page, a file the model was asked to read) is that kind of code. A runner that gives
   each body a context or a process of its own is the answer for an installation that processes untrusted
-  content. A child-process runner is one such implementation, not currently part of this repo; any
-  `FunctionRunner` can be swapped in without changing anything else.
+  content. A child-process runner is one such implementation, not currently part of this repo: whatever
+  a body or its packages change is thrown away with the child. Any `FunctionRunner` can be swapped in
+  without changing anything else, and a more thorough in-process one is possible; it is not this
+  project's.
+- **A granted package is trusted as itself.** Allowing a function to import `imapflow` trusts imapflow and
+  what it imports, which may compile code or patch built-ins as it likes. It does not trust the body, so a
+  callback of the body's that the package runs is still refused the code builders. A package that
+  evaluates what it is given (a template engine) evaluates the body's strings: granting it grants that.
 - **A body cannot answer a gate.** The tools it calls ask through the calling turn's channel, and
   `toolInContext` changes only the provider and can only add a reason to cancel, so a body cannot hand a
   callee a prompt, a session or tools of its own.
