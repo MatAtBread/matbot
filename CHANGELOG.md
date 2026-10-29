@@ -40,6 +40,11 @@ churn and less likely to affect a consumer who doesn't use them.
   a function, `getBuiltinModule`, `__proto__`, and changes to what it did not create (a built-in, a
   prototype, `tool` or `context`), whether by assignment, `delete` or `Object.defineProperty` and its
   kin. The declarations say that code cannot be built from a string.
+- **`docker-bash`** — uses or removes a container only if it made it for this project: labelled with the
+  project's root, or (made before that label) mounting it at `/app`. The container's name is settable
+  through `bash_config`, and every path that reuses, replaces or removes the container found it by name
+  alone, so naming another container got it exec'd into or deleted. Such a name is now refused, and
+  `bash_config set` refuses one before changing anything.
 - **`function-tools`** — a body's tool calls go through the runner's `hostCall`, and a `context.progress`
   message is made a string while the body is the caller.
 

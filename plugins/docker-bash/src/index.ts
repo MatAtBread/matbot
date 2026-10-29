@@ -193,16 +193,59 @@ async function* streamDocker(args: string[], signal: AbortSignal): AsyncGenerato
   throw new Error(`docker ${args.join(' ')} ended without a result`);
 }
 
-/** Force-remove a container by name. A missing one is not an error (current Docker exits 0 for it; older
- *  releases exit 1 saying so). Anything else — a daemon restarting, a permissions fault — throws, since
- *  the container is then still running. */
-async function removeContainer(name: string): Promise<void> {
-  await dockerExec(['rm', '-f', name]).catch((e: unknown) => {
+const READONLY_LABEL = 'matbot.readonly';
+const PROJECT_LABEL  = 'matbot.docker-bash.project';
+
+/** The container a config names, if one exists: whether it runs, the mount set it was created with, and
+ *  whether it is this plugin's for THIS project. */
+interface Existing { running: boolean; mounts: string; ours: boolean }
+
+/**
+ * Whether a container of this name exists, and whose it is. The name is configurable (`bash_config set`),
+ * and every path that reuses, replaces or removes a container finds it by name — so a name that happens to
+ * be another container's (a database, another project's shell) would have been exec'd into or deleted.
+ *
+ * Ours is one labelled with this project's root, or, for one made before that label, one mounting this
+ * project's root where this config mounts it: a container docker-bash made for this project, however old.
+ * A failed inspect is taken as no such container, as it always was.
+ */
+async function inspectContainer(cfg: ContainerConfig): Promise<Existing | undefined> {
+  let out: string;
+  try {
+    out = await dockerExec(['inspect', '--format', '{{json .State.Running}}\t{{json .Config.Labels}}\t{{json .Mounts}}', cfg.name]);
+  } catch { return undefined; }
+  const [running, labels, mounts] = out.trim().split('\t').map(f => JSON.parse(f) as unknown);
+  const l = (labels ?? {}) as Record<string, string | undefined>;
+  const m = (mounts ?? []) as { Source?: string; Destination?: string }[];
+  const project = l[PROJECT_LABEL];
+  return {
+    running: running === true,
+    mounts:  l[READONLY_LABEL] ?? '',
+    ours:    project !== undefined
+      ? project === cfg.projectRoot
+      : m.some(x => x.Source === cfg.projectRoot && x.Destination === cfg.mountPoint),
+  };
+}
+
+function notOurs(name: string): Error {
+  return new Error(
+    `A container named "${name}" exists that docker-bash did not create for this project, so it is neither ` +
+    'used nor removed. Give docker-bash another name with `bash_config set { name }`, or remove that container ' +
+    'yourself if it is a stale one.',
+  );
+}
+
+/** Force-remove this config's container, if it is ours; one that is not is refused, never removed. A
+ *  missing one is not an error (current Docker exits 0 for it; older releases exit 1 saying so). Anything
+ *  else — a daemon restarting, a permissions fault — throws, since the container is then still running. */
+async function removeContainer(cfg: ContainerConfig): Promise<void> {
+  const found = await inspectContainer(cfg);
+  if (found === undefined) return;
+  if (!found.ours) throw notOurs(cfg.name);
+  await dockerExec(['rm', '-f', cfg.name]).catch((e: unknown) => {
     if (!(e instanceof Error && /No such container/i.test(e.message))) throw e;
   });
 }
-
-const READONLY_LABEL = 'matbot.readonly';
 const SQLITE_FILE = /\.db(?:-wal|-shm|-journal)?$/;
 
 /**
@@ -242,21 +285,20 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
   const hidden   = await hiddenPaths(cfg.projectRoot);
   const label = `ro:${readOnly.join(',')};hidden:${hidden.join(',')}`;
 
-  let state: string | undefined;
-  try {
-    state = await dockerExec(['inspect', '--format', `{{.State.Running}} {{index .Config.Labels "${READONLY_LABEL}"}}`, cfg.name]);
-  } catch { /* no such container */ }
+  let state = await inspectContainer(cfg);
+  if (state !== undefined && !state.ours) throw notOurs(cfg.name);
   // A container made with another set — including one from before any were protected — is replaced: its
   // mounts are fixed at creation, and leaving it would leave the gate answers writable or `.env` readable.
-  if (state !== undefined && state.slice(state.indexOf(' ') + 1) !== label) {
-    await removeContainer(cfg.name);
+  if (state !== undefined && state.mounts !== label) {
+    await removeContainer(cfg);
     state = undefined;
   }
 
   if (state === undefined) {
     // --init: PID 1 is otherwise `sleep infinity`, which never reaps, so every process killed or orphaned
     // by an exec stays in the table as a zombie for the container's lifetime.
-    const args = ['run', '-d', '--init', '--name', cfg.name, '--label', `${READONLY_LABEL}=${label}`];
+    const args = ['run', '-d', '--init', '--name', cfg.name,
+                  '--label', `${READONLY_LABEL}=${label}`, '--label', `${PROJECT_LABEL}=${cfg.projectRoot}`];
     if (cfg.network !== undefined) args.push('--network', cfg.network);
     for (const server of resolveDnsServers(cfg.dns)) {
       args.push('--dns', server);
@@ -274,7 +316,7 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     return;
   }
 
-  if (!state.startsWith('true ')) {
+  if (!state.running) {
     await dockerExec(['start', cfg.name]);
   }
 }
@@ -339,7 +381,18 @@ async function* bashConfigExecutor(
     // rebuild — maxOutputBytes is host-enforced per call). The other order left a container that failed
     // to go running under the old name while the next bash call created a second one from the new
     // config. This way a failed removal changes nothing, and the next bash call recreates from settings.
-    if (restart) await removeContainer(oldCfg.name);
+    try {
+      // Refused before anything changes: a name another container already has would be refused at the
+      // next bash call anyway, after the working container had been removed.
+      if (newCfg.name !== oldCfg.name) {
+        const taken = await inspectContainer(newCfg);
+        if (taken !== undefined && !taken.ours) throw notOurs(newCfg.name);
+      }
+      if (restart) await removeContainer(oldCfg);
+    } catch (e) {
+      yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
+      return;
+    }
     await settings.set(SETTINGS_KEY, merged);
 
     yield {
@@ -359,8 +412,8 @@ async function* bashConfigExecutor(
     // Force a recreate regardless of config change — recovers a wedged container and re-resolves a
     // "host" DNS token against the host's current resolvers. Transient, nothing persisted.
     const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
-    await removeContainer(cfg.name);
     try {
+      await removeContainer(cfg);
       await ensureContainerRunning(cfg);
     } catch (e) {
       yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
@@ -382,8 +435,8 @@ async function* bashConfigExecutor(
       return;
     }
     const updated = !/Image is up to date/i.test(pullOutput);
-    await removeContainer(cfg.name);
     try {
+      await removeContainer(cfg);
       await ensureContainerRunning(cfg);
     } catch (e) {
       yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
