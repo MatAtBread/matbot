@@ -33,7 +33,7 @@ const probe: Tool = {
   executor: { execute: async function* (_p: unknown, ctx: ToolContext) { seen = ctx; yield { type: 'result', value: null }; } } as Tool['executor'],
 };
 
-test('an override changes the provider and nothing else', async () => {
+test('an override changes the provider and nothing else it may not', async () => {
   const { toolInContext } = makeToolBox(fakeMachine([probe]), call);
   const forged: PromptFn = async () => ({ answer: 'yes' }) as never;
   await toolInContext({
@@ -53,4 +53,22 @@ test('with no override the call context passes through whole', async () => {
   await toolInContext().probe({});
   assert.equal(seen?.prompt, humanPrompt);
   assert.equal(seen?.provider, 'p');
+});
+
+test('an override signal can cancel a call sooner, never keep it going later', async () => {
+  const turn = new AbortController();
+  const { toolInContext } = makeToolBox(fakeMachine([probe]), { ...call, signal: turn.signal });
+
+  const deadline = new AbortController();
+  await toolInContext({ signal: deadline.signal }).probe({});
+  const sooner = seen!.signal;
+  assert.equal(sooner.aborted, false);
+  deadline.abort();
+  assert.equal(sooner.aborted, true, "the override's own abort reaches the callee");
+
+  // A signal that never aborts does not shield the callee from the turn being stopped.
+  await toolInContext({ signal: new AbortController().signal }).probe({});
+  const later = seen!.signal;
+  turn.abort();
+  assert.equal(later.aborted, true, "the turn's abort still reaches the callee");
 });

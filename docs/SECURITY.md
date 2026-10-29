@@ -113,7 +113,8 @@ replace it.
   each body a context or a process of its own is the answer for an installation that processes untrusted
   content.
 - **A body cannot answer a gate.** The tools it calls ask through the calling turn's channel, and
-  `toolInContext` changes only the provider, so a body cannot hand a callee a prompt of its own.
+  `toolInContext` changes only the provider and can only add a reason to cancel, so a body cannot hand a
+  callee a prompt, a session or tools of its own.
 - **`execute`, and fetching code then executing it, are not an escalation.** A body reaches only what the
   gates allow, and the model can write the same code directly. Downloaded code runs with the body's reach,
   no more.

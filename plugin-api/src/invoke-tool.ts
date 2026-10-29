@@ -245,11 +245,20 @@ async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise
  * runs `some_tool` under another provider, everything else inherited. Keyed on `ToolContracts`, so a
  * hallucinated tool name is a **compile error**.
  *
- * The provider and nothing else, because the caller is often model-authored code. It took any field of the
- * call context, so a body could hand a callee its own `prompt` and answer every gate that callee asked —
- * or swap the session it acted on — through the documented surface, with no escape at all.
+ * Two fields, an ALLOW-list, because the caller is often model-authored code and every field of the call
+ * context is something a callee trusts:
+ *   - `provider` — which configured profile serves the call. The user configured each one, and adding one
+ *     is gated, so choosing among them reaches nothing new.
+ *   - `signal` — combined with the call's own, so it can cancel the callee SOONER (a deadline for one
+ *     call) and never later. Replacing it outright would let a call outlive the turn the user stopped.
+ * Not `prompt`: it is the channel a callee's gates ask through, so supplying one answered them. Not
+ * `session`: some standing answers are per session (`tool_function.edit`'s "in this session"), so naming
+ * another borrowed what the user granted there. Not `turnTools`: they resolve beside the registry, so a
+ * caller could hand over an executor of its own and have the host give it a `ToolContext`. An allow-list
+ * rather than leaving those three out, so that a field added to `InvokeToolOptions` later is not
+ * overridable until someone decides it should be.
  */
-export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'>) => ToolProxy;
+export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: AbortSignal }) => ToolProxy;
 
 /**
  * Build the typed calling surface both `function-tools` compositions and compiled skills use:
@@ -293,10 +302,17 @@ export function makeToolBox(
         };
       },
     }) as ToolProxy;
-  // Read off the override by name, never spread: whatever else the object carries stays with the caller.
+  // Each field read off the override by name, once, never spread: whatever else the object carries stays
+  // with the caller (see ToolBox for why each field is or is not here).
   const toolInContext: ToolBox = (override) => {
     const provider = override?.provider;
-    return build(provider === undefined ? defaultCall : { ...defaultCall, provider });
+    const signal   = override?.signal;
+    return build({
+      ...defaultCall,
+      ...(provider !== undefined ? { provider } : {}),
+      // `any` aborts when EITHER does, so the override can only add a reason to stop.
+      ...(signal !== undefined ? { signal: AbortSignal.any([defaultCall.signal, signal]) } : {}),
+    });
   };
   return { tool: build(defaultCall), toolInContext };
 }

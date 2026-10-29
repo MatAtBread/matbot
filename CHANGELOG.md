@@ -13,10 +13,11 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
-- **`toolInContext` overrides the provider and nothing else** (`ToolBox` takes `Pick<InvokeToolOptions,
-  'provider'>`). It merged any field over the call context, so a `tool_function` body could hand a callee
-  its own `prompt` — and answer every gate that callee asked — or change the session it acted on, through
-  the documented surface and with no escape. Every documented use was `{ provider }`.
+- **`toolInContext` takes `provider` and `signal` and nothing else.** It merged any field over the call
+  context, so a `tool_function` body could hand a callee its own `prompt` — and answer every gate that
+  callee asked — name another session and borrow its per-session standing answers, or supply turn tools
+  of its own. Every documented use was `{ provider }`. A `signal` is combined with the call's own, so it
+  can cancel a call sooner and never keep one going after the turn is stopped.
 
 ### API gaps filled
 
