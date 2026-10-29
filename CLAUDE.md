@@ -937,25 +937,52 @@ A package is broader again, being loaded as **host code**: it is not compiled by
 body's withheld globals apply to it, and its own imports are never gated again. So every import label
 says it carries matbot's full access, and a package's also says it covers everything that package imports.
 
-**What this is not.** `vm` is not a capability boundary — a body runs in this context, and
-`(()=>{}).constructor('return process')()` recovers the real `process` in one line. Withholding
-`process`/`globalThis`/`global`/`eval`/`Function` (and the phantom `require`/`module`/`__dirname`, which
-node's types would otherwise make typecheck and then fail at the first call) raises the cost from "call a
-documented API" to "know a published trick", and makes the intended path gated and revocable. A real
-boundary is another process.
+**Names are shadowed; the code builders refuse.** Withholding `process`/`globalThis`/`global`/`eval` (and
+the phantom `require`/`module`/`__dirname`, which node's types would otherwise make typecheck and then fail
+at the first call) works on NAMES, and every function's `.constructor` is not a name: it compiles a string
+in the global scope, where the real ones are, and `(()=>{}).constructor('return process')()` was the
+one-line way round all of it. So the node runner replaces the four function constructors and
+`process.getBuiltinModule` process-wide with ones that refuse when the caller is a body, and are the
+originals to everything else (`host-only.ts`; identity, `instanceof` and `.name` preserved). "The caller is
+a body" is decided twice, because each misses what the other sees: a body frame (its code is compiled
+under a filename no module has) nearer the top of the stack than the runner's `hostCall` frame — which
+catches a `toJSON`, getter or listener the host calls long after the body returned — and an
+`AsyncLocalStorage` span, for a constructor handed straight to a callback with no body frame at all.
+
+`hostCall` (`FunctionRunner.hostCall`) is where control passes back to the host on the body's behalf —
+its tool calls and a granted import — so a tool that compiles code of its own (the `tool-types`
+validators do) is not refused for being called from a body. Its params are **copied before it**, in the
+body's code: anything of the body's that crossed would run past the boundary as the host's. Hence the
+invariant this rests on: **a tool that evaluates code its caller supplied must gate it or run it as a
+body** — a tool runs as host code, so one that compiled what it was handed would be the escape. The check
+itself reads nothing a body can replace (primordials captured at load; `Error`'s stack settings swapped by
+descriptor), and fails closed: a body that makes the stack unreadable is refused, and so is everyone else
+until a restart.
+
+**What this is not.** A body shares this process's built-ins, so it can still REWRITE them —
+`Object.prototype`, `JSON`, `Headers.prototype` — and whatever reads them later reads what it wrote. That
+is deliberate interference, and no in-process runner can stop it: `--frozen-intrinsics` and
+`--disallow-code-generation-from-strings` are process-wide, and broke ~110 of matbot's own tests between
+them, and wrapping everything a body is handed is the `vm2` road. `ESCAPE-GATE` refuses the plain spellings
+(`JSON.stringify = …`, `Object.defineProperty(Object.prototype, …)`, `__proto__`), and a computed one gets
+past it. What the runner stops is a body REACHING past the gates, which is what an over-eager model does;
+a boundary against tampering is a context, or a process, of its own.
 
 **The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
 and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of
 `import('node:buffer')` describing it as full access, which teaches a human to click "always". What it
 does expose is memory (`.buffer` of a small one is the shared allocation pool; `allocUnsafe` is not
 zeroed), equally reachable after the import. Each name still on the list reaches all the others —
-`process.getBuiltinModule`, `globalThis.process`, `Function('return process')()` — which is why there is
-no per-name setting to re-enable one: it would be a single switch spelled as a list.
+`process.getBuiltinModule`, `globalThis.process` — which is why there is no per-name setting to re-enable
+one: it would be a single switch spelled as a list.
 
 The withheld set and `ENV-GATE`'s list are **one list in two places**, and the checker's must track the
 runner's: a global that is shadowed but not rejected typechecks and fails at the first call, which is the
 one failure the check gate exists to prevent. The half that matters most is the half with no node types
-behind it — `eval` and `Function` are `lib.es` globals, so they resolve in every configuration.
+behind it — `eval` is a `lib.es` global, so it resolves in every configuration. `Function` left the list
+when the runner began refusing it by caller rather than by name; `ESCAPE-GATE` names it instead, with the
+other spellings of reaching past the runner, and only when a runner is loaded — without one nothing is
+refused, and saying so would be untrue.
 
 **A grant names the function's LINEAGE, not only its name** — `<name>@<digest>`, the digest of the text
 function-tools compiled (a package export's is the whole package's), computed by function-tools and never

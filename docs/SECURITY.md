@@ -97,16 +97,39 @@ replace it.
 
 - **Without a runner**, nothing is gated: a body's `import(…)`, `fetch` and `WebSocket` reach the
   platform directly, unbounded in time. That is the default until a runner is configured.
-- **The node runner is not a sandbox.** It runs bodies in matbot's own process. It withholds `process`,
-  `globalThis`, `eval` and `Function`, routes `import(…)` through the import gate and binds a gated
-  `fetch` and `WebSocket`. But `(()=>{}).constructor('return process')()` recovers the real `process` in one
-  line, and with it every builtin and the real network globals. The runner raises the cost from "call a
-  documented API" to "know a published trick", and makes the intended path gated and revocable.
-- **Mitigations**: a runner that runs bodies in a separate process with a minimal environment and tool
-  calls over IPC, or an egress proxy at the deployment level.
+- **The node runner keeps a body from reaching past the gates.** It runs bodies in matbot's own process,
+  withholds `process`, `globalThis` and `eval`, routes `import(…)` through the import gate and binds a
+  gated `fetch` and `WebSocket`. Code a body compiles from a string would run in the global scope, where
+  none of that applies, so the function constructors (`Function`, and every function's `.constructor`)
+  and `process.getBuiltinModule` refuse a body however it reaches them, saying why. The type-check refuses
+  the plain spellings when the function is defined (`ESCAPE-GATE`). This is aimed at a model that decides
+  a task needs something it was not given and looks for another way to it: the intended path asks the
+  user, and the other one says it is closed.
+- **It is not a sandbox against hostile code.** A body shares the process's built-ins, so code written to
+  interfere with matbot can rewrite them (`Object.prototype`, `JSON`, `Headers.prototype`) and see what
+  matbot later passes through them, a provider's credential included. The type-check refuses the plain
+  spellings of that too, and a computed spelling gets past it. Code that arrives through prompt injection
+  (an email, a web page, a file the model was asked to read) is that kind of code. A runner that gives
+  each body a context or a process of its own is the answer for an installation that processes untrusted
+  content.
+- **A body cannot answer a gate.** The tools it calls ask through the calling turn's channel, and
+  `toolInContext` changes only the provider, so a body cannot hand a callee a prompt of its own.
 - **`execute`, and fetching code then executing it, are not an escalation.** A body reaches only what the
   gates allow, and the model can write the same code directly. Downloaded code runs with the body's reach,
   no more.
+- **A tool that evaluates code its caller supplied must gate it, or run it as a body.** Tools a body calls
+  run as matbot's own code, so one that compiled what it was handed would be a way round the runner.
+- **A grant is the user's.** A standing answer covering "any function" applies to every function defined
+  later, including one written under the influence of injected content, and an edit permitted to keep its
+  grants keeps them whatever the edit added. That is what those answers say.
+
+### Prompt injection
+
+A body adds composition, not reach: every tool it can call, the model can call directly, and so can
+anything that reaches the tool endpoint. The exposure that injected instructions exploit is the pair of
+**an ungated tool that reads private data** (sessions, files, memory) **and an ungated way to send it
+out** (a messaging tool, a granted origin). Gates cover the second only where a tool asks one. Which
+tools should refuse when nobody can be asked is a separate question from the runner.
 
 ## Shells
 

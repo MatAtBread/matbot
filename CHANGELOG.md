@@ -18,6 +18,30 @@ churn and less likely to affect a consumer who doesn't use them.
   its own `prompt` — and answer every gate that callee asked — or change the session it acted on, through
   the documented surface and with no escape. Every documented use was `{ provider }`.
 
+### API gaps filled
+
+- **`FunctionRunner.hostCall`** — where control passes from a body back to host code acting for it. A
+  runner that tells a body's code from the host's must not count a tool the body calls as the body's.
+  `makeToolBox` takes it as `hostCall`, and then copies each call's params before crossing, so nothing of
+  the caller's runs past it.
+
+### Optional
+
+- **`function-runner-node`** — the function constructors (`Function`, and every function's
+  `.constructor`) and `process.getBuiltinModule` refuse a body however it reaches them, and are unchanged
+  for everything else. `(()=>{}).constructor('return process')()` compiled code in the global scope,
+  around every withheld global and gate. A body is told by its frames on the stack and by an
+  `AsyncLocalStorage` span, so a `toJSON`, getter or listener run by matbot after the body returned is
+  still the body's; a tool it calls, or a module it imports, is not. `Function` is no longer withheld by
+  name, which changes the environment fingerprint: stored functions report `checkedElsewhere` until
+  checked again.
+- **`tool-types`** — `ESCAPE-GATE`, with a runner loaded: a body is refused `Function`, `.constructor` on
+  a function, `getBuiltinModule`, `__proto__`, and changes to what it did not create (a built-in, a
+  prototype, `tool` or `context`), whether by assignment, `delete` or `Object.defineProperty` and its
+  kin. The declarations say that code cannot be built from a string.
+- **`function-tools`** — a body's tool calls go through the runner's `hostCall`, and a `context.progress`
+  message is made a string while the body is the caller.
+
 ## 0.4.24
 
 ### Optional
