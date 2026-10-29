@@ -114,7 +114,7 @@ const MAX_FULL = 8;
 // A structural rule's label, by its private code. CAST-GATE is the default because it was the first and
 // is what the contract gate (90004) has always reported as; a rule about something other than types
 // needs its own name, or the label says the wrong thing about the finding under it.
-const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE', 90006: 'IMPORT-GATE' };
+const SYN_LABELS: Record<number, string> = { 90005: 'ENV-GATE', 90006: 'IMPORT-GATE', 90007: 'ESCAPE-GATE' };
 
 // One rule, one name, in every renderer: a per-rule label read off the record rather than spelled at
 // each render site, so a summary can never call a finding something its own entry did not.
@@ -411,8 +411,8 @@ try {
   //
   // WHICH names are withheld comes from the runner's withheldGlobals, because it is the only thing that
   // knows and a copy here could not be kept in step: a name shadowed but not rejected typechecks and
-  // fails at the first call, which is the one failure this gate exists to prevent. 'eval' and 'Function'
-  // are the worst to miss, being lib.es globals that typecheck in every configuration.
+  // fails at the first call, which is the one failure this gate exists to prevent. 'eval' is the worst
+  // to miss, being a lib.es global that typechecks in every configuration.
   //
   // The ADVICE stays here, because it is about repairing a snippet and that is this file's job, not the
   // runner's. A withheld name with no entry below still fires, with a generic line — the list is the
@@ -427,7 +427,6 @@ try {
     globalThis: "'globalThis' is not defined in a function body — the runner withholds it, so a host global cannot be reached by name. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
     global:     "'global' is not defined in a function body — the runner withholds it, and it is node's older alias for 'globalThis', which is withheld too. Everything a body is given is already in scope: 'tool', 'toolInContext' and 'context'.",
     eval:       "'eval' is not defined in a function body — the runner withholds it. There is nothing to evaluate at run time: write the code, or call another tool with 'await tool.<name>(…)'.",
-    Function:   "'Function' is not defined in a function body — the runner withholds the constructor, so 'new Function(…)' cannot build code at run time. Write the code directly. (As a TYPE annotation it is fine; this is about the value.)",
   };
   // A withheld global named in a TYPE is harmless: types are erased before the body is compiled, so
   // 'args: Buffer' never reaches the runner. Only the VALUE is rejected. Needed because the second half of
@@ -542,6 +541,103 @@ try {
     ts.forEachChild(node, function (c) { envVisit(c, sf); });
   };
 
+  // ── escape gate: what reaches past the runner without naming anything it withholds ──
+  // Shadowing works on NAMES, and these are not names: every function's '.constructor' is a compiler for
+  // the global scope, where the real 'process' and every ungated builtin are; 'getBuiltinModule' loads a
+  // builtin with no import to gate; and a shared object a body changes — a built-in, its prototype, or
+  // something it was handed — is changed for the rest of matbot. The runner refuses the first two at run
+  // time however they are reached, and cannot refuse the third, so this is where a plainly-spelled one is
+  // stopped and the author told why. A computed spelling gets past it; that is deliberate tampering,
+  // which no checker is the answer to. Only with a runner: without one nothing is refused, and saying so
+  // would be untrue.
+  const escapeGate = envGate && workerData.withheldGlobals !== undefined;
+  const ESCAPE = {
+    ctor:     "a function's 'constructor' compiles a string as code in matbot's own scope — outside the runner, around every withheld global and permission gate — so a function body may not reach it, and it is refused at run time too. Write the code directly, import a module with 'await import(…)' (the user is asked), or call a tool.",
+    Function: "'Function' compiles a string as code in matbot's own scope — outside the runner, around every withheld global and permission gate — so a function body may not call it, and it is refused at run time too. Write the code directly. (As a TYPE annotation it is fine; this is about the value.)",
+    builtin:  "'getBuiltinModule' loads a node builtin without the import gate, so a function body may not call it, and it is refused at run time too. Import the module with 'await import('node:…')', which asks the user.",
+    proto:    "'__proto__' reaches a prototype shared with the rest of matbot, which a function body may neither reach nor change. For an object with a prototype of your own, use 'Object.create(proto)' or a class.",
+    mutate:   function (what) {
+      return "this changes '" + what + "', which this function body did not create. Built-ins, their prototypes and what a body is handed are shared with the rest of matbot, so changing them changes matbot. Work on a copy ('const mine = { ...x }') or a wrapper of your own instead.";
+    },
+  };
+  const unwrap = function (e) {
+    while (e && (ts.isParenthesizedExpression(e) || ts.isNonNullExpression(e) || ts.isAsExpression(e)
+                 || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(e)) || ts.isSatisfiesExpression(e))) e = e.expression;
+    return e;
+  };
+  const memberName = function (e) {
+    if (ts.isPropertyAccessExpression(e)) return e.name.text;
+    if (ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression)) return e.argumentExpression.text;
+    return undefined;
+  };
+  const isGetPrototypeOf = function (e) {
+    return ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'getPrototypeOf';
+  };
+  // Whether an object a body is about to change is one it did not create: reached through a prototype,
+  // or rooted at a binding declared outside the snippet (a built-in, or 'tool' / 'context').
+  const shared = function (target) {
+    let e = unwrap(target);
+    for (;;) {
+      if (isGetPrototypeOf(e)) return true;
+      if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+        const n = memberName(e);
+        if (n === 'prototype' || n === '__proto__') return true;
+        e = unwrap(e.expression);
+        continue;
+      }
+      if (!ts.isIdentifier(e)) return false;
+      const sym = checker.getSymbolAtLocation(e);
+      return !!(sym && sym.declarations && sym.declarations.length > 0) && !authorDeclared(e);
+    }
+  };
+  const isCallable = function (e) {
+    const t = checker.getTypeAtLocation(e);
+    return t.getCallSignatures().length > 0 || t.getConstructSignatures().length > 0;
+  };
+  const MUTATORS = { Object: ['defineProperty', 'defineProperties', 'setPrototypeOf', 'assign'],
+                     Reflect: ['defineProperty', 'set', 'setPrototypeOf', 'deleteProperty'] };
+  const isAssignment = function (k) {
+    return k >= ts.SyntaxKind.FirstAssignment && k <= ts.SyntaxKind.LastAssignment;
+  };
+  const escapeVisit = function (node, sf) {
+    if (escapeGate && node.getStart(sf) >= minStart) {
+      const name = (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) ? memberName(node) : undefined;
+      if (name === 'constructor') {
+        const obj = unwrap(node.expression);
+        if (isCallable(obj) || memberName(obj) === 'constructor') synth.push(mk(sf, node, 90007, ESCAPE.ctor));
+      } else if (name === 'getBuiltinModule') {
+        synth.push(mk(sf, node, 90007, ESCAPE.builtin));
+      } else if (name === '__proto__') {
+        synth.push(mk(sf, node, 90007, ESCAPE.proto));
+      } else if (ts.isIdentifier(node) && node.text === 'Function'
+                 && !(node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+                 && !(node.parent && (ts.isPropertyAssignment(node.parent) || ts.isPropertySignature(node.parent)) && node.parent.name === node)
+                 && !(node.parent && ts.isBindingElement(node.parent) && node.parent.propertyName === node)
+                 && !inTypePosition(node) && !authorDeclared(node)) {
+        synth.push(mk(sf, node, 90007, ESCAPE.Function));
+      }
+      let changed;
+      if (ts.isBinaryExpression(node) && isAssignment(node.operatorToken.kind)) changed = node.left;
+      else if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+               && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) changed = node.operand;
+      else if (ts.isDeleteExpression(node)) changed = node.expression;
+      else if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+               && ts.isIdentifier(node.expression.expression) && node.arguments.length > 0) {
+        const ns = MUTATORS[node.expression.expression.text];
+        if (ns && ns.indexOf(node.expression.name.text) !== -1 && !authorDeclared(node.expression.expression)) changed = node.arguments[0];
+      }
+      if (changed !== undefined) {
+        const c = unwrap(changed);
+        // Only a member: assigning a name rebinds the body's own variable, which shadowing makes harmless.
+        const member = ts.isPropertyAccessExpression(c) || ts.isElementAccessExpression(c);
+        if ((member && shared(c.expression)) || (!member && ts.isCallExpression(node) && shared(c))) {
+          synth.push(mk(sf, changed, 90007, ESCAPE.mutate(c.getText(sf))));
+        }
+      }
+    }
+    ts.forEachChild(node, function (c) { escapeVisit(c, sf); });
+  };
+
   const skip = new Set();
   const visit = function (node, sf) {
     const isAssertion = ts.isAsExpression(node) || (ts.isTypeAssertionExpression && ts.isTypeAssertionExpression(node));
@@ -566,7 +662,7 @@ try {
     }
     ts.forEachChild(node, function (c) { visit(c, sf); });
   };
-  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); }
+  for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); escapeVisit(gf, gf); }
 
   // A bare 'node' is not the builtins namespace — it resolves to @types/node's index.d.ts, which is
   // references and ambient blocks with no export, so tsc reports "File '<matbot's own node_modules>/

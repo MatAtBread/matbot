@@ -401,6 +401,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     return `${note}`
       + (withheld.length > 0
           ? `// A body is a bare async function, not a module, and not every global is in scope. Absent: ${withheld.join(', ')}, import.meta.\n`
+            + `// Nor can it build code from a string: 'Function' and every function's '.constructor' refuse a body.\n`
           : '');
   }
 

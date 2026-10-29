@@ -51,7 +51,6 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
   for (const [snippet, expected] of [
     [`async function f() { return process.cwd(); }`,                 /'process' is not defined/],
     [`async function f() { return eval('1'); }`,                     /'eval' is not defined/],
-    [`async function f() { return new Function('return 1')(); }`,    /'Function' is not defined/],
     [`async function f() { return typeof globalThis; }`,             /'globalThis' is not defined/],
     [`async function f() { return typeof (global as never); }`,      /'global' is not defined/],
   ] as const) {
@@ -70,6 +69,41 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
                     `async function f() { const { Buffer } = await import('node:buffer'); return typeof Buffer; }`,
                     `async function f() { const { Buffer: B } = await import('node:buffer'); return typeof B; }`]) {
     assert.deepEqual((await index.check(ok)).diagnostics.map(d => d.label), [], ok);
+  }
+});
+
+test('ESCAPE-GATE refuses what reaches past the runner without naming anything it withholds', async () => {
+  // `Function` is no longer withheld by name — the runner's constructors refuse a body however they are
+  // reached — so the checker names what it is for, along with the other plain spellings of the same thing.
+  const index = indexFor(['node:']);
+  for (const [snippet, expected] of [
+    [`async function f() { return new Function('return 1')(); }`,                          /'Function' compiles a string/],
+    [`async function f() { return console.log.constructor('return 1')(); }`,               /'constructor' compiles a string/],
+    [`async function f() { const g = () => 1; return g['constructor']('return 1')(); }`,  /'constructor' compiles a string/],
+    [`async function f() { return ({}).constructor.constructor('return 1')(); }`,          /'constructor' compiles a string/],
+    [`async function f(p: { getBuiltinModule(id: string): unknown }) { return p.getBuiltinModule('node:fs'); }`, /without the import gate/],
+    [`async function f() { return ({} as { __proto__: object }).__proto__; }`,              /shared with the rest of matbot/],
+    [`async function f() { JSON.stringify = () => ''; }`,                                  /changes 'JSON.stringify'/],
+    [`async function f() { Error.stackTraceLimit = 0; }`,                                  /changes 'Error.stackTraceLimit'/],
+    [`async function f() { delete (Headers.prototype as { get?: unknown }).get; }`,       /changes/],
+    [`async function f() { Array.prototype.map = Array.prototype.map; }`,                  /changes 'Array.prototype.map'/],
+    [`async function f() { Object.defineProperty(Object.prototype, 'x', { get() { return 1; } }); }`, /changes 'Object.prototype'/],
+    [`async function f() { Object.defineProperty(Object.getPrototypeOf({}), 'x', { value: 1 }); }`,   /changes 'Object.getPrototypeOf/],
+    [`async function f() { Object.assign(context, { sessionId: 'x' }); }`,                 /changes 'context'/],
+  ] as const) {
+    const out = (await index.check(snippet)).diagnostics;
+    const esc = out.filter(d => d.label === 'ESCAPE-GATE');
+    assert.equal(esc.length, 1, `${snippet} -> ${out.map(d => `${d.label}: ${d.message}`).join(' / ')}`);
+    assert.match(esc[0]!.message, expected);
+  }
+  // What the body made itself is its own to change, and reading a built-in is not changing it.
+  for (const ok of [`async function f() { const o: Record<string, number> = {}; o.x = 1; delete o.x; return o; }`,
+                    `async function f(p: { n: number }) { p.n++; return p; }`,
+                    `async function f() { class A { x = 1 } const a = new A(); a.x = 2; return Object.assign({}, a); }`,
+                    `async function f() { return Array.prototype.slice.call([1, 2], 1); }`,
+                    `async function f(xs: number[]) { return xs.constructor === Array; }`,
+                    `async function f(cb: Function) { return typeof cb; }`]) {
+    assert.deepEqual((await index.check(ok)).diagnostics.map(d => `${d.label}: ${d.message}`), [], ok);
   }
 });
 
