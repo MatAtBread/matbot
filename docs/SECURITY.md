@@ -37,13 +37,19 @@ the ones with no human behind them, and it can be withdrawn with `gate_action`.
 |---|---|
 | `plugin.add`, `plugin.load` | A plugin is installed, or loaded for the first time |
 | `plugin.reload` | A plugin is reloaded and its code differs from what was loaded (on disk, or fetched upstream) |
-| `provider.add`, `provider.update` | A provider profile is added or changed |
+| `plugin.provision-deps` | A fetched plugin now declares dependencies its cached copy lacks, which would be installed |
+| `plugin.remove`, `plugin.npm-uninstall`, `plugin.remove-provisioned` | A plugin is removed, and with it what adding it installed or created |
+| `provider.add`, `provider.update`, `provider.remove` | A provider profile is added, changed or removed |
+| `provider.add-unverified`, `provider.update-unverified` | The endpoint check failed, and the profile would be saved anyway |
+| `provider.add-unlisted`, `provider.update-unlisted` | The model is not among those the endpoint lists (asked last: listing sends the profile's credential) |
 | `mcp_action.add` | An MCP server is connected or spawned; the prompt names any vault keys a local one is given |
+| `mcp_action.remove` | An MCP server is disconnected |
 | `http.request` | The `http` tool reaches an origin (scheme, host and port), including one a redirect leads to |
 | `http.secret` | The `http` tool sends a vault key to an origin |
 | `tool_function.import` | A function body imports a module |
 | `tool_function.connect` | A function body's `fetch` or `WebSocket` reaches an origin, including by redirect |
 | `tool_function.edit` | A function or package that uses `import(`, `fetch` or `WebSocket` is redefined: may the new version keep the grants? |
+| `function_runner_config.set` | A setting of the function runner (its time bound, its import restriction) is changed |
 | `telegram_open_door.open` | The Telegram door is opened to new chats |
 | `tools.overwrite` | A plugin registers a tool another plugin owns |
 
@@ -55,6 +61,56 @@ grants themselves hold wherever the function runs. "Any function" answers name n
 
 A provider's credential does not follow its endpoint to another origin: `provider update` points the
 profile at a fresh, unset vault key instead, for the user to supply with `plugin store-key`.
+
+The list is the gates matbot's own plugins raise. A plugin can raise gates of its own, under its own tool's
+name, and `gate_action get` reports every gate that has a standing answer, whoever raised it.
+
+## How a gate decides
+
+A gate is a question with a yes-or-no answer. The plugin doing the work **declares** it: a gate id
+(`http.request`), a subject (the origin), a sentence naming the act, and what to do if nobody can be
+asked. The registered `PermissionGate` **decides** it. The default policy
+(`@matatbread/matbot-default-gate`, always present) decides in this order:
+
+1. **A standing answer that covers the subject** allows it, without asking.
+2. **Otherwise, if someone can be asked** (the web UI or the terminal of the turn that raised it), it
+   asks, offering:
+   - **Deny**;
+   - **Allow**, this once;
+   - **Always allow** the subject, or one of the broader subjects the plugin offers, narrowest first
+     ("any builtin", "any function");
+   - **Always allow every** `<gate>`.
+3. **Otherwise** it does what the plugin declared for nobody being there, which for every gate above is
+   to refuse, and logs the refusal.
+
+A refusal tells the model which of these refused, and, where nothing in the turn can change that, says
+so, so that it does not go looking for a way round.
+
+**Standing answers** are kept in the default policy's plugin settings: `true` for every subject of a
+gate, or a list of exact subjects. An installation can configure them under `default_settings:` (see
+[egress controlled outside matbot](#when-egress-is-controlled-outside-matbot) for an example). Settings
+are layered per gate: answering a prompt stores the subjects in effect plus the new one, and from then on
+the stored list is what applies, so a later edit to that gate's configured value has no effect until the
+stored one is cleared. `gate_action get` reports the answers in effect, and `clear` forgets them,
+reverting a gate to its configured value. There is no `set`: the one way to give a standing answer at run time is a person
+answering the prompt that names the act.
+
+### Gates only relax
+
+Every gate starts closed: asked, or refused where nobody can be asked. Each answer a person gives, and
+each standing answer an installation configures, **widens** what matbot may do. Nothing a gate stores
+narrows it: **Deny** applies to that one occurrence and the next is asked again, and there is no "always
+deny". So the gates are how a user **relaxes** the defaults, deliberately and as narrowly as they
+choose, and the broader the answer the more it hands over. "Always allow every `plugin.add`" lets
+anything that reaches the tool endpoint install any plugin, with full access, unasked.
+
+A restriction is expressed somewhere else:
+
+- **don't load the plugin**, or the tool, that does the thing;
+- **the function runner's `permit_imports`**, which forbids modules outright, so nobody is asked;
+- **a replacement `PermissionGate`** with its rules compiled in, which can refuse what the default would
+  ask about, and whose rules are out of reach of anything that can write settings;
+- **the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.
 
 ## The web UI's endpoints
 
@@ -134,12 +190,35 @@ tools should refuse when nobody can be asked is a separate question from the run
 
 ## Shells
 
-- **`bash` grants everything** the user matbot runs as can do: files, network, processes, and the stored
-  gate answers. Install it only where that is intended.
-- **`docker-bash`** runs scripts in a container. The project is mounted read-only, with its `.env` covered
-  so it reads as empty; `.data` is read-write, except its `settings` and any SQLite database, which hold the
-  gate answers and are mounted read-only.
-  Its network is Docker's default bridge (see the web UI section).
+- **`bash` is inherently insecure.** It runs commands as the user matbot runs as, and nothing is gated
+  about what a command does: it reaches files, the network, other processes, `.env`, and the stored gate
+  answers, which it can rewrite to grant itself every later gate. A command it starts can also reach the
+  web UI's endpoints (see above). Install it only where the model is meant to have all of that.
+- **`docker-bash` is safer, not safe.** What it adds:
+  - scripts run in a container, with the project mounted read-only and its `.env` covered, so it reads
+    as empty;
+  - `.data` is read-write, except its `settings` and any SQLite database, which hold the gate answers
+    and are mounted read-only.
+
+  How much that is worth depends on where it runs:
+  - **The Docker installation.** With rootful Docker, matbot's user is in the `docker` group, which is
+    root-equivalent on the host, and the container shares the host's kernel, so an escape from it is
+    an escape to the host. Rootless Docker, Podman or user-namespace remapping narrow that; they are the
+    host's choice, not the plugin's.
+  - **What this implementation fixes.**
+    - **Network:** Docker's default bridge, which reaches the internet and the host, the UI's port
+      included.
+    - **Image:** `node:24-bookworm`.
+    - **User:** root inside the container.
+    - **Limits:** none on memory, CPU or processes.
+    - **Configurable:** only through `bash_config` (DNS, the container's name, the output cap), and
+      that tool is not gated.
+  - **What it can still write.** Sessions, files, knowledge and stores under `.data` are writable, so a
+    script can rewrite conversation history or a stored function's text. A function rewritten that way
+    loses its grants: its lineage is kept in settings, which the container cannot write.
+
+  A shell with no network, a non-root user, resource limits or another runtime is a different
+  implementation of the same tool, which is a plugin like any other.
 
 ## Secrets
 

@@ -207,7 +207,20 @@ plugins:
   - '@matatbread/matbot-function-runner-node'   # Node; only meaningful with function-tools
 ```
 
-Prefer `docker-bash` to `bash` where a shell is wanted at all: see [SECURITY.md](docs/SECURITY.md#shells).
+**Shells deserve a decision of their own.** `bash` is inherently insecure: it runs as matbot's user,
+with nothing gated about what a command does, including rewriting the stored gate answers.
+`docker-bash` is safer but not safe. It keeps the project read-only and the gate answers out of reach,
+but what it protects depends on the Docker installation underneath it (rootful Docker makes matbot's
+user root-equivalent on the host). As shipped, its container also reaches the network and the host,
+runs as root inside, and has no resource limits. Use neither unless the model needs a shell; see
+[SECURITY.md](docs/SECURITY.md#shells).
+
+**Permission gates start closed, and answers only open them.** A privileged act (installing a
+plugin, reaching an origin, a function importing a module) asks a human, and is refused when nobody can
+be asked. Each "Always allow…" answer widens what matbot may do from then on, for every route including
+background jobs and the HTTP tool endpoint, so answer as narrowly as the prompt allows. To forbid
+something outright, don't load the plugin that does it, or see
+[SECURITY.md](docs/SECURITY.md#gates-only-relax) for the other ways.
 
 **These are one strategy, not the only one.** Everything is a plugin, so each of these is a choice
 an installation can replace — by hand, or by asking the model to write the replacement. The node
