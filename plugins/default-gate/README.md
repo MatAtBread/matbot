@@ -15,9 +15,10 @@ inspect and undo an answer, conditional on a config line answers the question at
 
 This one reproduces matbot's historical behaviour:
 
-- ask the user, through whatever channel the turn has;
-- offer two standing answers — *Always allow "<subject>"* and *Always allow every `<gate>`*;
-- honour what was remembered, silently, next time;
+- ask the user, through whatever channel the turn has, offering *Deny*, *Always deny*, *Allow*, an
+  *Always allow* for each subject the call site offers (narrowest first, or the exact subject when it
+  offers none), and *Always allow every `<gate>`*;
+- honour what was remembered, silently, next time — a denial before an allow;
 - with nobody to ask, answer the request's own `fallback` (which is what the *call site* says its
   non-interactive behaviour is — `true` for a tool-name collision at boot, `false` everywhere else).
 
@@ -44,6 +45,18 @@ default_settings:
 
 A value is `true` (allow every subject), or a list of subjects to allow. Anything else asks.
 
+Denials live beside them, under `deny:<gate>`, in the same two shapes. *Always deny* at a prompt stores
+the exact subject being asked about, and nothing broader; an installation can configure a list, or
+`true` to refuse every subject of a gate without asking. A denial wins over an allow that also covers the
+act. In practice that arises only where the denial came first and a broader allow after, or both are
+configured, because an allow that covers an act stops it being asked about at all:
+
+```yaml
+default_settings:
+  '@matatbread/matbot-default-gate':
+    'deny:plugin.add': true              # never install a plugin, and never ask
+```
+
 This is also the supported way to make a gated operation work for callers that have **no prompt
 channel** — `invokeTool`, a trigger, a compiled skill, `POST /tools/:name` — which otherwise get the
 call site's `fallback` (a refusal, for everything but `tools.overwrite`). Connecting an MCP server
@@ -67,7 +80,7 @@ policy keys on the spelling.
 capability and there is no in-process sandbox. And a standing answer is a *decision, not a channel*:
 it applies at every door, including `POST /tools/:name`, `invokeTool` and a trigger — so *Always allow
 every `plugin.add`* lets anything that can reach the HTTP endpoint install anything, with nobody asked.
-Prefer the per-subject form.
+An answer means what it says; the per-subject form is offered first.
 
 **A policy can refuse where nobody is watching.** `decide(req, ask)` gets `ask === undefined` when no
 human is reachable, so a policy that wants standing answers to apply only to interactive callers is
@@ -77,22 +90,24 @@ Neither is what the shipped policy does: an installation that configures `'mcp_a
 precisely wants the non-interactive caller to succeed, so the default honours an answer wherever the
 operation happens. Write the stricter one if your deployment wants it.
 
-**These answers are not out of the model's reach.** They live in `.data/settings/`, which `bash` can
-write and `docker-bash` mounts read-write, so on an install with a shell tool the model can author its
-own standing answer and every later prompt is skipped. This policy is therefore a *record of decisions*,
+**These answers are not out of the model's reach.** They live in `.data/settings/` (or the SQLite
+database), which `bash` can write — `docker-bash` mounts both read-only — so on an install with `bash`
+the model can author its own standing answer and every later prompt is skipped. This policy is therefore a *record of decisions*,
 not a security boundary; a deployment that needs one ships a gate with its rules compiled in — which is
 what the replaceable seam is for.
 
 ## `gate_action`
 
-- `{ action: 'get' }` — the standing answers in effect (optionally one `gate`). A stored answer and a
+- `{ action: 'get' }` — the standing answers in effect (optionally one `gate`), as `answers`, and any
+  denials as `denials` (present only when there is one, so the result is unchanged where there are
+  none). A stored answer and a
   configured default read identically, because the question is whether the prompt appears. A gate with
   **no** answer is not reported: on a fresh install this returns nothing, and every gate simply behaves
   as configured. There is no list of "all the gates" — ids are open, and an absent key says only that
   nobody answered, not what will happen. Name a `gate` to ask about one, which is also the only way to
   see one an installation configured but nobody has answered (settings cannot enumerate their keys).
-- `{ action: 'clear' }` — forget standing answers so the operation asks again: everything, one
-  `gate`, or one `subject` within a gate. Clearing means *revert to the configured default*, so an
+- `{ action: 'clear' }` — forget standing answers, denials included, so the operation asks again:
+  everything, one `gate`, or one `subject` within a gate. Clearing means *revert to the configured default*, so an
   installation's own `default_settings:` floor survives it.
 
 There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names

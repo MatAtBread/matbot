@@ -7,12 +7,24 @@ import { permitted, refused, type FormField, type PermissionGate, type PluginSet
 export const DEFAULT_GATE_SETTINGS_NS = '@matatbread/matbot-default-gate';
 
 /**
- * A standing answer for one gate id: `true` — allow every subject; a list — allow exactly these
- * subjects; absent (or anything else) — ask. There is no stored "always deny": a refusal is a
- * decision about one act, and a policy that silences a prompt into a permanent no is a policy with
- * rules of its own, which is a different gate rather than a remembered answer.
+ * A standing answer for one gate id: `true` — every subject; a list — exactly these subjects; absent (or
+ * anything else) — ask. Stored under the gate id for an allow, and under {@link denyKey} for a deny.
  */
 export type StandingAnswer = true | readonly string[];
+
+/**
+ * Where a gate's standing DENIALS live: beside its allows, under a key no gate id can have (a gate id is
+ * `<tool>.<gate>`, and a tool name has no `:`), so the allow keys keep the format they always had and a
+ * reader that predates denials sees nothing it misreads as one.
+ *
+ * Only the exact subject is ever stored from a prompt: "Always deny" is offered for the act being asked
+ * about and nothing broader, because a deny is for the request a model keeps making, and one button is
+ * the price of it. An installation can configure a list, or `true` for every subject, under
+ * `default_settings:` like any other key. A denial wins over an allow that also covers the act — which
+ * matters only where a deny was stored first and a broader allow given after, or both are configured,
+ * since an allow covering the act would have kept it from being asked about again.
+ */
+export const denyKey = (gate: string): string => `deny:${gate}`;
 
 /** Boundary check on a value out of config or a store — neither is typed, and a malformed one must not
  *  read as `true` (every subject allowed, no prompt, no trace of why). Anything unrecognised asks. */
@@ -76,6 +88,16 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   const read = async (gate: string): Promise<StandingAnswer | undefined> =>
     toStandingAnswer(await settings.get<unknown>(gate));
 
+  // Re-read INSIDE the write queue: the list may have grown since the prompt was rendered (a concurrent
+  // collision, answered first). Persist the list IN EFFECT plus this subject, never the subject alone — the
+  // list in effect may come from `default_settings`, and a stored key wins over the floor wholesale, so
+  // writing `[subject]` would silently start asking again about everything the install had exempted.
+  const remember = async (key: string, subject: string): Promise<void> => {
+    const current  = toStandingAnswer(await settings.get<unknown>(key));
+    const subjects = current === undefined || current === true ? [subject] : [...new Set([...current, subject])];
+    await settings.set(key, subjects);
+  };
+
   // A standing answer is one write, and the store is the only record: `settings.entries()` enumerates
   // the namespace, so there is nothing to index. This used to keep its own list of ids it had written —
   // a second copy of its own keyspace, which could not see a configured default, and which a crash
@@ -87,6 +109,9 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       // "always allow" a human gave earlier — settings reads are layered, so nothing here can tell
       // the two apart, and a source that claimed `user` for a configured floor would be a lie half
       // the time. What a reader needs is that this was decided in advance, not at this prompt.
+      // Denied first: a denial wins over an allow that also covers the act. Exact subject only — a
+      // denial is never generalised by the call site's broader standing subjects.
+      if (allows(await read(denyKey(req.gate)), req.subject)) return refused('configuration');
       if (allows(await read(req.gate), req.subject, standing)) return permitted('configuration');
 
       // Nothing stored and nobody to ask: the displaced gate answers, which for the host default means
@@ -114,7 +139,9 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       // The label is the call site's, rendered and never rewritten, exactly as `req.label` is. With none
       // offered this falls back to naming the subject, which is right for a gate whose subject is already
       // prose a human recognises (`@x/foo` for `plugin.add`) and is all a policy can honestly do.
-      const ALLOW_ONCE = 'allow', ALWAYS_GATE = 'always-gate';
+      // "Always deny" sits beside Deny and names nothing: the question above it already states the exact
+      // act, which is all it covers. The policy's own words, like "Always allow every …".
+      const ALLOW_ONCE = 'allow', ALWAYS_GATE = 'always-gate', DENY_ALWAYS = 'deny-always';
       const offers = standing.length > 0
         ? standing
         : [{ subject: req.subject, label: `Always allow "${req.subject}"` }];
@@ -125,6 +152,7 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
         type:    'select',
         options: [
           { value: 'deny',      label: 'Deny' },
+          { value: DENY_ALWAYS, label: 'Always deny' },
           { value: ALLOW_ONCE,  label: 'Allow' },
           ...always.map(({ value, label }) => ({ value, label })),
           { value: ALWAYS_GATE, label: `Always allow every ${req.gate}` },
@@ -134,21 +162,16 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       const answer = (await ask(field)).trim().toLowerCase();
 
       if (answer === ALWAYS_GATE) { await serialised(() => settings.set(req.gate, true)); return permitted('user'); }
+      if (answer === DENY_ALWAYS) {
+        await serialised(() => remember(denyKey(req.gate), req.subject));
+        return refused('user');
+      }
       // Only a subject that was OFFERED can be stored: the remembered value is looked up in the options
       // this prompt rendered, never taken from the answer text. A policy that stored an arbitrary string
       // back would let a call site widen every other gate's memory by what it puts in one field.
       const chosen = always.find(a => a.value === answer)?.subject;
       if (chosen !== undefined) {
-        await serialised(async () => {
-          // Re-read INSIDE the queue: the list may have grown since this prompt was rendered (a
-          // concurrent collision, answered first). Persist the list IN EFFECT plus this subject, never
-          // the subject alone — the list in effect may come from `default_settings`, and a stored key
-          // wins over the floor wholesale, so writing `[subject]` would silently start asking again
-          // about everything the install had exempted.
-          const current  = await read(req.gate);
-          const subjects = current === undefined || current === true ? [chosen] : [...new Set([...current, chosen])];
-          await settings.set(req.gate, subjects);
-        });
+        await serialised(() => remember(req.gate, chosen));
         return permitted('user');
       }
       // Deny, an answer a frontend resolved to no option, or anything unrecognised: permission is what

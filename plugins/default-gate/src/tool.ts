@@ -1,5 +1,5 @@
 import type { PluginSettings, Tool, ToolContract, ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { DEFAULT_GATE_SETTINGS_NS, toStandingAnswer, type StandingAnswer } from './gate.js';
+import { DEFAULT_GATE_SETTINGS_NS, denyKey, toStandingAnswer, type StandingAnswer } from './gate.js';
 
 /** A standing answer in force for one gate: `always` allows every subject, `subjects` allows exactly
  *  those. There is no arm for "no answer" — a gate with none simply is not reported, because an absent
@@ -19,7 +19,9 @@ export interface GateAnswer {
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     gate_action:
-      | ToolContract<{ answers: GateAnswer[] }, { action: 'get'; gate?: string }>
+      // `denials` is the same shape for what is refused unasked: present only when there is one, so a
+      // reader written before denials existed sees exactly the result it always did.
+      | ToolContract<{ answers: GateAnswer[]; denials?: GateAnswer[] }, { action: 'get'; gate?: string }>
       | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; gate?: string; subject?: string }>;
   }
 }
@@ -35,6 +37,8 @@ const describe = (gate: string, answer: StandingAnswer | undefined): GateAnswer 
   answer === true      ? { gate, effect: 'always' }
   : answer === undefined ? undefined
   :                        { gate, effect: 'subjects', subjects: answer };
+
+const DENY = denyKey('');
 
 export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<'gate_action'>> {
   // Every standing answer in force, in ONE document read: `entries()` layers the stored document over
@@ -65,9 +69,12 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
       'asks). Gate ids are open — a plugin contributes its own — so there is no vocabulary to list. ' +
       'Pass "gate" to ask about one id, including one an installation configured but nobody has ' +
       'answered, which a bare listing cannot reach.\n\n' +
-      '"clear" forgets answers, so the operation asks again: with no arguments every gate, with "gate" ' +
-      'that gate alone, and with "gate" + "subject" just that subject. Clearing means "revert to the ' +
-      'configured default", so a gate an installation configured in its own config keeps that setting.\n\n' +
+      'Answering "Always deny" stores a DENIAL of that exact act instead, after which it is refused ' +
+      'without asking; "get" reports those as "denials", beside "answers".\n\n' +
+      '"clear" forgets answers and denials alike, so the operation asks again: with no arguments every ' +
+      'gate, with "gate" that gate alone, and with "gate" + "subject" just that subject. Clearing means ' +
+      '"revert to the configured default", so a gate an installation configured in its own config ' +
+      'keeps that setting.\n\n' +
       'This tool cannot GRANT permission: the only way to author a standing answer at runtime is to ' +
       'answer a prompt that names the specific act.',
     inputSchema: {
@@ -85,10 +92,13 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
 
         if (act.action === 'get') {
           const held    = await standing();
-          const ids     = act.gate !== undefined ? [act.gate] : [...held.keys()];
-          const answers = ids.map(gate => describe(gate, held.get(gate)))
-                             .filter((row): row is GateAnswer => row !== undefined);
-          yield { type: 'result', value: { answers } };
+          const gates   = act.gate !== undefined ? [act.gate]
+            : [...new Set([...held.keys()].map(k => k.startsWith(DENY) ? k.slice(DENY.length) : k))];
+          const rows    = (key: (gate: string) => string): GateAnswer[] =>
+            gates.map(gate => describe(gate, held.get(key(gate)))).filter((row): row is GateAnswer => row !== undefined);
+          const answers = rows(gate => gate);
+          const denials = rows(denyKey);
+          yield { type: 'result', value: { answers, ...(denials.length > 0 ? { denials } : {}) } };
           return;
         }
 
@@ -98,32 +108,37 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
               yield { type: 'error', message: 'clear: "subject" identifies a subject WITHIN a gate — pass "gate" as well, or omit "subject" to clear the whole gate.' };
               return;
             }
-            const current = (await standing()).get(act.gate);
-            if (current === undefined || current === true) {
-              // `true` allows every subject, so there is no one subject to subtract — saying so beats
-              // silently writing a list that would then shadow the blanket answer the user gave.
-              yield { type: 'result', value: { cleared: [], message: current === true
-                ? `"${act.gate}" is allowed for every subject — clear the gate itself to undo that.`
+            const held    = await standing();
+            const cleared: string[] = [];
+            // The subject may be allowed, denied, or both (a deny stored first, a broader allow after),
+            // and forgetting it means forgetting it wherever it is.
+            for (const key of [act.gate, denyKey(act.gate)]) {
+              const current = held.get(key);
+              if (current === undefined || current === true || !current.includes(act.subject)) continue;
+              // Stored, not deleted — including when the list came from `default_settings:`: the result
+              // is an override that keeps the rest of the configured list and drops this one subject,
+              // which is what was asked for. An empty list is stored too; it means "ask about every
+              // subject", a different fact from "revert to whatever the installation configured".
+              await settings.set(key, current.filter(s => s !== act.subject));
+              cleared.push(`${key}:${act.subject}`);
+            }
+            if (cleared.length > 0) {
+              yield { type: 'result', value: { cleared, message: `"${act.gate}" will ask about "${act.subject}" again.` } };
+              return;
+            }
+            // `true` covers every subject, so there is no one subject to subtract — saying so beats
+            // silently writing a list that would then shadow the blanket answer the user gave.
+            const blanket = held.get(act.gate) === true ? 'allowed' : held.get(denyKey(act.gate)) === true ? 'denied' : undefined;
+            yield { type: 'result', value: { cleared: [], message: blanket !== undefined
+              ? `"${act.gate}" is ${blanket} for every subject — clear the gate itself to undo that.`
+              : held.has(act.gate) || held.has(denyKey(act.gate))
+                ? `"${act.subject}" is not a remembered subject of "${act.gate}".`
                 : `"${act.gate}" has no standing answer, so nothing was cleared.` } };
-              return;
-            }
-            const remaining = current.filter(s => s !== act.subject);
-            if (remaining.length === current.length) {
-              yield { type: 'result', value: { cleared: [], message: `"${act.subject}" is not a remembered subject of "${act.gate}".` } };
-              return;
-            }
-            // Stored, not deleted — including when the list came from `default_settings:`: the result
-            // is an override that keeps the rest of the configured list and drops this one subject,
-            // which is what was asked for. An empty list is stored too; it means "ask about every
-            // subject", a different fact from "revert to whatever the installation configured".
-            await settings.set(act.gate, remaining);
-            yield { type: 'result', value: { cleared: [`${act.gate}:${act.subject}`], message:
-              `"${act.gate}" will ask about "${act.subject}" again.` } };
             return;
           }
 
           const before = await standing();
-          const ids    = act.gate !== undefined ? [act.gate] : [...before.keys()];
+          const ids    = act.gate !== undefined ? [act.gate, denyKey(act.gate)] : [...before.keys()];
           for (const gate of ids) {
             if (before.has(gate)) await settings.delete(gate);
           }
@@ -140,7 +155,7 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
           const stayed  = ids.filter(gate => after.has(gate));
           const parts: string[] = [];
           if (cleared.length > 0) parts.push(`Forgot ${cleared.length} standing answer(s): ${cleared.join(', ')} — each now behaves as this installation configured it.`);
-          if (stayed.length > 0)  parts.push(`Still allowed by the installation's configured defaults, which this tool cannot change: ${stayed.join(', ')}. Edit \`default_settings\` for '${DEFAULT_GATE_SETTINGS_NS}' to change those.`);
+          if (stayed.length > 0)  parts.push(`Still in force from the installation's configured defaults, which this tool cannot change: ${stayed.join(', ')}. Edit \`default_settings\` for '${DEFAULT_GATE_SETTINGS_NS}' to change those.`);
           if (parts.length === 0) parts.push('No standing answers were stored, so nothing was cleared.');
           yield { type: 'result', value: { cleared, message: parts.join(' ') } };
           return;

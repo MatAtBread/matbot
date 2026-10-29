@@ -231,7 +231,7 @@ test('each standing answer is offered in order, labelled by the CALL SITE, and t
   // Rendering `Always allow "<subject>"` could only ever show the key, which is what made the prompt
   // unreadable: nothing outside the call site knows that `node:` means "any builtin".
   assert.deepEqual(asked[0]?.options?.map(optionLabel), [
-    'Deny', 'Allow',
+    'Deny', 'Always deny', 'Allow',
     'Always allow function "probe" to import node:os',
     'Always allow function "probe" to import any node builtin',
     'Always allow ANY function to import node:os',
@@ -247,7 +247,7 @@ test('with none offered, the policy still offers the exact subject', async () =>
   const { asked, ask } = recorder('always-0');
   assert.equal((await gate.decide(req(), ask)).allowed, true);
   assert.deepEqual(asked[0]?.options?.map(optionLabel),
-    ['Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add']);
+    ['Deny', 'Always deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add']);
   assert.deepEqual(await settings.get('plugin.add'), ['@x/foo']);
 });
 
@@ -326,11 +326,75 @@ test('the options separate what is shown from what is answered', async () => {
   await gate.decide(req({ gate: 'plugin.add', subject: '@x/foo' }), seen.ask);
 
   const opts = seen.asked[0]?.options ?? [];
-  assert.deepEqual(opts.map(optionValue), ['deny', 'allow', 'always-0', 'always-gate']);
+  assert.deepEqual(opts.map(optionValue), ['deny', 'deny-always', 'allow', 'always-0', 'always-gate']);
   assert.deepEqual(opts.map(optionLabel), [
-    'Deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add',
+    'Deny', 'Always deny', 'Allow', 'Always allow "@x/foo"', 'Always allow every plugin.add',
   ]);
   assert.equal(seen.asked[0]?.default, 'deny', 'the default names a value, not a label');
+});
+
+// ── Always deny ───────────────────────────────────────────────────────────────
+// One button, for the act being asked about and nothing broader: what a model keeps requesting, refused
+// from then on without asking. Stored beside the allows under a key no gate id can have, so the allow
+// keys keep their format and a reader that predates denials misreads nothing.
+
+test('"Always deny" stores the exact subject, and the act is refused unasked from then on', async () => {
+  const { gate, settings } = policy();
+  const first = recorder('deny-always');
+  const d = await gate.decide(importReq(), first.ask);
+  assert.deepEqual([d.allowed, d.source], [false, 'user']);
+  assert.deepEqual(await settings.get('deny:tool_function.import'), ['probe node:os'], 'the exact subject, not a broader one');
+  assert.equal(await settings.get('tool_function.import'), undefined, 'no allow written');
+
+  const again = recorder('allow');
+  const d2 = await gate.decide(importReq(), again.ask);
+  assert.deepEqual([d2.allowed, d2.source], [false, 'configuration'], 'refused as decided in advance');
+  assert.equal(again.asked.length, 0, 'and nobody is asked');
+  // At a door with nobody to ask, too.
+  assert.equal((await gate.decide(importReq(), undefined)).source, 'configuration');
+  // Only that subject: another function importing the same module is still asked.
+  const other = recorder('allow');
+  assert.equal((await gate.decide(importReq({ subject: 'other node:os', standing: [] }), other.ask)).allowed, true);
+  assert.equal(other.asked.length, 1);
+});
+
+test('a denial wins over a broader allow given after it', async () => {
+  const { gate } = policy({ 'deny:tool_function.import': ['probe node:os'], 'tool_function.import': ['* node:os'] });
+  const seen = recorder('allow');
+  assert.equal((await gate.decide(importReq(), seen.ask)).allowed, false);
+  assert.equal((await gate.decide(importReq({ subject: 'other node:os', standing: [{ subject: '* node:os', label: 'x' }] }), seen.ask)).allowed, true,
+               'everyone else still gets the allow');
+  assert.equal(seen.asked.length, 0);
+});
+
+test('an installation can configure a denial for every subject of a gate', async () => {
+  const { gate } = policy({ 'deny:plugin.add': true });
+  const seen = recorder('allow');
+  assert.equal((await gate.decide(req({ gate: 'plugin.add', subject: '@x/foo' }), seen.ask)).allowed, false);
+  assert.equal(seen.asked.length, 0);
+});
+
+test('gate_action reports denials beside answers, and clear forgets them', async () => {
+  const { settings } = policy({ 'plugin.add': ['@x/ok'] });
+  await settings.set('deny:tool_function.import', ['probe node:os']);
+  const tool = makeGateActionTool(settings);
+  const run = async (p: object): Promise<unknown> => {
+    let v: unknown;
+    for await (const ev of tool.executor.execute(p, {} as never)) if (ev.type === 'result') v = ev.value;
+    return v;
+  };
+  assert.deepEqual(await run({ action: 'get' }), {
+    answers: [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/ok'] }],
+    denials: [{ gate: 'tool_function.import', effect: 'subjects', subjects: ['probe node:os'] }],
+  });
+  assert.deepEqual(await run({ action: 'get', gate: 'plugin.add' }), { answers: [{ gate: 'plugin.add', effect: 'subjects', subjects: ['@x/ok'] }] },
+                   'no denials key when there are none — the shape a reader before denials expects');
+  const cleared = await run({ action: 'clear', gate: 'tool_function.import', subject: 'probe node:os' }) as { cleared: string[] };
+  assert.deepEqual(cleared.cleared, ['deny:tool_function.import:probe node:os']);
+  assert.deepEqual(await settings.get('deny:tool_function.import'), []);
+  await settings.set('deny:tool_function.import', ['probe node:os']);
+  await run({ action: 'clear', gate: 'tool_function.import' });
+  assert.equal(await settings.get('deny:tool_function.import'), undefined, 'clearing a gate forgets its denials');
 });
 
 test('with nobody to ask, the policy delegates to the gate it displaced', async () => {
