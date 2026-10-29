@@ -18,6 +18,9 @@ churn and less likely to affect a consumer who doesn't use them.
   message beside a judged user message. In 0.4.23 such a turn had no line, which the classifier could not
   tell from a summary it was not shown, so a condition on a reply made without tools could only be
   guessed at. A user message still reports only the files attached to it, with no line when there are none.
+- **`triggers`** — a retract-redo no longer leaves a `suppressed` marker with cause `user-redo` and an empty
+  `triggers` list. Nothing was evaluated on a redo, so nothing was held off, and the `matbot-retraction`
+  marker the skip is keyed on already records the redo. The cause is gone from the vocabulary.
 
 ## 0.4.23
 

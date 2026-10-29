@@ -93,3 +93,11 @@ test('a failed fire carries its matched conditions on the error marker, and is n
   assert.deepEqual(triggerMarkers(markers), [{ triggerId: 't1', tool: 'absent', error: 'tool "absent" not registered',
     matched: [{ index: 0, kind: 'followup', rule: 'MATCH always', why: 'evidence for t1#0' }] }]);
 });
+
+test('a retract-redo leaves no trigger marker: nothing was evaluated, so nothing was held off', async () => {
+  const { services, hooks } = machine([trigger('ephemeral')], []);
+  await setupTriggers(services);
+  const retraction = { id: 'r', role: 'marker', content: [{ type: 'marker', creator: 'matbot-retraction', data: {} }] } as unknown as Message;
+  const out = await hooks.get('screen')!({ session: session([user('q'), retraction]), signal, config: { provider: 'p', traceId: 'tr' } } as never);
+  assert.equal(out, undefined);
+});

@@ -147,7 +147,7 @@ const RETRACTION_CREATOR = 'matbot-retraction';
 // `retractFiredMarker` records which triggers/conditions caused a retract. Both are LLM-invisible
 // diagnostics. The convergence guard reads back BOTH retract-fired AND its own `retract-convergence`
 // suppressions (see retractActiveLastTurn).
-type SuppressCause = 'user-redo' | 'retract-convergence' | 'followup-shadowed' | 'cooldown';
+type SuppressCause = 'retract-convergence' | 'followup-shadowed' | 'cooldown';
 function suppressedMarker(cause: SuppressCause, reason: string, triggers: FiredSource[]): MessageContent {
   return { type: 'marker', creator: 'triggers', data: { event: 'suppressed', cause, reason, triggers } };
 }
@@ -471,10 +471,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // Guard: a retract-redo re-runs this same user turn. The user-phase triggers already fired — and
       // their side effects (e.g. remember_fact's store write) already happened — on the original
       // attempt, so re-firing would double-apply them. Don't kick a second evaluation off; the redo
-      // already carries the retract correction as injected context. Record why (never silent).
-      if (isRetractRedo(ctx.session.messages)) {
-        return { markers: [suppressedMarker('user-redo', 'user-phase triggers held off: retract-redo (user message already processed on the original attempt)', [])] };
-      }
+      // already carries the retract correction as injected context. No marker: nothing was evaluated, so
+      // nothing was held off, and the `matbot-retraction` marker this guard keys on already records the redo.
+      if (isRetractRedo(ctx.session.messages)) return;
 
       // No traceId ⇒ can't correlate to the followup hook that consumes the verdict; skip racing (a
       // direct runSession caller without a traceId simply gets no user-phase triggers). In the pump —
