@@ -36,8 +36,11 @@ UI, memory, skills and a Telegram frontend without ever touching a config file.
 
 **Security is a first-class concern.** The principal carrier threads identity through
 every layer — tools, storage, knowledge index — without it needing to be in every
-signature. Credentials are resolved at runtime and never written to session storage. In
-the browser, the sandbox means even an overenthusiastic LLM can't touch your filesystem.
+signature. Credentials are resolved at runtime and never written to session storage.
+Privileged operations pass through permission gates that ask a human, and refuse when nobody
+can be asked. In the browser, the sandbox means even an overenthusiastic LLM can't touch your
+filesystem. [SECURITY.md](docs/SECURITY.md) sets out the threat model, what is protected, what
+remains open, and how to deploy — read it before exposing an installation to anyone else.
 
 ---
 
@@ -178,6 +181,41 @@ And a **Status**:
 The built-in `plugin` and `provider` tools (add/remove/reload plugins, manage LLM profiles) are always
 loaded — see [Core](#core) above. Note: plugins are scoped to a run-time; not all (eg `bash`) are
 available in all run-times (eg the browser).
+
+### Recommended for more secure operation
+
+None of these is loaded by default, because none is needed to run matbot. Each one narrows what a
+model can get wrong, or get away with:
+
+| Plugin | Why |
+|---|---|
+| `json-validation` | Refuses a tool call whose params do not match the tool's schema — a wrong type, a missing field, a value outside its set — before the tool runs, and tells the model what to fix. Node and browser |
+| `ts-validation` | The same check against the tool's TypeScript contract, which is stricter than its schema: it also refuses a property the contract does not declare, so `session_id` mis-sent for `sessionId` is a reported mistake rather than a call the tool reads as "no session given". Loads beside `json-validation`; a call either refuses is refused. Node only, and installs `tool-types` itself |
+| `tool-types` (or `caching-tool-types`) | Types the code `function-tools` and `skill-compiler` generate, and refuses what it must not do before it runs: casts that hide a wrong shape, globals and modules the runner withholds, and reaching past the runner (`ESCAPE-GATE`) |
+| `function-runner-node` | Runs `tool_function` bodies: bounds their run time, withholds `process` and friends, puts every `import(…)`, `fetch` and `WebSocket` to a permission gate, and refuses code built from a string. Without it a body runs unbounded and ungated |
+
+`tool-types` and `function-runner-node` matter only where model-written code runs — in practice, with
+`function-tools` loaded, which is the route by which model-written text runs as code without a plugin
+install. Without `function-tools` there is no body to run, and `tool-types` is then only what
+`ts-validation` checks against.
+
+```yaml
+plugins:
+  - '@matatbread/matbot-tool-json-validation'
+  - '@matatbread/matbot-tool-ts-validation'     # Node; brings tool-types with it
+  - '@matatbread/matbot-function-tools'
+  - '@matatbread/matbot-function-runner-node'   # Node; only meaningful with function-tools
+```
+
+Prefer `docker-bash` to `bash` where a shell is wanted at all: see [SECURITY.md](docs/SECURITY.md#shells).
+
+**These are one strategy, not the only one.** Everything is a plugin, so each of these is a choice
+an installation can replace — by hand, or by asking the model to write the replacement. The node
+runner, for instance, runs bodies in matbot's own process and stops a body reaching past the gates,
+but cannot stop code written to interfere with matbot; a `FunctionRunner` that runs each body in a
+child process, or a context of its own, is a different strategy behind the same seam, and needs no
+change anywhere else. [SECURITY.md](docs/SECURITY.md) says what each of these does and does not
+cover, which is what a replacement would be measured against.
 
 ---
 
