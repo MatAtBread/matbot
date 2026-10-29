@@ -40,7 +40,7 @@ signature. Credentials are resolved at runtime and never written to session stor
 Privileged operations pass through permission gates that ask a human, and refuse when nobody
 can be asked. In the browser, the sandbox means even an overenthusiastic LLM can't touch your
 filesystem. [SECURITY.md](docs/SECURITY.md) sets out the threat model, what is protected, what
-remains open, and how to deploy — read it before exposing an installation to anyone else.
+remains open, and how to deploy.
 
 ---
 
@@ -192,7 +192,7 @@ model can get wrong, or get away with:
 | `json-validation` | Refuses a tool call whose params do not match the tool's schema — a wrong type, a missing field, a value outside its set — before the tool runs, and tells the model what to fix. Node and browser |
 | `ts-validation` | The same check against the tool's TypeScript contract, which is stricter than its schema: it also refuses a property the contract does not declare, so `session_id` mis-sent for `sessionId` is a reported mistake rather than a call the tool reads as "no session given". Loads beside `json-validation`; a call either refuses is refused. Node only, and installs `tool-types` itself |
 | `tool-types` (or `caching-tool-types`) | Types the code `function-tools` and `skill-compiler` generate, and refuses what it must not do before it runs: casts that hide a wrong shape, globals and modules the runner withholds, and reaching past the runner (`ESCAPE-GATE`) |
-| `function-runner-node` | Runs `tool_function` bodies: bounds their run time, withholds `process` and friends, puts every `import(…)`, `fetch` and `WebSocket` to a permission gate, and refuses code built from a string. Without it a body runs unbounded and ungated |
+| `function-runner-node` | Runs `tool_function` bodies: bounds their run time, withholds `process` and friends, puts every `import(…)`, `fetch` and `WebSocket` to a permission gate, and refuses code built from a string. Without it a body runs unbounded and ungated. One implementation of the `FunctionRunner` seam: a runner that runs each body in a child process is a more secure one, not currently part of this repo |
 
 `tool-types` and `function-runner-node` matter only where model-written code runs — in practice, with
 `function-tools` loaded, which is the route by which model-written text runs as code without a plugin
@@ -212,14 +212,13 @@ with nothing gated about what a command does, including rewriting the stored gat
 `docker-bash` is safer but not safe. It keeps the project read-only and the gate answers out of reach,
 but what it protects depends on the Docker installation underneath it (rootful Docker makes matbot's
 user root-equivalent on the host). As shipped, its container also reaches the network and the host,
-runs as root inside, and has no resource limits. Use neither unless the model needs a shell; see
-[SECURITY.md](docs/SECURITY.md#shells).
+runs as root inside, and has no resource limits. See [SECURITY.md](docs/SECURITY.md#shells).
 
 **Permission gates start closed, and answers only open them.** A privileged act (installing a
 plugin, reaching an origin, a function importing a module) asks a human, and is refused when nobody can
-be asked. Each "Always allow…" answer widens what matbot may do from then on, for every route including
-background jobs and the HTTP tool endpoint, so answer as narrowly as the prompt allows. To forbid
-something outright, don't load the plugin that does it, or see
+be asked. What model-written code may do beyond that is what a user has permitted: each "Always allow…"
+answer widens it from then on, for every route including background jobs and the HTTP tool endpoint.
+To forbid something outright, don't load the plugin that does it, or see
 [SECURITY.md](docs/SECURITY.md#gates-only-relax) for the other ways.
 
 **These are one strategy, not the only one.** Everything is a plugin, so each of these is a choice

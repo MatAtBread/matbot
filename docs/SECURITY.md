@@ -100,9 +100,10 @@ answering the prompt that names the act.
 Every gate starts closed: asked, or refused where nobody can be asked. Each answer a person gives, and
 each standing answer an installation configures, **widens** what matbot may do. Nothing a gate stores
 narrows it: **Deny** applies to that one occurrence and the next is asked again, and there is no "always
-deny". So the gates are how a user **relaxes** the defaults, deliberately and as narrowly as they
-choose, and the broader the answer the more it hands over. "Always allow every `plugin.add`" lets
-anything that reaches the tool endpoint install any plugin, with full access, unasked.
+deny". So the gates are how a user **relaxes** the defaults. The point is that model-written code does
+nothing the user has not permitted, not to judge what a user permits: an answer means what it says.
+"Always allow every `plugin.add`" means anything that reaches the tool endpoint installs any plugin,
+with full access, unasked.
 
 A restriction is expressed somewhere else:
 
@@ -167,7 +168,8 @@ replace it.
   spellings of that too, and a computed spelling gets past it. Code that arrives through prompt injection
   (an email, a web page, a file the model was asked to read) is that kind of code. A runner that gives
   each body a context or a process of its own is the answer for an installation that processes untrusted
-  content.
+  content. A child-process runner is one such implementation, not currently part of this repo; any
+  `FunctionRunner` can be swapped in without changing anything else.
 - **A body cannot answer a gate.** The tools it calls ask through the calling turn's channel, and
   `toolInContext` changes only the provider and can only add a reason to cancel, so a body cannot hand a
   callee a prompt, a session or tools of its own.
@@ -193,7 +195,7 @@ tools should refuse when nobody can be asked is a separate question from the run
 - **`bash` is inherently insecure.** It runs commands as the user matbot runs as, and nothing is gated
   about what a command does: it reaches files, the network, other processes, `.env`, and the stored gate
   answers, which it can rewrite to grant itself every later gate. A command it starts can also reach the
-  web UI's endpoints (see above). Install it only where the model is meant to have all of that.
+  web UI's endpoints (see above). Loading it gives the model all of that.
 - **`docker-bash` is safer, not safe.** What it adds:
   - scripts run in a container, with the project mounted read-only and its `.env` covered, so it reads
     as empty;
@@ -273,5 +275,5 @@ affected and should stay: `http.secret` (sending a vault key to an origin) and `
 - **Enforce the proxy outside the process.** Node's `fetch` does not use `HTTP_PROXY`/`HTTPS_PROXY`
   unless its proxy support is switched on, and code that escapes the in-process runner can open sockets
   directly. A firewall that lets matbot's user out only through the proxy holds either way.
-- **Prefer narrow standing answers.** "Always allow every `plugin.add`" means anything that reaches the
-  tool endpoint can install any plugin with nobody asked, and a loaded plugin has full access.
+- **A standing answer means what it says.** "Always allow every `plugin.add`" means anything that
+  reaches the tool endpoint can install any plugin with nobody asked, and a loaded plugin has full access.
