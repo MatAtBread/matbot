@@ -1,6 +1,7 @@
 import type { FunctionCall, JSONSchema } from '@matatbread/matbot-plugin-api';
 import { INJECTED, compileUnder, erase, type CompileHost, type CompiledFn } from './compile.js';
-import { inertEnd, matchBrace, matchParen, parseSignature, tsTypeToSchema, unwrapPromise, type LocalTypes, type ParsedParam } from './signature.js';
+import { inertEnd, matchBrace, matchParen } from './scan.js';
+import { parseSignature, tsTypeToSchema, unwrapPromise, type LocalTypes, type ParsedParam } from './signature.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
  *  Anthropic and OpenAI reject in a tool name, and not `-`, which is not an identifier character: the name

@@ -676,6 +676,10 @@ importers:
         version: 6.0.3
 
   plugins/tool-store:
+    dependencies:
+      '@matatbread/matbot-function-tools':
+        specifier: workspace:^
+        version: link:../function-tools
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^

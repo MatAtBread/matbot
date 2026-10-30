@@ -1,3 +1,5 @@
+import { inertEnd, withoutComments } from '@matatbread/matbot-function-tools/scan';
+
 /**
  * A store's `shape` is LLM-authored TypeScript arriving as a string, so it is read the way any
  * model-authored source has to be: comments stripped first, then scanned with brace matching rather
@@ -9,39 +11,6 @@
  * declaration survived into the collapsed one-line contract, where `// the note body` comments out
  * every arm after it: an unparseable `toolContract`, which is a refusal for that tool.
  */
-
-/** Index of the last char of an inert run (comment or string literal) opening at `i`; -1 if none does. */
-function inertEnd(s: string, i: number): number {
-  const c = s[i];
-  if (c === '/' && s[i + 1] === '/') { const nl = s.indexOf('\n', i + 2); return nl === -1 ? s.length - 1 : nl - 1; }
-  if (c === '/' && s[i + 1] === '*') { const close = s.indexOf('*/', i + 2); return close === -1 ? s.length - 1 : close + 1; }
-  if (c === '"' || c === "'" || c === '`') {
-    for (let j = i + 1; j < s.length; j++) {
-      if (s[j] === '\\') { j++; continue; }
-      if (s[j] === c) return j;
-      // An apostrophe and a quote are the same character, so prose around a model-authored shape
-      // ("Note's fields:") opens a literal that never closes. Treating the rest as inert copies its
-      // comments verbatim into the collapsed one-line contract — precisely the failure this module
-      // exists to prevent, and silently. A real `'`/`"` literal cannot span a newline, so one that
-      // reaches the end of its line is not a string; nor is a run that reaches the end of the input.
-      if (s[j] === '\n' && c !== '`') return -1;
-    }
-    return -1;
-  }
-  return -1;
-}
-
-/** Replace comments with a space, leaving string literals alone — `kind: 'a//b'` is a value, not a comment. */
-function withoutComments(s: string): string {
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const end = inertEnd(s, i);
-    if (end < 0) { out += s[i]; continue; }
-    out += s[i] === '/' ? ' ' : s.slice(i, end + 1);
-    i = end;
-  }
-  return out;
-}
 
 const CLOSER: Record<string, string> = { '{': '}', '(': ')', '[': ']', '<': '>' };
 

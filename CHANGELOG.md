@@ -44,6 +44,13 @@ churn and less likely to affect a consumer who doesn't use them.
   `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.
 - **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
+- **`function-tools`** exports its source scanner as `@matatbread/matbot-function-tools/scan`
+  (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
+  line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow
+  the rest of it.
+- **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
+  installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
+  like a string.
 
 ## 0.4.25
 
