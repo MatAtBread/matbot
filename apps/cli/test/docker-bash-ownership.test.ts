@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { MatbotMachine, Tool, ToolEvent } from '../../../plugin-api/src/index.ts';
@@ -42,7 +42,9 @@ if (cmd === 'inspect') {
 } else { save(); }
 `;
 
-const dir = await mkdtemp(join(tmpdir(), 'docker-bash-own-'));
+// Real, because the plugin's project root is process.cwd() after the chdir below, which resolves symlinks:
+// on macOS the temp dir is under /var, a link to /private/var, and the mount it looks for would never match.
+const dir = await realpath(await mkdtemp(join(tmpdir(), 'docker-bash-own-')));
 const project = join(dir, 'project');
 const stateFile = join(dir, 'state.json');
 await writeFile(join(dir, 'docker'), FAKE_DOCKER);
