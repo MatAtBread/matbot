@@ -144,18 +144,6 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
-  plugins/background:
-    devDependencies:
-      '@matatbread/matbot-plugin-api':
-        specifier: workspace:^
-        version: link:../../plugin-api
-      '@types/node':
-        specifier: 'catalog:'
-        version: 22.19.19
-      typescript:
-        specifier: 'catalog:'
-        version: 6.0.3
-
   plugins/background-jobs:
     devDependencies:
       '@matatbread/matbot-core':

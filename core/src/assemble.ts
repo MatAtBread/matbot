@@ -15,7 +15,6 @@ import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRe
 import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 import { ToolRegistryImpl } from './tool-registry.js';
-import type { ToolInputValidator } from './tool-registry.js';
 import type { ProviderRegistryImpl } from './provider-registry.js';
 import { SystemContextRegistryImpl } from './system-context.js';
 import { LookupKnowledgeIndex } from './knowledge/index.js';
@@ -198,13 +197,6 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // covered by one wrapper. It asks the `validate` hooks per call: validators arrive long after the
   // builtins are seeded, and may be unloaded again.
   const hooks = new HookRegistry();
-  // The `ToolCallValidator` service is its predecessor, still honoured: consulted as one more hook, so a
-  // validator registered there is combined with the rest by the same rule. Host-owned (no `pluginName`),
-  // so no plugin's unload removes it; the key is read per call.
-  hooks.register({
-    on: 'validate',
-    handler: ctx => (serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined)?.validateToolCall(ctx.tool, ctx.parameters),
-  });
   const tools = new ToolRegistryImpl(opts.builtinTools, notifier,
     (tool, parameters, signal) => hooks.runValidate({ tool, parameters, signal }));
   const systemContext = new SystemContextRegistryImpl();

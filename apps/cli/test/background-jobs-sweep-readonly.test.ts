@@ -4,26 +4,31 @@ import { readOnlyError, runAs, installPrincipalCarrier } from '@matatbread/matbo
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { MatbotMachine, Store, ToolContext } from '@matatbread/matbot-plugin-api';
 import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
-import { plugin as backgroundPlugin } from '../../../plugins/background/src/index.ts';
+import { createBackgroundJobsPlugin } from '../../../plugins/background-jobs/src/index.ts';
 
-// `every_action({ action: 'suspend', id: '*' })` sweeps the schedules store and `set`s each document. The
-// same exposure `compact_sessions` had, one namespace over — `schedules` is isolatable like any other, so a
-// schedule shared in read-only refuses the write — but with a worse ending: the throw escaped the executor
-// after the loop had already flipped and woken the schedules before it, so the caller was told the whole
+// A runner that runs nothing: every job here is in the future, and teardown stops the scheduler before one is due.
+const backgroundPlugin = createBackgroundJobsPlugin({ description: 'test', runner: () => ({ run: async () => undefined }) });
+
+// `background_job_action({ action: 'suspend', id: '*' })` sweeps the jobs store and writes each document. The
+// same exposure `compact_sessions` had, one namespace over — `jobs` is isolatable like any other, so a
+// job shared in read-only refuses the write — but with a worse ending: the throw escaped the executor
+// after the loop had already flipped and woken the jobs before it, so the caller was told the whole
 // operation failed while some of it had happened. A partial mutation reported as a total failure is the one
 // outcome you cannot recover from by retrying.
 installPrincipalCarrier(createAlsPrincipalCarrier());
 
 const READ_ONLY = 'shared-in-schedule';
 
-type Sched = { id: string; version: string; active?: boolean; intervalMs: number; interval: string; prompt: string };
+type Sched = { id: string; version: string; active?: boolean; intervalMs: number; interval: string; prompt: string; nextRun: string };
+
+const LATER = new Date(Date.now() + 3_600_000).toISOString();
 
 // The unwritable one sits in the MIDDLE deliberately: before the fix, `mine-a` was already flipped and
 // woken when the throw discarded the report, which is the partial-mutation half of the bug.
 const seed = (): Sched[] => [
-  { id: 'mine-a',  version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p' },
-  { id: READ_ONLY, version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p' },
-  { id: 'mine-b',  version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p' },
+  { id: 'mine-a',  version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p', nextRun: LATER },
+  { id: READ_ONLY, version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p', nextRun: LATER },
+  { id: 'mine-b',  version: 'v', active: true, intervalMs: 3_600_000, interval: '1h', prompt: 'p', nextRun: LATER },
 ];
 
 function machine(): { services: MatbotMachine; store: Store<Sched>; written: string[] } {
@@ -32,11 +37,11 @@ function machine(): { services: MatbotMachine; store: Store<Sched>; written: str
   const store = {
     async get(id: string) { return docs.get(id) ?? null; },
     async set(id: string, v: Sched) {
-      if (id === READ_ONLY) throw readOnlyError('schedules', id, 'global');
+      if (id === READ_ONLY) throw readOnlyError('jobs', id, 'global');
       written.push(id); docs.set(id, v);
     },
     async cas(id: string, _e: string, next: Sched) {
-      if (id === READ_ONLY) throw readOnlyError('schedules', id, 'global');
+      if (id === READ_ONLY) throw readOnlyError('jobs', id, 'global');
       written.push(id); docs.set(id, next); return { ok: true as const, doc: next };
     },
     async delete(id: string) { return docs.delete(id); },
@@ -60,12 +65,12 @@ async function suspendAll(mangle?: (s: Store<Sched>) => Store<Sched>): Promise<{
     : { ...m.services, createStore: () => mangle(m.store) } as unknown as MatbotMachine;
   await backgroundPlugin.setup?.(services);
   try {
-    const tool = backgroundPlugin.tools!.find(t => t.name === 'every_action')!;
+    const tool = backgroundPlugin.tools!.find(t => t.name === 'background_job_action')!;
     const ev = await runAs({ id: 'matt', type: 'user' }, async () => {
       for await (const e of tool.executor.execute({ action: 'suspend', id: '*' }, {} as unknown as ToolContext)) {
         if (e.type === 'result' || e.type === 'error') return e as { type: string; value?: unknown; message?: string };
       }
-      throw new Error('every_action yielded no result');
+      throw new Error('background_job_action yielded no result');
     });
     return { ev, written };
   } finally {
@@ -97,10 +102,16 @@ test('a fault that is not a per-operation refusal still stops the sweep', async 
   // backend reported as a cosmetic `skipped` row would have the tool announce that it suspended what it
   // could, when in fact nothing is running as described.
   await assert.rejects(
-    () => suspendAll(store => ({ ...store, async set(id: string, v: never) {
-      if (id === 'mine-b') throw new Error('backend is on fire');
-      return store.set(id, v);
-    } }) as unknown as Store<Sched>),
+    () => suspendAll(store => ({ ...store,
+      async set(id: string, v: never) {
+        if (id === 'mine-b') throw new Error('backend is on fire');
+        return store.set(id, v);
+      },
+      async cas(id: string, expected: string, v: never) {
+        if (id === 'mine-b') throw new Error('backend is on fire');
+        return store.cas(id, expected, v);
+      },
+    }) as unknown as Store<Sched>),
     /backend is on fire/,
   );
 });

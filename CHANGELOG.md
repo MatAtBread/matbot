@@ -9,6 +9,24 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
+  instead: several co-exist and every one is asked, where the service key held one validator and a second
+  had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
+
+### Optional
+
+- **`tool-background` is removed** (`@matatbread/matbot-tool-background`: `background`, `every_action`),
+  superseded by `background-jobs` / `background-jobs-node` since 0.4.18. An installation still listing it
+  under `plugins:` fails to load it. Its schedules, in the `schedules` store, are not run by anything.
+- **`background-jobs`** — `background_job_action` no longer lists or cancels the old plugin's schedules
+  (the `"legacy": true` rows, and `cancel`'s `legacy` field). A warning at startup still counts any that
+  are left; re-create each with `background_job` and delete the old row. To list and cancel them with a
+  tool, run 0.4.x once.
+
 ## 0.4.25
 
 ### Breaking changes

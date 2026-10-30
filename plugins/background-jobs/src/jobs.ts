@@ -4,7 +4,7 @@ import type {
 } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs } from '@matatbread/matbot-plugin-api';
 
-// The successor to `@matatbread/matbot-tool-background`, with one change of meaning: a job's reply is
+// The successor to `@matatbread/matbot-tool-background` (removed in 0.5.0), with one change of meaning: a job's reply is
 // not its output. Nothing a job prints reaches anyone; it reports by appending to a conversation
 // (session_action append), writing a file or sending a notification — whichever its prompt asks for —
 // and stays silent when there is nothing to say. That last part is the reason: a job that may have
@@ -12,9 +12,8 @@ import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs } from '@m
 //
 // Its own tool names (`background_job`, `background_job_action`) and its own store. The names differ
 // because the meaning does: two tools under one name with different contracts would leave tool-types to
-// pick which contract describes the loaded one by file order. The old plugin's schedules keep their old
-// meaning there; this plugin lists them (marked legacy) and can cancel them, so moving one across is:
-// create it here, cancel it there.
+// pick which contract describes the loaded one by file order. The old plugin's schedules are not run; setup
+// says how many are left, since otherwise they would stop with no message at all.
 
 // Why a schedule was left alone, split the way a caller has to act on it — the 4xx/5xx distinction.
 // `denied` will be refused again however many times it is asked; `unavailable` may succeed later. `reason`
@@ -41,12 +40,10 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ id: string; at: IsoInstant; name?: string; session?: string }, { prompt: string; at: Duration | IsoInstant; name?: string; session?: string; provider?: string }>
       | ToolContract<{ status: 'started'; name?: string; session?: string }, { prompt: string; interval?: 'once' | null; name?: string; session?: string; provider?: string }>;
     background_job_action:
-      // A legacy row is a schedule left by `@matatbread/matbot-tool-background`: listed so it can be moved
-      // here, never run by this plugin.
-      | ToolContract<Array<Job | LegacyJob>, { action: 'list' }>
+      | ToolContract<Job[], { action: 'list' }>
       | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedJob[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
       | ToolContract<{ suspended: true; count: number; ids: string[]; skipped?: SkippedJob[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
-      | ToolContract<{ cancelled: true; id: string; legacy?: true }, { action: 'cancel'; id: string }>;
+      | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
   }
 }
 
@@ -117,23 +114,11 @@ export interface EveryJob extends JobBase { intervalMs: number }
 export interface OnceJob  extends JobBase { intervalMs?: undefined }
 export type Job = EveryJob | OnceJob;
 
-/** A schedule stored by `@matatbread/matbot-tool-background`, as this plugin shows it. */
-export interface LegacyJob {
-  id:          string;
-  version:     string;
-  prompt:      string;
-  nextRun:     string;
-  intervalMs?: number;
-  name?:       string;
-  output?:     string;
-  legacy:      true;
-}
-
+// Where `@matatbread/matbot-tool-background` kept its schedules. Removed in 0.6.0, with the warning that reads it.
 const LEGACY_NAMESPACE = 'schedules';
 const LEGACY_PLUGIN    = '@matatbread/matbot-tool-background';
 
 let jobStore:         Store<Job> | undefined;
-let legacyStore:      Store<Omit<LegacyJob, 'legacy'>> | undefined;
 let machine:          MatbotMachine | undefined;
 let pluginAc:         AbortController | undefined;
 
@@ -708,14 +693,6 @@ async function setActiveAll(active: boolean): Promise<{ ids: string[]; skipped: 
   return { ids, skipped };
 }
 
-const legacyRows = async (): Promise<LegacyJob[]> =>
-  ((await legacyStore?.query({}))?.items ?? []).map(s => ({
-    id: s.id, version: s.version, prompt: s.prompt, nextRun: s.nextRun, legacy: true as const,
-    ...(s.intervalMs !== undefined ? { intervalMs: s.intervalMs } : {}),
-    ...(s.name       !== undefined ? { name: s.name }             : {}),
-    ...(s.output     !== undefined ? { output: s.output }         : {}),
-  }));
-
 const jobActionTool: Tool<ToolResultOf<'background_job_action'>> = {
   name: 'background_job_action',
   description: `Manage the jobs the background_job tool scheduled for later — recurring ones (created with an interval) and
@@ -734,12 +711,6 @@ ACTIONS
 
 The id is a job id as reported by the list action, or by the background_job tool. For suspend and resume, pass id "*" to act on ALL
 jobs at once. cancel requires a specific id — "*" is not accepted (no bulk delete).
-
-LEGACY ROWS. A row with "legacy": true is a schedule left by the plugin this one replaced. It is listed so it
-can be moved, and it is NOT run. Its prompt was written for that plugin, where a job's printed reply was its
-result (saved to its "output" file, if it had one); here a job must say what to tell the user. To move one:
-create it again with background_job — rewording the prompt to say what to tell the user and when — then cancel the
-legacy row. A legacy row cannot be suspended or resumed.
 
 With id "*", \`ids\` is what actually changed and anything left alone is listed under \`skipped\`. Each entry
 carries a \`kind\` saying what to do about it — do not read this out of the \`reason\` prose:
@@ -767,7 +738,7 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
       switch (act.action) {
         case 'list': {
           const jobs = (await jobStore?.query({}))?.items ?? [];
-          yield { type: 'result', value: [...jobs, ...await legacyRows()] };
+          yield { type: 'result', value: jobs };
           return;
         }
 
@@ -787,10 +758,7 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
               yield { type: 'error', message: `Job ${act.id} is being written concurrently (a run of it is starting or finishing) — ask again.` };
               return;
             }
-            const legacy = await legacyStore?.get(act.id);
-            yield { type: 'error', message: legacy
-              ? `Job ${act.id} is a legacy schedule, which this plugin does not run. Create it again with background_job, then cancel this one.`
-              : `Job ${act.id} not found.` };
+            yield { type: 'error', message: `Job ${act.id} not found.` };
             return;
           }
           yield { type: 'result', value: active ? { resumed: true, id: act.id } : { suspended: true, id: act.id } };
@@ -800,11 +768,6 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
         case 'cancel': {
           if (act.id === '*') {
             yield { type: 'error', message: 'cancel requires a specific job id; "*" (all) is not permitted for cancel. Suspend all with { action: "suspend", id: "*" } instead.' };
-            return;
-          }
-          if ((await jobStore?.get(act.id)) == null && (await legacyStore?.get(act.id)) != null) {
-            await legacyStore?.delete(act.id);
-            yield { type: 'result', value: { cancelled: true, id: act.id, legacy: true } };
             return;
           }
           // Stop a run of it in flight HERE; one in flight in another matbot ends when it ends, and
@@ -862,12 +825,11 @@ export function createBackgroundJobsPlugin(host: BackgroundJobsHost): MatbotPlug
       machine      = services;
       activeRunner = host.runner(services);
       jobStore     = services.createStore<Job>('jobs');
-      legacyStore  = services.createStore<Omit<LegacyJob, 'legacy'>>(LEGACY_NAMESPACE);
 
-      const legacy = (await legacyStore.query({})).items.length;
+      const legacy = (await services.createStore<{ id: string; version: string }>(LEGACY_NAMESPACE).query({})).items.length;
       if (legacy > 0) {
-        console.warn(`[background-jobs] ${legacy} schedule(s) left by ${LEGACY_PLUGIN} are not run by this plugin. `
-          + 'background_job_action list shows them (marked legacy): re-create each with background_job, then cancel the old one.');
+        console.warn(`[background-jobs] ${legacy} schedule(s) left by ${LEGACY_PLUGIN}, which was removed in 0.5.0, are not run. `
+          + `They are in the "${LEGACY_NAMESPACE}" store: re-create each with background_job, then delete the old ones.`);
       }
       if (activeRunner === undefined) return;
 
@@ -883,7 +845,6 @@ export function createBackgroundJobsPlugin(host: BackgroundJobsHost): MatbotPlug
       tickWake     = undefined;
       inFlight.clear();
       jobStore     = undefined;
-      legacyStore  = undefined;
       activeRunner = undefined;
       machine      = undefined;
     },

@@ -115,10 +115,3 @@ test('a validator that throws is no opinion, not a refusal', async t => {
   await validators(services, { broken: () => { throw new Error('boom'); }, typed: () => [] });
   assert.deepEqual(await services.tools.validate!('thing', {}), []);
 });
-
-test('the deprecated ToolCallValidator service is still consulted, beside the hooks', async t => {
-  const { services } = await machine(t);
-  await validators(services, { typed: () => [] });
-  await services.register('ToolCallValidator', { validateToolCall: async () => SCHEMA_SAYS });
-  assert.deepEqual(await services.tools.validate!('thing', {}), SCHEMA_SAYS);
-});

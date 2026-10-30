@@ -71,9 +71,9 @@ plugins/            — one directory per package, flat but for the frontend/pro
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
     background-jobs/— `background_job`/`background_job_action`: jobs that report by appending to a conversation,
-                   run in-process on an ephemeral run (cross-runtime). Supersedes background/, kept for existing installs
+                   run in-process on an ephemeral run (cross-runtime)
     background-jobs-node/— the same, each job in its own process (node)
-    bash/, docker-bash/, http/, workspace/, background/, ask-user/, whoami/
+    bash/, docker-bash/, http/, workspace/, ask-user/, whoami/
                    — the standalone tool plugins (no `tools/` grouping directory)
     mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
     frontend/
@@ -603,7 +603,7 @@ The contract above is also **enforced**, by `validate` hooks that core dispatche
 
 **Dispatched at the executor, not by the runner.** `toolcall` still exists and is still the place to reject a call by *policy*, but it is a **runner** channel, so a validator installed there guards the model's path and nothing else — `POST /tools/:name` and `invokeTool` call `tool.executor.execute` directly and fire no runner hooks at all. The executor is the one place every door already passes through: one check rather than one per door, and nothing to drift. That is why `validate` carries no session. The accepted cost is that an *internal* call is validated too, though a statically-typed call site should already be sound — not pure waste, since `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed `object`) and a compiled skill's payload are all internal callers no compiler has checked.
 
-**`undefined` means NO OPINION, never "valid"** — no contract for this tool, or one that cannot be honestly validated (a throw counts the same, logged). **Every** `validate` hook is asked, and the call is refused if **any** refuses it, with each refusal's errors reported (one two validators share is said once). So validators co-exist with no reference to one another, neither the verdict nor the message depends on load order, and unloading one removes its opinion and nothing else. This was a single-valued `ToolCallValidator` service, which forced the second validator to capture the first and delegate to it: the pair depended on load order and on each other, and unloading the one underneath took the other with it. The key is `@deprecated` and still consulted, as one more opinion beside the hooks; **it is removed in 0.5.0**. Two suppliers exist: `ts-validation` (the `ToolContract` params *type*, via `tool-types`, node-only) and `json-validation` (the `inputSchema` projection, cross-runtime, and therefore the browser's only option).
+**`undefined` means NO OPINION, never "valid"** — no contract for this tool, or one that cannot be honestly validated (a throw counts the same, logged). **Every** `validate` hook is asked, and the call is refused if **any** refuses it, with each refusal's errors reported (one two validators share is said once). So validators co-exist with no reference to one another, neither the verdict nor the message depends on load order, and unloading one removes its opinion and nothing else. This was a single-valued `ToolCallValidator` service, which forced the second validator to capture the first and delegate to it: the pair depended on load order and on each other, and unloading the one underneath took the other with it. It was removed in 0.5.0. Two suppliers exist: `ts-validation` (the `ToolContract` params *type*, via `tool-types`, node-only) and `json-validation` (the `inputSchema` projection, cross-runtime, and therefore the browser's only option).
 
 **Fail-open is worse than absent, everywhere in this path.** A validator that accepts everything while reporting success is indistinguishable from one that works, so an unvalidatable contract is a *stated refusal* that defers to the schema, and a diagnostic in generated type text condemns that tool rather than being ignored. The mirror of that rule is that failing **closed** is not the safe default it appears to be: `ts-validation` used to reject every call it could not verify, which bricked a live machine the moment `tool-types` was unloaded — every tool failed, including the `plugin` tool needed to put it back and the calls the web UI makes to draw itself, leaving a restart as the only way out. A dependency a plugin can simply re-create was never an unverifiable call.
 
@@ -1106,8 +1106,7 @@ table's (above): it is the only way "the medium under every namespace was replac
 outside this process.
 
 **`namespace` is an address space, not a plugin.** It looks 1:1 with plugins from the web UI's
-`switch`, and it isn't: `files` is emitted by workspace, by background (a detached job's output), and
-by the profiles backend (a share); `sessions` has no plugin at all — the host wraps that store in
+`switch`, and it isn't: `files` is emitted by workspace and by the profiles backend (a share); `sessions` has no plugin at all — the host wraps that store in
 `notifyingStore`, behind which sit the turn pump, `session_action`, `session_edit` and the frontend;
 and the profiles backend takes `namespace` as a *parameter*, announcing for every space, none of which
 it owns. So a per-plugin `kind` cannot be derived — the emitter is not the owner — and it would

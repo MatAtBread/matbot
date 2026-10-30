@@ -146,7 +146,7 @@ cross-runtime base differ only by this field plus their imports.)
 ### Via the LLM
 
 ```
-Add the local plugin called background
+Add the local plugin called background-jobs
 Add the plugin from npm called @somecooldude/superbot
 Add the plugin from the github repo SomeCoolDude/MyLatestMatbotPlugin
 ```
@@ -717,7 +717,7 @@ resolves to `unknown`. This is purely type-level — no runtime validation. A ge
 **Per-action narrowing.** A multi-action tool is a weird overloaded function — its result depends on its
 params. Register it as a union of `ToolContract<Result, Args>` *arms*, each pairing a result with the
 discriminating params *pattern* that selects it; `invokeTool` matches the call's params and narrows to
-the matching arm. The discriminant is any field(s), not just `action` (`background` keys on `interval`'s
+the matching arm. The discriminant is any field(s), not just `action` (`background_job` keys on `interval`'s
 presence). Key on the discriminant only, not the full input, so a call carrying just that field matches;
 when no arm matches (a non-literal or absence discriminant), the result soundly falls back to the union of
 all arms. `ToolResultOf<'name'>` unwraps the arms to that union, so the executor binding is unchanged.
@@ -1087,9 +1087,9 @@ type Hook =
 | `followup` | After the turn commits | `resubmit` a robo turn (head-enqueued, runs next), `retractAndRerun` the turn just committed, and/or append durable `markers` |
 | `validate` | Before each tool runs, through **every** door (the model's path, `POST /tools/:name`, `invokeTool`) and on `tools.validate` | Return errors to refuse the call, `[]` to say it is valid, nothing for no opinion. Every `validate` hook is asked and any refusal refuses, so validators co-exist without referring to each other |
 
-**`validate` replaces the `ToolCallValidator` service**, which is `@deprecated`, still consulted beside
-the hooks, and removed in 0.5.0. A service key holds one value, so a second validator had to capture the
-first and delegate to it — depending on load order, and on the other plugin. Register a hook instead.
+**`validate` replaced the `ToolCallValidator` service**, removed in 0.5.0. A service key holds one value,
+so a second validator had to capture the first and delegate to it — depending on load order, and on the
+other plugin.
 
 **`screen`'s `deferred` verdict** lets a hook race expensive work — a classifier — against
 generation instead of gating on it: return immediately, hand back a `DeferredScreen`, and the runner
@@ -1333,8 +1333,8 @@ Four rules follow from how the bus is built:
 - **Always `default` a `switch` over `kind`.** A foreign plugin or a bridged remote can publish one
   this build has never seen (see *Open-registry augmentation*).
 
-`namespace` is an **address space, not a plugin** — `files` is emitted by workspace, by background,
-and by the profiles backend; `sessions` has no plugin at all. `principal` is **ownership** (whose
+`namespace` is an **address space, not a plugin** — `files` is emitted by workspace and by the
+profiles backend; `sessions` has no plugin at all. `principal` is **ownership** (whose
 data changed), not attribution — never conflate it with `plugin`/`source`.
 
 ---
@@ -1368,7 +1368,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
-Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). `tool-background` is deprecated. The README's plugin table carries the same classification.
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
 
 | Package | Tools / Kind | Description |
 |---|---|---|
@@ -1380,7 +1380,6 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-tool-ask-user` | `ask_user` | Ask the user a question mid-turn (one-shot prompt) |
 | `@matatbread/matbot-background-jobs` | `background_job`, `background_job_action` | Jobs that report by appending to a conversation — now, at a stated time, or on a recurring schedule. Each job runs in-process on an ephemeral run (Node + browser) |
 | `@matatbread/matbot-background-jobs-node` | `background_job`, `background_job_action` | Node specialization of `background-jobs`: each job gets its own process, which can be killed and shares no heap with the server. Load this **or** `background-jobs`, not both |
-| `@matatbread/matbot-tool-background` | `background`, `every_action` · superseded | The former background plugin. Superseded by `background-jobs`, which changes what a job's reply means: a job reports by appending to a conversation rather than returning output. Its schedules are listed as `"legacy": true` and never run |
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |

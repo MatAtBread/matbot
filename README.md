@@ -148,7 +148,6 @@ And a **Status**:
 | | `skill-compiler` | Functional | Compile a procedural skill into a hot-loadable TypeScript tool plugin (`skill_compiler`; Node) |
 | | `background-jobs` | Functional | Run prompts as background jobs — now, at a time, or on an interval — that report by appending to a conversation; jobs run in-process |
 | | `background-jobs-node` | Functional | The same, each job in its own process (Node) |
-| | `background` | Deprecated | Superseded by `background-jobs`: detached background jobs and cron-style scheduling |
 | **tools + hooks** | `function-tools` | Functional | Author & run TypeScript functions that compose other tools in one pass (`tool_function`) |
 | | `triggers` | Functional | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
 | **hooks** | `hook-logger` | Example | Diagnostic: log every hook-channel firing |

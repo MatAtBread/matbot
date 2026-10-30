@@ -479,9 +479,8 @@ export async function buildToolTypesData(
   const bundledDecls = new Map<string, string>();
 
   // Bundling flattens every referenced workspace type into ONE scope, but a type's name is only unique
-  // within its own file: two plugins each declaring a file-local `SkipKind` is legal TypeScript and here
-  // a deliberate one (`plugins/background/src/index.ts` says why it isn't shared), so the generator has
-  // to represent it rather than ask the sources not to do it. Emitted side by side they were a TS2300
+  // within its own file: two plugins each declaring a file-local type of one name is legal TypeScript, so
+  // the generator has to represent it rather than ask the sources not to do it. Emitted side by side they were a TS2300
   // that nothing compiled the dts to catch, and both references then resolved to an error type — the
   // narrowing the contract exists to give, silently gone. So the first symbol to claim a name keeps it
   // and later ones are alpha-renamed (`SkipKind$1`), with every reference rewritten to match.
