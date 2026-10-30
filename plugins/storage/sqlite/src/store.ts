@@ -16,30 +16,13 @@ export function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-export const legacyTableName = (namespace: string): string =>
-  `${namespace.replace(/[^a-zA-Z0-9]/g, '_')}${TABLE_SUFFIX}`;
-
 export class SQLiteStore<T extends { id: string; version: string }> implements Store<T> {
   private readonly db:  DatabaseSync;
   private readonly tbl: string;                              // already quoted — interpolate directly
 
   constructor(db: DatabaseSync, namespace: string) {
     this.db  = db;
-    const table = `${namespace}${TABLE_SUFFIX}`;
-    this.tbl = quoteIdent(table);
-
-    // Adopt a table written under the old mangled name. Done here rather than in a migration pass
-    // because this is the only place the namespace and its table are both known — the mangling cannot
-    // be inverted, so nothing scanning `sqlite_master` alone could pair them up.
-    //
-    // Only when the exact table is ABSENT and the legacy one is present: a database that already holds
-    // both is one where two namespaces were sharing a table (the bug being fixed), and the shared rows
-    // follow whichever namespace opens first after the upgrade. There is no better answer available —
-    // the rows carry no record of which namespace wrote them.
-    const legacy = legacyTableName(namespace);
-    if (legacy !== table && !tableExists(db, table) && tableExists(db, legacy)) {
-      db.exec(`ALTER TABLE ${quoteIdent(legacy)} RENAME TO ${this.tbl}`);
-    }
+    this.tbl = quoteIdent(`${namespace}${TABLE_SUFFIX}`);
 
     db.exec(`CREATE TABLE IF NOT EXISTS ${this.tbl} (
       id      TEXT PRIMARY KEY NOT NULL,
@@ -154,8 +137,4 @@ export class SQLiteStore<T extends { id: string; version: string }> implements S
       ...(page.limit !== 0 && next < total ? { cursor: encodeCursor({ ...page, offset: next }) } : {}),
     };
   }
-}
-
-export function tableExists(db: DatabaseSync, name: string): boolean {
-  return db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name) !== undefined;
 }

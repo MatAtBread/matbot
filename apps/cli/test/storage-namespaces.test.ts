@@ -114,26 +114,6 @@ test('sqlite: namespaces differing only by punctuation no longer share a table',
   });
 });
 
-// A database written under the old naming keeps its data: the table is renamed the first time the
-// namespace is opened, which is the only moment the namespace and its mangled table are both known.
-test('sqlite: a legacy mangled table is adopted, with its documents', async () => {
-  await withTemp(async dir => {
-    const { DatabaseSync } = await import('node:sqlite');
-    const raw = new DatabaseSync(join(dir, 'matbot.db'));
-    raw.exec(`CREATE TABLE "profile_registry_store" (id TEXT PRIMARY KEY NOT NULL, version TEXT NOT NULL, doc TEXT NOT NULL)`);
-    raw.prepare(`INSERT INTO "profile_registry_store" VALUES (?, ?, ?)`)
-      .run('Matt', 'v1', JSON.stringify({ id: 'Matt', version: 'v1' }));
-    raw.close();
-
-    const backend = await SQLiteStorageBackend.open(dir);
-    try {
-      const doc = await backend.createStore('profile-registry').get('Matt');
-      assert.notEqual(doc, null, 'the legacy table must be adopted, not abandoned');
-      assert.deepEqual(await backend.namespaces(), ['profile-registry']);
-    } finally { await backend.close?.(); }
-  });
-});
-
 // Partitioning exists to keep one principal from reading another's data; enumerating has to respect
 // that, or it reports a namespace as present that a read would not return.
 test('profiles: an isolated namespace is reported only to the principal that owns it', async () => {

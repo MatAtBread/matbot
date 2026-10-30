@@ -384,6 +384,25 @@ shipped as first-party plugins in this repo).
 
 ---
 
+## Upgrading to 0.5.0
+
+0.5.0 removes code that migrated old data in place. Two kinds of stored data written by much older
+versions are no longer read:
+
+- **A SQLite database created before 0.4.4.** Before 0.4.4 a namespace's table name was derived by
+  replacing every character outside `[A-Za-z0-9]` with `_` (so `profile-registry` was stored as
+  `profile_registry_store`); only a namespace whose name has such a character is affected. Any 0.4.x from
+  0.4.4 renames the table the first time its namespace is opened, so start the install once with matbot
+  **>=0.4.4 <0.5.0** and the same plugins before upgrading. Opened directly by 0.5.0, an affected
+  namespace looks empty, and the old table is left untouched in the file.
+- **A file stored before 0.2.4 without a name** (a UUID id). Its `<id>.meta.json` has an `id` field and no
+  `dataFile`, and its data is at `<id>.data`. No version of matbot rewrites these: to keep one, add
+  `"dataFile": "<id>.data"` to its sidecar — a task any model with `bash` or Node file access can do.
+
+The full list of removals is in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 ## Licence
 
 Apache 2.0

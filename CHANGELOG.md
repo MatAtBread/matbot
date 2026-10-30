@@ -19,6 +19,13 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`turnActivity` / `usageEntries` / `usageByProvider` no longer read the pre-0.4.3 usage shapes** — an
   assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
   report no usage for those turns.
+- **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
+  README):
+  - `storage-sqlite` no longer renames a table named under the pre-0.4.4 scheme (`a-b` stored as
+    `a_b_store`). Start a pre-0.4.4 database once with matbot >=0.4.4 <0.5.0 before upgrading; opened by
+    0.5.0, an affected namespace looks empty and the old table is left in the file.
+  - `files` and `storage-profiles` no longer read an unnamed file's sidecar written before 0.2.4 (an `id`
+    field and no `dataFile`). No version rewrites these; add `"dataFile": "<id>.data"` to keep one.
 
 ### Optional
 

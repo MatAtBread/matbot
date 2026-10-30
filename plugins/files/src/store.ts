@@ -14,15 +14,11 @@ interface FileMeta {
   // Set on new anonymous entries (UUID id, .data extension).
   // Absent on named entries — data path mirrors the id directly.
   dataFile?:  string;
-  // Present only in legacy entries written before the named-file refactor.
-  // Used to detect the legacy layout: data was at id + '.data'.
-  id?:        string;
 }
 
 function resolveDataPath(dir: string, id: string, meta: FileMeta): string {
-  if (meta.dataFile !== undefined) return path.join(dir, meta.dataFile); // new anonymous
-  if (meta.id       !== undefined) return path.join(dir, id + '.data'); // legacy anonymous
-  return path.join(dir, id);                                             // new named
+  if (meta.dataFile !== undefined) return path.join(dir, meta.dataFile); // anonymous
+  return path.join(dir, id);                                             // named
 }
 
 function metaFilePath(dir: string, id: string): string {
@@ -122,7 +118,7 @@ export class FilesystemFileStore implements FileStore {
       return makeHandle(name, meta, this.dir);
     }
 
-    // Anonymous: UUID id, legacy .data extension.
+    // Anonymous: UUID id, data at `<id>.data`.
     const id = crypto.randomUUID();
     await this.writeData(path.join(this.dir, id + '.data'), data);
     const meta: FileMeta = { mimeType, dataFile: id + '.data', ...extras };
@@ -145,7 +141,7 @@ export class FilesystemFileStore implements FileStore {
     // Direct O(1) lookup for named files (id === name).
     const direct = await this.get(name);
     if (direct !== null && (namespace === undefined || direct.namespace === namespace)) return direct;
-    // Fall back to full scan for legacy UUID-based entries.
+    // An anonymous entry's id is a UUID, not its name, so only a scan finds it.
     for await (const handle of this.list(namespace !== undefined ? { namespace } : {})) {
       if (handle.name === name) return handle;
     }
