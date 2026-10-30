@@ -1386,6 +1386,8 @@ Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache =
 ## Changelog
 
 `CHANGELOG.md` records **functional** changes only. Omit stylistic, refactoring, docs-only merges.
+It holds the current minor series; the previous ones are in `docs/CHANGELOG-v0.4.md`, linked from its
+foot.
 
 **Sections:** one `## <version>` per release, newest first; work not yet versioned goes under
 `## Unreleased` until the release it lands in is cut, then folds into that version's section. Within

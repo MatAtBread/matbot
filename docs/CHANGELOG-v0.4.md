@@ -1,0 +1,5481 @@
+# Changelog — v0.4 and earlier
+
+All notable functional changes are documented here. Purely stylistic or
+non-functional changes (CSS, refactoring, code tidying, docs-only merges) are
+omitted.
+
+Within each section, changes are grouped: **Breaking changes**, **API gaps
+filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
+**Optional** covers new or updated plugins, frontends, and apps — more likely to
+churn and less likely to affect a consumer who doesn't use them.
+
+## 0.4.25
+
+### Breaking changes
+
+- **`toolInContext` takes `provider` and `signal` and nothing else.** It merged any field over the call
+  context, so a `tool_function` body could hand a callee its own `prompt` — and answer every gate that
+  callee asked — name another session and borrow its per-session standing answers, or supply turn tools
+  of its own. Every documented use was `{ provider }`. A `signal` is combined with the call's own, so it
+  can cancel a call sooner and never keep one going after the turn is stopped.
+
+### API gaps filled
+
+- **`FunctionRunner.hostCall`** — where control passes from a body back to host code acting for it. A
+  runner that tells a body's code from the host's must not count a tool the body calls as the body's.
+  `makeToolBox` takes it as `hostCall`, and then copies each call's params before crossing, so nothing of
+  the caller's runs past it.
+- **`SessionRunner.abortParallel` returns whether a parallel turn carried the traceId.** A parallel turn
+  shares its session's id, so a caller holding only a traceId (the turn a prompt came from) could not
+  tell whether giving up on it meant that or `cancelTurn`.
+
+### Optional
+
+- **`function-runner-node`** — the function constructors (`Function`, and every function's
+  `.constructor`) and `process.getBuiltinModule` refuse a body however it reaches them, and are unchanged
+  for everything else. `(()=>{}).constructor('return process')()` compiled code in the global scope,
+  around every withheld global and gate. Whose call it is is decided by the nearest code on the stack, so
+  a `toJSON`, getter or listener of the body's run by matbot after it returned is still the body's, while
+  a tool it calls, or a package it was granted, is trusted as itself: a granted package may compile code
+  when the body calls it, but a callback of the body's that it runs may not. With no code above it, an
+  `AsyncLocalStorage` span decides (a constructor handed to `promise.then`). `Function` is no longer withheld by
+  name, which changes the environment fingerprint: stored functions report `checkedElsewhere` until
+  checked again.
+- **`tool-types`** — `ESCAPE-GATE`, with a runner loaded: a body is refused `Function`, `.constructor` on
+  a function, `getBuiltinModule`, `__proto__`, and changes to what it did not create (a built-in, a
+  prototype, `tool` or `context`), whether by assignment, `delete` or `Object.defineProperty` and its
+  kin. The declarations say that code cannot be built from a string.
+- **`default-gate`** — an **Always deny** answer. The prompt offers it beside *Deny*, for the exact act
+  being asked about and nothing broader; from then on that act is refused without asking, at every door,
+  with source `configuration`, so the model is told nothing in the turn can change it. A denial is
+  checked before the allows and wins over one that also covers the act. An installation can configure
+  denials under `default_settings:` as `deny:<gate>` — a list of subjects, or `true` for all of them.
+  `gate_action get` reports them as `denials`; `clear` forgets them with the allows.
+  - **For downstream consumers of `default-gate`** (a frontend rendering its prompt, a policy composing
+    over it, anything reading its settings or `gate_action`). Every change is additive, and nothing in
+    `PermissionRequest`, `PermissionGate` or `PermissionDecision` changed:
+    - the prompt's `select` field has one more option, value **`deny-always`**, label *Always deny*,
+      second in the list (`deny`, `deny-always`, `allow`, `always-<n>`…, `always-gate`). A frontend
+      that renders the options generically shows it; one that matches option values must answer
+      with `deny-always` to choose it, and is otherwise unaffected. The `default` is unchanged;
+    - its settings namespace gains keys **`deny:<gate>`**, holding `true` or a list of strings, beside
+      the unchanged per-gate allow keys. A gate id cannot contain `:`, so no existing key changes
+      meaning; an older `default-gate` ignores them when deciding, though its `gate_action get` lists
+      one as a gate named `deny:<gate>`;
+    - `gate_action get`'s result gains an optional **`denials: GateAnswer[]`**, present only when one
+      exists; `GateAnswer` and its `effect` union are unchanged. `gate_action clear` also removes
+      denials, for a gate, a subject within one, or everything;
+    - `denyKey(gate)` is exported beside `toStandingAnswer`;
+    - `gate_action` gains a **`list`** action (`{ gate?, match? }` → `{ entries: GateEntry[] }`, each
+      `{ id, gate, effect: 'allow' | 'deny', subject? }`, exported type) and `clear` accepts **`ids`**
+      from it. `get` and the existing `clear` forms are unchanged in shape; `clear`'s `message` text is
+      reworded and no longer says the act "will ask again", which a broader answer may not;
+    - forgetting a denial, by any form of `clear`, raises a new gate, **`gate_action.forget-denial`**
+      (subject `deny:<gate> <subject>`, or `deny:<gate>`; `fallback: false`). A replacement policy sees
+      it as an unknown id and should ask, as for any other; with nobody to ask, the denial is kept.
+- **`default-gate`** — `gate_action` `list` reports each standing answer as an entry with an id, and
+  `match` finds those whose gate or subject mentions some text; `clear` with `ids` forgets exactly those,
+  so forgetting one no longer means retyping its subject. Forgetting a denial now asks the user, since
+  it undoes a refusal they chose. Two clears at once could each write back the list it had read, so one
+  restored what the other removed; both now re-read inside the policy's write queue.
+- **`docker-bash`** — uses or removes a container only if it made it for this project: labelled with the
+  project's root, or (made before that label) mounting it at `/app`. The container's name is settable
+  through `bash_config`, and every path that reuses, replaces or removes the container found it by name
+  alone, so naming another container got it exec'd into or deleted. Such a name is now refused, and
+  `bash_config set` refuses one before changing anything.
+- **`function-tools`** — a body's tool calls go through the runner's `hostCall`, and a `context.progress`
+  message is made a string while the body is the caller.
+- **`frontend-web`** — a turn asking two things at once no longer hangs. The server held one prompt per
+  session, so a second (a body awaiting two gated `fetch`es together, parallel tool calls, a parallel
+  turn) overwrote the first, whose promise never settled. Prompts now queue per session and are shown one
+  at a time, the next after the `prompt-resolved` retiring the last. Each `prompt` and `prompt-resolved`
+  frame carries a `promptId`, which `POST /sessions/:id/prompt` takes back; an answer naming any prompt
+  but the one shown is a 409, so a second viewer's late answer cannot land on the next question. Additive
+  for a client: one sending no `promptId` answers the prompt shown, as before. Cancelling a prompt cancels
+  the rest of its turn's, and aborting one parallel turn now cancels that turn's prompts, which it could
+  not do while they were keyed by session. A prompt nobody awaited (a body's un-awaited `fetch`) is
+  cancelled when its turn ends, rather than sitting at the head of the queue. A viewer leaving still
+  answers nothing. Cancelling a parallel turn's prompt stops that turn; it used to stop the running turn
+  beside it, and leave the parallel one to carry on. The in-process browser transport does the same.
+- **`frontend-web`** — `url_for_resource` tells the model to quote the path as returned and to prefix
+  an origin only if one was actually supplied in the conversation. Told to "join it to the origin you
+  used", a model that reached the server through no origin at all invented one, typically the
+  development default `localhost:19778`.
+
+## 0.4.24
+
+### Optional
+
+- **`triggers`** — an assistant message with no tool calls in its turn is summarised to the classifier as
+  `[Tool calls in this turn: none]`, on both surfaces: as the reply being judged, and as the preceding
+  message beside a judged user message. In 0.4.23 such a turn had no line, which the classifier could not
+  tell from a summary it was not shown, so a condition on a reply made without tools could only be
+  guessed at. A user message still reports only the files attached to it, with no line when there are none.
+- **`triggers`** — a retract-redo no longer leaves a `suppressed` marker with cause `user-redo` and an empty
+  `triggers` list. Nothing was evaluated on a redo, so nothing was held off, and the `matbot-retraction`
+  marker the skip is keyed on already records the redo. The cause is gone from the vocabulary.
+
+## 0.4.23
+
+### Optional
+
+- **`triggers`** — the trigger classifier is told what each message's turn held besides its text. Each
+  side of the pair it judges ends with a bracketed summary: a user message lists its attachments
+  (`[Files in this turn: def.pdf (application/pdf)]`), and an assistant message lists every tool call
+  in its turn, across rounds (`[Tool calls in this turn: http ×2, tool_function]`). The
+  classifier is shown text alone so that it stays small and quick, so a condition such as "no tool was
+  called" or "the attachment is a PDF" could only be guessed at. The summary follows the clipped text, so
+  a long message cannot truncate it.
+  - A user message that is only an attachment is now judged. With no text, it was skipped.
+
+## 0.4.22
+
+### Optional
+
+- **`triggers`** — a fire whose tool yields no result (`remember_fact`) leaves a `silent-fired` marker
+  (`surface: 'user' | 'agent'`), carrying each trigger's `matched` conditions and the classifier's `why`.
+  Such a fire delivers nothing, so it was the one kind with no fire marker: what it did was traced by the
+  tool's own markers, but which rule fired it, and why, was not recorded — the question a false positive
+  raises. A fire whose tool fails carries `matched` on its error marker instead.
+  - A silent fire now counts towards the trigger's `cooldown`, which reads fire markers. A silent trigger
+    with a `maxPerTurn` or `quietTurns` was never held back by them, and now is.
+
+## 0.4.21
+
+### Breaking changes
+
+- **`applyProviderPatch(cur, patch, vault)`** — takes the vault (only its `hasKey`), and an `endpoint` that
+  moves a profile to another origin (scheme, host and port; clearing it back to the adapter's default
+  counts) no longer carries the credential (#111). The credential is sent wherever the endpoint points, so
+  an update could post the key to any host, and its prompt never said so. The profile is pointed at fresh
+  vault keys the vault does not hold, to be supplied out of band with `plugin store-key`; the old keys stay,
+  since another profile may share them. `movedCredentialKeys(cur, next)` names the new ones. A required
+  argument rather than an optional one, because every host applying a patch must apply this rule.
+  - The browser's `ProviderAdmin.update` returns those keys (`readonly string[] | undefined`) instead of a
+    boolean, so its tool can say so.
+
+### API gaps filled
+
+- **A `validate` hook channel, for tool-input validators.** Core dispatches it at the executor, before every
+  call through every door (the model's path, `POST /tools/:name`, `invokeTool`), so it carries no session.
+  A handler returns `ToolInputError[]` to refuse, `[]` for valid, or nothing for no opinion; a throw is no
+  opinion, logged. Every `validate` hook is asked and the call is refused if any refuses it, with each
+  refusal's errors (one shared by two validators is said once). So validators co-exist with no reference to
+  each other, and neither the verdict nor the message depends on load order.
+- **`tools.validate(name, params)`** asks the same validators without running the tool, for a caller that
+  stores a call to make later. Optional on `ToolRegistry`. `ToolInputError` moved to plugin-api (core still
+  exports it).
+- **`ToolCallValidator` is `@deprecated`, and will be removed in 0.5.0.** A service key holds one value, so a
+  second validator had to capture the first and delegate to it: the pair depended on load order and on each
+  other, and unloading the one underneath took the other with it. It is still consulted, as one more opinion
+  beside the `validate` hooks, so a validator registered there keeps working until then. Removing it in
+  0.5.0 is a breaking change: a validator still registered under the key will silently stop being consulted.
+  Register a `validate` hook instead.
+- **`ProviderAdapter.models?(config, signal?)`** — the model ids an adapter can run, for a person choosing
+  one and for catching a mistyped one. The browser setup wizard offers them as a drop-down for a
+  self-contained adapter; absent, or rejecting, it asks for a model name as before.
+- **`checkProviderModel(adapter, config, vault, timeoutMs?)`** — whether a profile's model is one its
+  endpoint lists: `listed`, `unlisted` (with the closest ids), or `unchecked` with the reason. It never
+  throws, and gives up after 8s (`MODEL_LIST_TIMEOUT_MS`) even for an adapter that ignores the signal.
+  Credentials are resolved through the vault, so one the vault does not hold sends nothing. Listing sends
+  the credential, so a caller asks only once it may go to that endpoint. `modelListed(model, ids)` counts
+  names an endpoint accepts without listing them: an undated alias of a dated id, a `-latest` alias, a bare
+  name for an Ollama `:latest` tag, and Gemini's `models/` prefix. `closestIds(id, ids, n?)` ranks a near
+  spelling first, then shared name segments.
+- **`originGatedFetch(admit, input, init?)`** — `fetch`, with each URL a request reaches put to `admit`
+  first: the one asked for, and each one a redirect leads to (#111). A `follow` request is followed one hop
+  at a time as the platform would (303, and 301/302 after a POST, become a bodiless GET; 307/308 resend the
+  body; credentials are dropped on a change of origin). A gate on the first URL alone is a gate on nothing,
+  since an approved host that answers 302 forwards the request to one nobody was asked about.
+- **`FunctionCall.fetch` / `FunctionCall.WebSocket`** — what a body's own `fetch` and `WebSocket` should be,
+  handed to the runner per call beside `importModule`. Absent, the body has the platform's.
+- **`Tool.toolContractTypes`** and **`contractArms()`** — a `toolContract` string may name types declared
+  nowhere else (a function package's own `interface HubReport`), carried as declarations beside it.
+  `contractArms` writes such tools' `ToolContracts` arms for any file that declares them: each distinct set
+  of declarations in a namespace of its own, with an alias per tool, so the contract is kept as written and
+  two tools' types of one name never meet.
+
+### Bug fixes
+
+- **Unloading a plugin withdraws only its own registration of a service.** The registry holds one value
+  per key, and unloading used to `unregister` the key outright, whichever plugin was current. Where plugins
+  stack on a key by capturing what they displace (`ts-validation` over `json-validation`), unloading the one
+  underneath removed the one on top too — `plugin reload json-validation` switched typed validation off with
+  it — and unloading the one on top reverted past the one it had displaced, to the host default. Now
+  withdrawing the current registration reinstates the one it displaced, withdrawing a displaced one changes
+  nothing, and only the last one out reverts to the host. The same holds for the swap-members, a plugin's own
+  `unregister`, and `StorageBackend`, with one difference: a displaced backend was closed by the swap, so
+  withdrawing the live one still reverts to the host's own — but withdrawing a displaced one no longer pulls
+  the live backend out from under everything.
+- **Concurrent first uses of an adapter module that `plugins:` does not list share one load.** Each started
+  its own: the first won and the rest failed on "already registered", so their `complete()` calls failed.
+  Boot is when they arrive together — a skills reindex analyses every skill at once through one provider — so
+  this happened on every boot of such a config. A failed load is not remembered; the next use tries again.
+- **A gate refused because nobody could be asked is logged** (#111). The model was told, and nobody else:
+  the operation simply did not happen, in a process nobody watches (a background job, a trigger,
+  `POST /tools/:name`). `bindGate` now logs it at error level, naming the gate and subject a standing answer
+  would need, at most once an hour per gate and subject.
+
+### Optional
+
+- **`json-validation`, `ts-validation`** — each registers a `validate` hook instead of the `ToolCallValidator`
+  service, and neither captures nor calls the other. The verdict is unchanged — a call either one refuses is
+  refused — but it no longer depends on which loaded first, and unloading one leaves the other validating.
+  When `ts-validation` has no contract for a tool (or its `enforce` is `off`) it has no opinion, and the schema
+  check still stands.
+- **`triggers`** — a trigger's `invoke` is checked with `tools.validate` when it is stored, so it meets every
+  validator its call will meet when it fires.
+- **`hook-logger`** — logs the `validate` channel too.
+- **`cognition`** — its triggers are seeded whatever order `triggers` is listed in. It read `Triggers` once,
+  when the `SkillManager` arrived, so with `triggers` listed after `cognition` the Inner voice and
+  `remember_fact` triggers were never seeded, at that boot or any later one. Seeding passes now also run when
+  `Triggers` arrives, one at a time. It also no longer passes its own abort signal to `mounted.observe`: that
+  controller was created once per plugin instance and aborted by the first teardown, so a later setup of the
+  same instance observed nothing.
+- **`mcp-http`** — a persisted server no longer holds up boot. `setup()` awaited every reconnect, one server
+  after another, with no bound on the handshake: an unroutable endpoint held the whole boot for ~21s, and one
+  that accepted the connection and never replied held it indefinitely, along with every plugin listed after
+  it. Reconnects now run in the background and concurrently, as the node `mcp` plugin's already did. The
+  `initialize` + `tools/list` handshake has a 30s bound, which `mcp_action add` also gets, and an unload
+  aborts a handshake still in flight instead of letting it register tools for a plugin that has gone.
+
+- **`tool-router`** — the tool window is set in the plugin's settings instead of constants, so a small
+  model can be given fewer tools at once: `targetWindow` (default 20), `cullTrigger` and `cullTarget`
+  (default from `targetWindow`, 100% and 60%), and `eagerFill` (default false). Lowering `targetWindow`
+  alone shrinks the whole window. Settings are read on each call, so a change applies from the next one.
+  - The new `tool_router_config` tool (`get`/`set`/`clear`) changes them where `default_settings:` cannot
+    be authored, such as the browser. `set` refuses a non-positive or non-integer value, and a combination
+    that defeats itself once stored values are included (`cullTrigger` below `targetWindow`, `cullTarget`
+    above `cullTrigger`), and then writes nothing. It is left out of `tool_search`'s catalogue line and never
+    pinned, but a search finds it.
+  - Warming the noun/width cache reads each batch of queued tools with one store query, not one `get` per
+    tool in sequence — on a remote `StorageBackend` that was a network round trip per tool for the whole
+    boot (#109). Tools registered while a batch is in flight form the next one. If the query fails, it
+    falls back to per-key `get`, never to treating every tool as uncached.
+- **`function-tools`** — stored functions and packages are no longer compiled at boot (or on a
+  `StorageBackend` swap). Each one compiles at its first call, so startup costs only parsing the
+  signatures: 200 large functions took 2.4s with `function-runner-node` and now take 50ms, and a single
+  function took ~0.2s, most of it the runner's first load of TypeScript. A stored definition that no
+  longer compiles is now registered and reports the error when called, where boot used to skip it with a
+  warning. `define` and `package` still compile straight away, so a bad new definition is still refused.
+- **`function-runner-node`** — `Buffer` is no longer withheld from a `tool_function` body. It reaches no
+  capability, and it was the one way to base64 bytes. **`tool-types`** types it in every body, including
+  one that imports nothing or runs under `permit_imports: []`. A function checked before this is listed
+  as `checkedElsewhere` once, since the withheld set is part of the environment its verdict names.
+- **`tool-types`** — the scan of the monorepo `plugins/` tree skips a package whose `matbotRuntime`
+  excludes the runtime being described, by the loader's rule (absent or empty means no restriction). A
+  derivation given no live tool set, such as a typed client generated at build time, no longer declares
+  browser-only tools on node (`webllm_models`), nor google-drive's `managedBy` on `plugin`'s result (#110).
+  `collectToolTypeRoots`, `buildToolTypesData` and `buildMatbotToolsDts` take a trailing `runtime`
+  (default `'node'`), and the web bundle's contract bake passes `'browser'`.
+- **`chatjimmy`** — runs in the browser too, and the web bundle's setup wizard offers it. The endpoint sends
+  no CORS headers, so it needs a CORS-unblocking browser extension, which the wizard says. Without one, a
+  turn fails with an error that says so, not a bare "Failed to fetch".
+- **`chatjimmy`** — tool calling, done in the prompt since the endpoint has none. On by default;
+  `parameters.tools: false` turns it off. Tools are described in the system prompt in the `<tools>` / `<tool_call>` format, calls are
+  parsed out of the reply, and results are replayed as `<tool_response>` turns saying what to do with
+  them, restating the user's question. Only the first `maxCalls` calls of a reply are kept (default 1),
+  because the model writes on past a call. A call whose arguments are not an object is shown, not run. A
+  reply that ends at the token limit is reported as truncated.
+  - Every request is fitted to the endpoint's ~6k-token window (`contextWindow`). It shortens old tool
+    results and then tool descriptions, leaves out the earliest turns, and then leaves out tools, keeping
+    the ones the latest tool result names. Past the window, the endpoint returns an empty response, and
+    that is now reported as an error rather than passed on as an empty turn. This applies with
+    `tools: false` too.
+  - Sampling defaults to greedy (`topK: 1`) when tools are offered; a profile's own `topK` still wins.
+  - `debug: true` logs each exchange whole.
+- **`provider-anthropic`, `provider-openai-compat`, `provider-google`** — implement `models`.
+  - Anthropic reads `/v1/models`, every page.
+  - OpenAI-compat reads the `/models` sibling of the chat-completions URL (or `<base>/models`). The list
+    includes non-chat models, since nothing in OpenAI's rows says which is which. With no key it sends no
+    `authorization` header, so a local server or OpenRouter, which list without one, are not refused.
+  - Google reads the native `/models`, keeping only models that `generateContent`. Every id is returned
+    without its `models/` prefix.
+- **`tool-plugin`, `browser`** — `provider add` and `provider update` check the model against the endpoint's
+  list.
+  - A model the endpoint does not list goes to a gate (`provider.add-unlisted`, `provider.update-unlisted`),
+    not a refusal, because an endpoint accepts names it does not list (an Azure deployment, an alias). A
+    refusal names the closest listed ids. An endpoint that cannot list is accepted unchecked, and the tool
+    says so.
+  - **Breaking** for an installation that adds or updates profiles with nobody to ask (a trigger, a job,
+    `POST /tools/provider`): an unlisted model is now refused there (`fallback: false`). Give a standing
+    answer for the gate, or use an id the endpoint lists.
+  - On node, `add` first lists without the credential, before its own approval, since that sends nothing
+    secret. Only if that fails (every hosted API but OpenRouter needs a key) is the list fetched with the
+    credential, after the approval, because only `add` agrees that it may go there. So a profile can cost
+    one more decision: `add-unverified` → `add` → `add-unlisted`.
+  - `update` checks only when the model or endpoint changes, and only where the profile's credential
+    already went: one that would have followed the endpoint to another origin is already detached.
+  - The browser's `ProviderAdmin` takes an optional `get(name)`, so an update can be checked. Without it,
+    an update's model is not checked.
+- **`cli`** — the first-run setup wizard checks the model once the endpoint and key are entered. An unlisted
+  one names the closest ids and asks again; Enter keeps the name as typed.
+- **`cli`** — the first-run setup wizard tested an endpoint's reachability only when it did *not* start with
+  `http`, so a real URL was never tested. It now tests every endpoint, and asks again for one that is not an
+  `http(s)` URL. A blank endpoint (the adapter's default) was written as `endpoint:` and carried as `''`,
+  which the adapter used in place of its default, so the first turn failed. It is now left out.
+- **`web-bundle`** — the setup wizard suggests the endpoint's models under the model field: once the
+  endpoint is typed if it lists without a key, and again once the key is typed (the key now comes before
+  the model). An unlisted model is warned about once on save, naming the closest ids, and saving again
+  keeps it.
+- **`webllm`** (new, prototype) — a browser-only provider running open-weight models on the GPU in the
+  page through WebLLM, which is imported from a CDN on first use. Qwen3-4B is the default.
+  - Tool calls use Qwen's own `<tool_call>` format, constrained per tool by a structural tag: only a
+    declared tool can be named, and its arguments must fit its schema.
+  - History is rendered deterministically, so WebLLM reuses its prefill between rounds.
+  - Download and load report as `progress`.
+  - A model id is checked before anything downloads: an unknown one names the closest, and an f16 build
+    on a GPU without f16 names its f32 build.
+  - The `webllm_models` tool describes the runnable models and deletes a downloaded one. `list` gives full
+    rows (GPU memory, whether this GPU can run it, downloaded/loaded) only for what a `query` or
+    `downloaded` selects, and otherwise the bare ids, so it never fills a small model's window. A
+    selection that matches nothing returns every id rather than an empty list.
+  - Only models trained on the tool-call format the adapter uses are listed or accepted while tools are
+    offered: the Qwen3, Qwen2.5 and Hermes families, 39 of WebLLM's models. Others would answer instead of
+    calling tools. Any chat model may still be used with `parameters.tools: false`.
+  - A conversation longer than the context window is fitted to it, cheapest loss first. Large tool results
+    in earlier turns are shortened, keeping their start and saying how much is left out. Only if that is
+    not enough are the oldest whole turns left out, so a tool call keeps its result. The current turn is
+    never touched, the session is unchanged, and the model is told. Both decisions stay put across turns, so
+    WebLLM keeps reusing its prefill. An overflow WebLLM still reports at prefill is re-fitted with a
+    stricter estimate.
+  - Offered by the web bundle's setup wizard, which asks which model to use from a drop-down of the same
+    models `webllm_models` lists (Qwen3-4B preselected). If the list cannot be fetched, the wizard shows a
+    text field instead, and leaving it empty uses Qwen3-4B.
+- **`frontend-web`** — closes the server to other origins (#111). **Breaking** for a page served from
+  elsewhere that calls this server.
+  - No `Access-Control-Allow-Origin` is sent by default; it was `*`. On an installation walled off by its
+    network rather than by a login, that let any page a user on the network visited read and drive the
+    whole API. A dashboard hosted on another origin is granted with the plugin's `cors_origin` setting.
+  - Every POST must be sent as `Content-Type: application/json`, and anything else is refused with 415
+    before its body is read. A cross-origin page can send a `text/plain` or form POST without a preflight,
+    and every body was parsed as JSON whatever it claimed to be.
+- **`frontend-web`** — model output can no longer run script in the UI (#111). The page renders the prompt a
+  gate is waiting on, so script there could answer it.
+  - Rendered markdown is sanitised with DOMPurify (pinned, with an integrity hash). Event handlers,
+    `<script>`, `javascript:` URLs, `<style>`, `<form>`, `<meta>`, `<base>`, `<link>`, `<object>` and
+    `<embed>` are removed; SVG, images, video, audio, `<details>`, styled elements and tables are kept.
+    Each message is `contain: paint`, so a styled reply cannot draw outside its own bubble (over a prompt).
+  - Every `<iframe>` is sandboxed without `allow-same-origin`, and `srcdoc` is removed: a page from this
+    server would otherwise run with the UI's access. One that points at this server is loaded through a
+    bridge instead: its HTML is set as `srcdoc` behind a `<base>` and a `fetch` shim, and the UI makes its
+    requests for it, allowing only tool calls (`POST /tools/*`, `/stream/tools/*`) and file reads
+    (`GET /files/*`), never `/sessions/…`. An embedded dashboard therefore keeps working unchanged, and a
+    gated tool it calls is refused as for any caller with nobody to ask. Node server only: in the
+    in-browser build an embedded workspace page says it is unavailable.
+  - `marked` and `tiny-markdown-editor` are loaded at exact versions with integrity hashes. Both were
+    unpinned, so whoever controlled those CDN URLs controlled the page. The versions are the ones the
+    unpinned URLs served (`marked` 15.0.12) or the release before (`tiny-markdown-editor` 0.2.34).
+  - `web_user_environment`'s Worker has the page's origin, so its expression could `fetch` any route the UI
+    can, and in the in-browser build open the machine's IndexedDB and OPFS storage. Every way it had to send
+    a request, start another realm or open that storage is now deleted before the expression runs, and the
+    tool's description says so.
+- **`frontend-dom`** — the same markdown rules, and `marked` pinned to 14.1.4 (it was `marked@14`).
+- **`frontend-web`** — the model can no longer answer its own prompts over HTTP (#111). The server refuses
+  every request arriving on a connection matbot's own process opened (403), recognised through node's
+  `net.client.socket` diagnostics channel on every platform. The model reaches the network from inside
+  that process, through the `http` tool or a function's `fetch`, and `POST /sessions/:id/prompt` answers
+  whatever prompt is pending, a permission gate's included. Browsers and other processes are served as
+  before. A process matbot starts (`curl` from `bash`) is not covered, and the README says so.
+  `createWebServer` takes `refuseOwnProcess`, off by default so a test can drive the server with `fetch`.
+- **`http`** — asks before a request reaches an origin, and again for each origin a redirect leads to
+  (#111). The subject is the origin (scheme, host and port), the gate `http.request`, and a call with
+  nobody to ask is refused. **Breaking** for an installation that calls `http` from a trigger, a job or
+  `POST /tools/http`: give a standing answer for the origins it uses.
+- **`function-tools`** — a body's `fetch` and `WebSocket` ask about each origin, as its `import(…)` asks
+  about each module (#111): gate `tool_function.connect`, subject `<function> <origin>`, once per origin
+  per invocation, redirects asked about in their own right. A refused `WebSocket` closes with code 1006
+  and the refusal as its reason. Only where a runner binds them.
+- **`function-runner-node`** — binds the gated `fetch` and `WebSocket` each call is handed in place of the
+  globals. The constructor escape still reaches the real ones, as it reaches `process`.
+- **`frontend-telegram`** — `telegram_open_door` asks before it opens (#111). Whoever joins gets the owner's
+  access to this matbot, so admitting someone is the user's decision: gate `telegram_open_door.open`, and a
+  call with nobody to ask is refused.
+- **`docker-bash`** — `.data/settings` and any SQLite database files are mounted read-only inside the
+  container (#111). They hold the permission gates' standing answers, so a script that could write them
+  could grant itself every later gate. The container is labelled with the set it was made with, and one
+  made with another set (including every container from before this) is replaced on its next use.
+- **`function-tools`** — a function's own import and network grants name its version (#111). The subject
+  is `<name>@<digest> <module|origin>`, the digest of the text that was compiled (a package export's is the
+  whole package's), so a redefinition asks again instead of inheriting what the reviewed version was
+  granted. "Any function" answers and `#execute` are unchanged. Narrow standing answers stored before this
+  no longer match and are asked once more.
+- **`tool-plugin`** — `plugin reload` asks before importing code that has changed since the plugin was
+  loaded (#111). A reload of a resident plugin was never asked about, but it imports whatever is on disk or
+  upstream now, which the model can change (`skills_compiler` writes a plugin; `refresh` re-fetches one).
+  The host records a digest of each plugin's own files as it loads it, boot included (in memory, so a
+  restart re-records what the configuration loads); gate `plugin.reload`, subject the config entry, with
+  `fallback: false`. Code already on disk is checked before anything is unloaded, so a refusal leaves the
+  plugin running; a refreshed copy is checked once fetched, and a refusal restores the cached one. A
+  recompiled skill is therefore asked about on its reload; a standing answer for that plugin covers it.
+- **`cli`** — `.env`'s secrets are kept out of the process environment (#111). Every process matbot starts
+  inherits it (`bash`, an MCP server, `npm` running a fetched plugin's install scripts), so a secret there
+  went to all of them with no gate asked. The vault now reads `.env` itself, and its keys are removed from
+  the environment once it has, including when something else loaded the file (a systemd
+  `EnvironmentFile=`). `MATBOT_WEB_PORT` and `MATBOT_PRINCIPAL` are still applied from `.env`. **Breaking**
+  for anything that read a `.env` value from the environment directly, such as a local MCP server relying
+  on inheriting a token: name it in that server's `env:` as `${KEY}` instead (see `mcp`).
+- **`mcp`** — a local server's `env` values may name vault keys as `${KEY}`, read from the vault as the
+  process starts and stored as written, never resolved (#111). It is how a server gets a token now that
+  `.env` is not inherited; the spawn prompt names every key it will be given.
+- **`tool-plugin`, `browser`** — `provider update` follows the rule above: when the endpoint moves origin,
+  the confirmation (node) says the credential does not go with it and names the key it will read instead,
+  and both tools' results tell the model to have the user supply it with `plugin store-key`. A credential is
+  shown by key name only, never a literal value.
+- **`cli`** — a background job's turns get no prompt, so a gate in one refuses as unattended (and is logged)
+  instead of printing its question into the log and reading the answer from the closed pipe its config came
+  on. A form there takes each field's default.
+- **`function-tools`, `tool-types`, `browser`** — a function package's export whose contract names the
+  package's own types is validated and typed. Each export carries the declarations its contract reaches
+  (`toolContractTypes`); they were missing from the program that types contract strings, so
+  `ts-validation` refused the tool ("Cannot find name 'HubReport'") and the dts named a type it never
+  declared. A declaration that does not resolve refuses only the tools that carry it.
+- **`function-tools`** — a package export whose parameter is typed by one of the package's own names
+  (`args: CheckArgs`) gets a real input schema: the name is read as what it declares (an interface's body,
+  an alias's type), and a local union alias joins the union it appears in. It was `{}`, so
+  `json-validation` — the browser's only validator — accepted anything. A generic declaration stays open.
+- **`function-tools`** — editing a function no longer re-asks for its imports and connections, when the
+  user permits it. A function's grants are filed under its lineage (the version it descends from by
+  permitted edits), not the digest of its current text, and a redefinition of one that uses `import(`,
+  `fetch` or `WebSocket` asks `tool_function.edit` whether the new version keeps them — offering "always,
+  for edits to this function in this session". The grants stay general, so a function developed in a
+  session keeps them when it later runs in a background job. Links are kept in the plugin's settings, never
+  on the stored definition, so text written any other way starts a fresh lineage. Prompts name "function
+  F" rather than "F as currently defined".
+- **`docker-bash`** — the project's `.env` is covered by `/dev/null` inside the container, so it reads as
+  empty (#111). The project is mounted read-only, which kept the file from being written but left every
+  secret in it readable to a script. Containers made without the cover are replaced on their next use.
+
+## 0.4.20
+
+### Breaking changes
+
+- **A permission decision says which test produced it.** `PermissionGate.decide` and `ctx.gate` resolve
+  `{ allowed, source }` instead of a boolean. `source` is the layer that answered: `user`,
+  `configuration`, `fallback`, or a name a replacement policy chooses (the type is open). Call sites
+  render `refusalMessage(decision)` instead of `Cancelled.`, so a model is told whether there is anything
+  to work around rather than retrying or hunting for a bug. Nothing branches on `source`, and a
+  delegating gate passes the displaced gate's source through unchanged.
+
+  Migrating: test `.allowed`. The decision is an object, so `if (!await ctx.gate(…))` is always false and
+  the compiler will not tell you. A gate returns `permitted(source)` / `refused(source)` (exported from
+  plugin-api and core).
+
+- **The node `FunctionRunner` is a plugin, `@matatbread/matbot-function-runner-node`, and not in a
+  default install.** Bounding a `tool_function` body, withholding host globals and gating its imports all
+  move out of `apps/cli`. **Without the plugin a body runs unbounded, unshadowed and ungated** — add it to
+  `plugins:` for the previous behaviour. An install that set neither retired key is not warned.
+  - Its settings are `timeout_ms` and `permit_imports`, under
+    `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`, read and changed at run time
+    with its `function_runner_config` tool (`get`/`set`/`clear`, each key gated separately). They are read
+    once per invocation, never at boot, so a change takes effect without a restart and a settings store
+    partitioned by principal gives each principal their own. A malformed value from any source falls back
+    (a bad bound to the default, a bad restriction to `[]`), is warned at boot and is reported by `get` as
+    `problems`.
+  - The retired top-level `function_timeout_ms` and `function_imports` keys are warned about, naming
+    where they went. Being an ordinary setting, `permit_imports` can now be overridden at run time; an
+    install needing a floor nothing in-process can raise ships a runner with the list compiled in.
+  - `apps/cli` no longer depends on `typescript`; the plugin does.
+
+- **A `tool_function` body's imports are gated, and a `FunctionRunner` is handed TypeScript.**
+  - The first time a body imports something the user is asked, on gate `tool_function.import` with
+    subject `"<function> <specifier>"` — the pair, so a new function does not inherit a reviewed one's
+    grants. `permit_imports` is an optional restriction on what may be asked for: absent means none, and
+    `[]` switches imports off (the only way to say "never").
+  - A body imports **by name only** — a node builtin or an installed package, never a path or URL — which
+    the gate, the runner and the type-check all refuse first (`importableByName`). Paths had defeated the
+    string-matched restriction (`./lib/../../x`). A missing package is reported with where to install it.
+  - Bodies still write `import(…)`, so a computed specifier works; node's runner strips types in place
+    (line numbers are the author's) and finds the calls by parsing, replacing a hand-written scanner that
+    silently missed imports after a regex or a division.
+  - The runner withholds `process`, `globalThis`, `global`, `Buffer`, `eval`, `Function` and the phantom
+    `require`/`module`/`exports`/`__dirname`/`__filename`, and publishes them as `withheldGlobals`. This
+    is not a sandbox, and every import label says the grant carries matbot's full access, builtins
+    included.
+  - `FunctionRunner.compile(source)` now takes a self-contained async-function expression; the consumer's
+    gated loader is the compiled callable's first argument.
+  - With no runner (any install without the plugin, and the browser) nothing is bounded, withheld or
+    gated, and the tool dts says so, deriving its environment note from the registered runner.
+
+- **A vault backend implements `readSecret(name)`, not `resolve`.** `VaultSpec` gains
+  `readSecret(name): Promise<string | undefined>`, and `resolve` is written once over it as
+  `applyResolve(spec, ref)` (exported from plugin-api and core), so the `${NAME}` grammar has one home
+  instead of a copy per backend. A caller holding a key name reads it directly rather than wrapping it in
+  `${…}`, and `resolve` reports each missing key once.
+
+  Migrating a backend: add `readSecret`, and make `resolve(ref)` return `applyResolve(this, ref)`.
+
+### API gaps filled
+
+- **`PermissionRequest.standing`** — the answers an act may be remembered as, narrowest first, each a
+  subject to store and a label to show. The call site supplies both because only it knows how its
+  subjects generalise and how to phrase them; a policy stores only a subject it offered, and with none
+  offered falls back to the request's subject.
+- **`ctx.gate({ namespace })`** — a tool whose name is built at run time asks under a fixed namespace,
+  so every `function-tools` function shares `tool_function.import` and one standing answer covers them
+  all. The namespace must name a tool registered by the caller's own plugin (checked against the host's
+  stamps), so no plugin can address another's gate.
+- **`ToolTypeIndex.environment()`** (on `ToolCheckReport.environment`) — an opaque fingerprint of what a
+  type-check depended on besides the snippet and tool types: runner presence, permitted imports and
+  withheld globals. `function-tools` stores it with each definition, `list` reports `checkedElsewhere`
+  when it no longer matches, and a passing `check` re-stamps it. Nothing re-checks at boot.
+- **`importableByName` / `importPermitted`** (plugin-api) — the name-only rule and the
+  `permittedImports` boundary rule as shared functions, so the gate, the runner and the type index agree.
+  `importableByName` allowlists characters, since `%2e%2e` and similar are `..` to the URL resolver.
+- **`FunctionRunner` members** — `settings()` (the restriction, read per invocation and passed back on
+  `FunctionCall`), `import()` (resolves a granted specifier, attributes included), and
+  `canonicalImport()` (so `os` and `node:os` are one question and one grant).
+
+- A provider can report progress on work it must finish before answering, such as an on-device model
+  downloading or loading. The new `progress` `CompletionEvent` (`pct` 0–100, optional `message`) is
+  forwarded as a `progress` `TurnEvent`. It is live-only and never persisted. Previously the only live
+  channel was `thinking`, which made a status line read as the model's own thought. The web UI draws it
+  as a bar on the pending reply, and the CLI as a one-line indicator.
+
+### Optional
+
+- **`tool-types`**
+  - A body's imports are type-checked against what the installation permits: node's declarations are
+    scoped with `paths`, one entry per reachable module (65 files rather than 168), instead of
+    `types: ['node']`. `@types/node` becomes a dependency.
+  - New structural rules beside the cast gate: **ENV-GATE** rejects the runner's withheld globals and
+    `import.meta` (a renamed destructuring and a type position are exempt), and **IMPORT-GATE** enforces
+    the restriction, which `paths` alone cannot. `ToolCheckDiagnostic.label` names the rule.
+  - Diagnostics match the runtime: compiled-plugin hints no longer fire on a snippet, importing
+    `@matatbread/matbot-plugin-api` from a body is refused (it typechecked and failed at the first call),
+    a bare builtin is typed where the gate permits it, a bare `node` is explained as a missing colon, and
+    tsc's "install type definitions for node" advice is replaced with something the author can act on.
+  - **Fix:** the check program's root is absolute; a relative one meant the snippet was never matched,
+    so nothing was checked and every snippet passed.
+- **`function-tools`**
+  - Type text is walked bracket-aware: `Promise<A> | Promise<B>` no longer becomes `A> | Promise<B`, and
+    a string-literal type such as `'a|b'` or `Promise<'a>b'>` is no longer split or left wrapped. Each
+    was spliced verbatim into the dts and the wire text.
+  - `tool_function`'s description says `fetch`, `AbortSignal`, `WebSocket`, `console` and the timers are
+    ordinary globals in a body, so the model stops reaching for (or installing) `http` instead (#99).
+  - A `define` (or `package`) the store refuses changes nothing in the tool registry (#106). Both
+    registered before writing, so a refused write left the caller's unsaved code running under the name —
+    with a store that refuses writes to shared-in items, someone else's function — and a refused new name
+    stayed registered but untracked. Source is still compiled first, so bad source fails first. A
+    read-only refusal names the next step, and a `check` sweep no longer stops at a shared definition it
+    cannot re-stamp.
+  - A stored function never replaces a tool `function-tools` did not register (#107). `reload` removed
+    whatever held the name, bypassing the `tools.overwrite` gate, so a shared-in or stale definition could
+    displace another plugin's tool. It is now skipped with a warning and reported as `shadowedBy` by
+    `list` and `SHADOWED` by `check`; ownership is the live tool's plugin stamp, and a freed name is
+    registered at the next reload.
+- **`tool-plugin` / `cli`** — `plugin add`, `reload` and `remove`, fixed from a live install.
+  - **`add` of a plugin peer-depending on plugin-api no longer fails with `ERR_PNPM_NO_MATCHING_VERSION`**
+    (#90). pnpm ≥ 10 reads its settings from `pnpm-workspace.yaml`, not `.npmrc`, so
+    `link-workspace-packages` had been silently ignored; the settings move there and `engines.pnpm` is
+    `>=10`. The failure is now recognised and the setting named.
+  - **`reload` keeps a fetched plugin's installed dependencies** (#90); it used to evict them with the
+    source. `add` and `reload` plan a fetched plugin's declared dependencies from its manifest and ask
+    before loading it, rather than failing on the first missing import.
+  - **A failed `reload` restores the previous copy** (#90) instead of leaving the plugin unloaded.
+  - **A fetched plugin can import a bare CDN URL** (#89). A URL that is both a module and the parent of
+    others (`https://esm.sh/ms@2.1.3`) failed with `ENOTDIR`. A URL import now keeps its URL as its
+    identity, as in the browser: redirects and queries resolve correctly, `import.meta.url` is the URL,
+    and it is cached by hash under `.plugins/.urls/`. It is fetched at exactly that URL (no `.ts`
+    fallback), and a plugin importing its own file by URL is refused, naming the spelling that reaches the
+    one copy. A plugin's own files are mirrored as before, now refusing a dot-segment host or an encoded
+    separator.
+  - **`remove` takes back what `add` created, and only that** (#98). Matbot's own cache (fetched source,
+    its dependencies, its name link) is deleted unless another configured plugin or a provider's `module:`
+    shares it. Project changes (a `package.json` key, a local plugin's `node_modules`/lockfile) are
+    recorded at install under `.plugins/.installs/` and offered back through `npm-uninstall` and a new
+    `remove-provisioned` gate; an install from before this release has no record, so `remove` names the
+    command instead.
+  - **`add` refuses up front what it cannot carry through:** an npm spec other than a bare name (a
+    version, tarball or git URL — install it with your package manager, then `add` the name); a package
+    whose manifest does not declare `matbotRuntime` including `node`; a declared-but-uninstalled package,
+    or a project with no `package.json`; a duplicate plugin name; and a local plugin's dependencies unless
+    the ground is empty or already complete. An already-installed package is used as it is. An `add` that
+    disowns the plugin after installing takes back exactly what it created.
+  - `plugin add npm:<name>` works (the prefix was passed to the package manager), and a name link follows
+    the copy materialised last. The tool description and `docs/DEVELOPING.md` say what happens to a
+    fetched plugin's dependencies.
+- **`cli`** — a `select` prompt numbers its options when they no longer fit on one line, and resolves
+  an exact value or label, then a shown number, then a unique prefix. A miss re-asks once instead of
+  silently taking the default; free text is returned where `allowOther` allows it.
+- **`http`** — a header value can come from the Vault (#104): `{ "Vault": "KEY" }`, or a template
+  `{ "Vault": "Bearer ${KEY}" }`. Each key is gated as `http.secret` on `<origin> <key>` before it is
+  read; while one is attached redirects are not followed and the URL must be absolute http(s), and
+  resolved values are redacted from results and errors.
+- **`web-bundle`** — a remote plugin's imports resolve in the browser as on node (#94, #95, #96): found
+  by parsing rather than a regex, resolved against the URL that answered (so CDN redirects work and
+  dedupe), root-relative imports against the plugin's origin, and `import(…)` at call time.
+  `import.meta.url` is the module's real URL.
+- **`background-jobs` / `sessions`** — the tool descriptions say where a job reports: the conversation
+  fixed when it was created (from `session` or the creating call), never the job's own throwaway session.
+  `background_job_action list` points at each row's `session`. Behaviour is unchanged.
+- **`frontend/web`**
+  - Double-click a user bubble to edit what you sent and resend it: the session is cut at that message
+    and the edit submitted as a new turn, attachments kept by reference and robo blocks dropped. This
+    replaces the divider's **Resend**.
+  - Streaming writes the DOM once per animation frame instead of once per delta, with the same latency;
+    profiles had shown hundreds of long frames. A thinking block no longer scrolls past the viewport.
+  - A session waiting on a question for the user shows a **red** sidebar dot (`prompting` on the
+    `session-busy` event), including to a stream that connects while the question is open.
+  - In the in-process transport, stopping a session cancels a parked prompt rather than answering it
+    with the field's default.
+  - A conversation link carries its profile (`#<profile>:<session>~<params>`), from the address bar,
+    **Copy link** and a fork/split marker, so it opens in the right profile rather than the receiver's
+    most recent conversation. No prefix means Global.
+  - In a conversation shared in from another profile, a fork/split marker links to its peer only if that
+    peer was shared too, and otherwise says so.
+  - The turn just answered can be edited (double-click) and cut/forked from its divider without a
+    refresh. A live divider and bubble now take their message index by traceId rather than by position,
+    which drifted once a fired `contextual` trigger drew a divider a reload does not — so each later
+    divider carried the previous turn's index, and a cut from it hit the wrong turn.
+- **`edit-session`** — every `session_edit` action accepts `msgId` as an alternative to `msgIndex`
+  (give one, not both). An id the session does not hold is an error that changes nothing, and an edit
+  now locates its message in the same read it edits.
+- **`chatjimmy`** — the `systemText` prompt is passed through.
+- **`prompt-api`** (new, prototype) — a browser-only provider for the browser's on-device model through
+  the Prompt API (`LanguageModel`; Gemini Nano in Chrome). Streams text, round-trips open-loop tool calls,
+  degrades to text-only where the browser lacks tool use, and reports first-run download progress. Offered by
+  the web bundle's setup wizard as a self-contained adapter.
+
+- **`cli`** — reloading a plugin fetched over http re-evaluates its own imports, not only its entry. The
+  module hook answered a fetched plugin's imports from the remote loader and returned before passing the
+  reload's `?mbfresh` stamp on, so a refresh re-fetched a changed import to disk and Node handed back the
+  copy it had already evaluated under the same URL: an owner's edit to anything but the entry never
+  reached a reload. The stamp now reaches a fetched plugin's mirrored files as it reaches a local one's.
+  A module imported by absolute URL keeps its URL unstamped, as before.
+
+## 0.4.19
+
+### API gaps filled
+
+- **Turn-scoped tools from a `screen` hook.** `ScreenResult.tools` is a `TurnToolSource` —
+  `(session) => Tool[]` — that the runner asks at the top of every round, with the session as it then
+  stands, so a tool a turn's own call defines in one round is callable in the next. Its tools are
+  advertised after the `ToolPresenter` (which never sees them) and resolved after the registry, and
+  they are never registered: no other session, no `POST /tools/:name`, no type index and no presenter
+  sees them. A name the registry holds is dropped with a warning — shadowing a registered tool is a
+  gated decision, and a hook is not a way round it. The round's map rides on `ToolContext.turnTools`,
+  and `invokeTool` resolves through it when handed one, so a tool forwarding its context — a composed
+  function's `tool.x()` — reaches the turn's tools exactly as the model does.
+
+### Bug fixes
+
+- **A parallel turn writes back its whole span, not just its final text.** `mode: 'parallel'`
+  merged only the submission and the last assistant message's text, so everything the turn
+  actually did — its thinking, its tool calls and their results, its markers — existed in the
+  live stream and nowhere else. The session is the only record once that stream is gone, which
+  made a genuine tool call unrecoverable: `determine_provenance` found no invocation and read a
+  truthful report as fabricated. The span now crosses back whole, read after the nested runner
+  idles (so it is what that turn's own `screen`/`followup` triggers settled on — a retraction
+  marker and its redo, a resubmit's robo turn — rather than its first draft), and trimmed to the
+  last point at which every tool-call has its result, since an unpaired call in shared history is
+  not valid wire for any provider. Thinking is persisted but still unsubmitted (every adapter
+  elides a historical block) and a foreign round-trip token is still the adapters' to drop by
+  `providerName`, so nothing here depends on which provider ran the turn. A turn that produced no
+  final text keeps the note saying why, now placed after the rounds it did complete.
+- **A `contextual` trigger's durable fold on a parallel turn survives the write-back.** The
+  turn's head was rebuilt from the content as submitted, to strip the framing block the copy ran
+  on; that also dropped any `durable` blocks a `screen` hook had folded onto it, so the correction
+  informed the answer and then vanished from the history the answer sits in. The framing block is
+  now subtracted instead.
+
+- **An attached text file reaches the model as text, in every adapter.** A `.csv`, `.json` or
+  `.yaml` attachment was routed — correctly — to the `document` arm, and then each adapter did the
+  one thing that loses it: `openai-compat` and non-PDF `anthropic` degraded it to a bare
+  `[Document: name]` note, and the `document` block with a text source that the Anthropic protocol
+  *does* have is silently discarded by the vendor shims that front other models on that same API
+  (DeepSeek's substitutes the literal `[Unsupported Document]` server-side). The model was
+  therefore told a file was attached and shown nothing, which reads to it as a lost attachment
+  rather than an absence: the observed turn spent six rounds hunting for the bytes — two
+  `tool_search` calls, `workspace_action list`, `session_action get` to recover the `fileId` from
+  its own transcript, then `bash` and `find` over `.data/files` — and only succeeded because that
+  install grants a shell. Textual documents now go as a named text block (`textDocument`, in
+  `core/providers-base`, since a mime-routing rule with three copies is one that gets fixed in one
+  of them), which is the one content shape every endpoint implements and is lossless for text: the
+  model reads the same characters either way. "Textual" is wider than `text/*` — `application/json`,
+  `application/yaml`, a `+json`/`+xml` suffix — but is never *guessed*: an unlisted type and an
+  `application/octet-stream` keep the old degradation, and the decode is `fatal` so a mislabelled
+  binary cannot reach a prompt as mojibake. A PDF still goes as a document block (anthropic, google)
+  or its note (openai-compat), having no text form.
+
+### Optional
+
+- **`web-bundle`** — `background-jobs` is baked into `matbot.html`. It is a cross-runtime plugin and
+  the cross-tab scheduling fix in 0.4.18 was specifically about the browser case — every open tab
+  arming a per-job loop over one IndexedDB — but the plugin was never added to `matbot.web.json`, so
+  it was absent from the artifact entirely and no browser install could load it without fetching it
+  over http. It is a `bundledPlugins` entry, so it is baked and offered through the `plugin` tool's
+  discover rather than auto-loaded, like `triggers` and `skills`.
+- **`frontend/web`** — the composer types a file the OS could not. `.yaml` and `.toml` arrive from
+  the picker with an empty `file.type` on most installs, which was posted as
+  `application/octet-stream` and so degraded to a note by every adapter. The extension is at that
+  boundary and the server is never told it, so the composer now maps the text extensions itself;
+  the picker's `accept` list offers them too. Text types only — guessing a binary's type buys
+  nothing, the bytes going as base64 either way.
+- **`function-tools`** — a defined function or package runs under the `FunctionRunner` current at each
+  call, not the one current when it was registered. Defined tools are compiled once and stay registered,
+  so a runner registered after `function-tools` loaded never reached them, and unloading a plugin that
+  had replaced the runner left them running unbounded under the host's restored one. A call that finds a
+  different runner recompiles under it; the strip is not redone. `buildAsyncFn` and `buildPackageFn` now
+  take the host (`CompileHost`: `TypeScriptStripper` + `FunctionRunner`) in place of the stripper and
+  runner arguments.
+- **`function-tools`** — `define { scope: 'session' }`: a function only the conversation that defined it
+  can see. Meant for what the model builds while working something out — a lambda it needs again, a
+  helper two lambdas share — so it neither joins every conversation's tool list nor appears over HTTP or
+  to the tool presenter; `'global'` (the default) stays the scope for a tool the user asked for. Stored as
+  a marker in the session, so fork, cut and compact carry it correctly (a `split` can strand a later
+  function calling an earlier one; `check` finds that). Offered to the model from the next round, callable
+  by name from the session's other functions, and type-checked like a registered tool — the checker sees
+  this turn's functions through an augmentation appended to the snippet. A name a global tool holds is
+  refused at definition, and withheld with the same message on any later turn where a global tool has
+  taken it. A global function may not call a session one (it would fail in every other conversation);
+  re-defining a session function as `'global'` promotes it and retires the session one. `list` reports
+  `sessionFunctions`, and `remove`/`check` cover them.
+
+## 0.4.18
+
+### Breaking changes
+
+- **`Session.parentSessionId` / `branchPointMessageId` removed**, with the matching `CreateSessionOpts`
+  fields. Nothing read either: `branchPointMessageId` was never written, and `parentSessionId` duplicated
+  the `forked-from` / `continued-in` marker a fork or split already appends, which is what the web UI
+  draws. Old persisted data keeps them harmlessly as excess properties.
+- **`SessionRunner.status()` returns `parallel`** — the number of parallel turns in flight beside the
+  running one, which `busy` now also counts. A custom `SessionRunner` must report it.
+- **`SessionRunner.write()`** — the runner is each session's one writer (see below), so a custom
+  `SessionRunner` must implement it.
+- **`SessionRunner.abortParallel(sessionId, traceId)`** — stops ONE `parallel` turn, leaving the running
+  turn, the queue and any other parallel turns alone; a custom `SessionRunner` must implement it. A
+  parallel turn is the only kind that can be stopped individually, since it runs on a nested runner with a
+  stop of its own. It still settles and writes back its pair, carrying a note in place of the reply — the
+  submission was made, and dropping it would lose that. A no-op for a traceId no parallel turn of the
+  session carries. Deliberately its own method rather than an optional argument to `abort`: an
+  implementation that ignored the argument would silently stop everything, the opposite of what was
+  asked.
+
+### API gaps filled
+
+- **`mode: 'parallel'` submissions** — a message sent while a turn runs can be answered at once instead of
+  queued or interrupting. It runs on a private copy of the session's completed turns, framed with the
+  running request, and only the message and its final reply come back, as a user/assistant pair. Its tool
+  calls stay in the copy. If the turn it ran beside is still going, the pair is placed ahead of that
+  turn's own messages at its next round boundary, which is exactly the history the reply was generated
+  against; otherwise it is appended. Announced with a `parallel` event, with progress streamed under its
+  own traceId, and a `merged` event once written. `SteeringDecision` gains `'parallel'`, so a
+  `SteeringPolicy` can choose it under `auto`. With nothing running it is an ordinary turn. A parallel
+  turn that arrives once the running turn has answered (while followup hooks judge it) sees the answer and
+  is not told a turn is still working. A parallel turn runs inside the machine hold of the session's pump,
+  which keeps it until every parallel turn it admitted has settled, so deferred work never lands under one
+  and it never waits at the quiescent-edge barrier behind the turn it runs beside.
+
+- **`CreateSessionOpts.status`** — a session can be created `archived` (hidden from the default session
+  list) or `pinned`, instead of being created active and changed by a second write that every client
+  watching the list sees.
+- **`SessionAppender` / `SessionAppend`** — add messages to a session without running a turn: checked at
+  once, written by the session's runner once no turn holds the session (one would write it back over the
+  append), announced as a `SessionAppend` notification carrying the new message ids beside the session's `ItemChange`. The host
+  seeds one in every process (`createSessionAppender`); it refuses in a background job, which shares its
+  parent's storage but none of its turns and must go through its parent instead. With no turn to wait for,
+  the append settles once written, so one that cannot land (the session is gone, or shared in read-only)
+  is reported to its caller; otherwise it settles on acceptance. `AppendMessage` is plain user/assistant
+  text, so nothing appended can break a later turn's provider request.
+
+- **`MatbotRuntime.ephemeral()` / `EphemeralRun`** — a private session runner over its own in-memory store,
+  for a turn that should leave no trace (a demonstration, an in-process background job): nothing it holds
+  is persisted, announced or listed, and nothing outlives the returned object. Its optional `appender` is
+  handed to tools as the new **`ToolContext.appender`**, so such a turn can report into a real conversation.
+  `MemoryStore` moves from the CLI to `@matatbread/matbot-core/storage-base`.
+- **`SessionRunner.write(sessionId, attempt, lost)`** — write a session from outside its turns. The runner
+  is the session's one writer: it runs `attempt` between that session's turns, in arrival order, as the
+  principal in force at the call, and no turn of the session starts until it is done. Other sessions'
+  turns do not delay it, so a write no longer waits for every turn on the machine, and a background job
+  or a long parallel turn no longer holds back writes to sessions it is not running in. `attempt` reads
+  and compare-and-swaps the document itself, and a lost CAS is read again. `deferred` says whether it
+  waits for a turn, which may be the caller's own. The session appender, `session_action` and
+  `session_edit` all write through it.
+- **`runEphemeralTurn(run, opts)`** (core) — one turn on an ephemeral run, from a fresh session to its
+  transcript: yields the turn's own events up to its terminal, and returns the committed session,
+  recovered from the run's store when the terminal carries none. The caller's signal stops the turn
+  itself, not just the view of it, and so does a caller that stops reading. `background-jobs` and
+  `skills_compiler` use it.
+
+### Bug fixes
+
+- **A settled parallel reply is written as it settles**, not only at the running turn's next round
+  boundary. `interject` is polled at the top of a round, so a turn parked in one long tool call (a 40s
+  `sleep`) reached no boundary and the pair existed in no store, no replay and no stream until that tool
+  returned: a client that reconnected in the window could not see it at all. The pair is a COMPLETED turn,
+  so it is placed in the store at once, ahead of the running turn's head — the same position
+  `interjectInto` uses — with CAS against that turn's own whole-document commit, and `merged` is announced
+  then. Every placement path (the new one, the round boundary, the between-turns drain) is idempotent on
+  the pair's message id and exactly one of them announces. A turn that ends without reaching another round
+  boundary (aborted or thrown inside that same tool call) now takes any such reply through a final
+  `interject` pull in `end`, so its whole-document write-back no longer erases a pair already in the store.
+  A reply that settles while the turn's `followup` hooks are judging it is placed too, which with
+  LLM-judged trigger conditions is the longest window of the three: it is anchored on the head its OWN copy
+  was cut at, captured at submit, rather than on the session's current head — a parallel turn submitted
+  *during* followup ran on a copy that included the finished turn, so its pair still belongs after it.
+- **`followup`'s own writes compare-and-swap.** The post-commit marker append and the retract-and-rerun
+  rewrite built their whole-document write from the session the hooks were handed *before* they ran, on the
+  basis that the pump was the only writer at that point. It no longer is, so both now CAS against that
+  snapshot and rebuild from `current` if it moved; the retraction enqueues its redo only if the write
+  landed, rather than re-running a turn whose original answer is still in the session.
+
+- **Session runner** — a submission arriving while the pump flushed usage could erase the flushed
+  accounting, or have its own user message erased. The pump dropped its running flag before the flush,
+  so the submission started a second pump whose turn-start write interleaved with the flush's
+  read-modify-write. The flush now runs while the pump still holds the session, and anything queued
+  during it runs next.
+- **Session runner** — a stop or cancel sent before a turn's first provider round (while its user message
+  was being saved or its provider resolved) was lost, and the turn ran anyway. The turn's controller is
+  now created as it is taken off the queue.
+
+- **Hooks** — a hook cut off by its turn's abort (a steer, a cancel) is logged as cut off, naming the abort
+  reason, and leaves no failure marker. It was logged as a failure whose whole message was the abort
+  reason — `threw; skipping it for this turn: steer` — and marked durably as one. A hook that genuinely
+  throws is logged with its stack; a non-`Error` throw says that is what it was. "Cut off" is decided by
+  the thrown value — the abort reason itself, or an `AbortError` — not by the signal alone, which stays
+  aborted for the rest of the turn and so excused every later throw: a hook's own fault went unmarked and
+  unlogged from the first steer onwards, which, interrupt being the default disposition for a mid-turn
+  message, is the common case rather than a corner of one.
+- **`runEphemeralTurn`** — waits for the run to go idle rather than returning at its turn's terminal, and
+  returns the transcript read back from the run's store. `followup` is post-commit, so a hook that
+  resubmits or retracts enqueues a further turn AFTER that terminal; it was left running with nobody
+  watching — calling tools and appending through the run's appender past the transcript the caller was
+  handed, and past a cancel that no longer reached it. Aborting at the terminal does not close it either,
+  the queue being drained before the hook enqueues. So a background job's reply tail and appended count
+  now include that work, and a cancel reaches it.
+
+### Optional
+
+- **`frontend-web`** — the steering toggle is now a three-way `queue | interrupt | parallel` switch, and
+  Alt+Enter sends a single message in parallel whichever is selected. A long press on Send does the same
+  with a pointer. A parallel turn is drawn with its own live progress, in a pane docked above the
+  conversation rather than inline at the tail: it has no position in the thread until its pair is written
+  back, so it floats there and then animates into place when `merged` says where it landed. A pane whose
+  reply has settled but whose pair cannot be placed yet says so. Each pane carries a stop, which ends that
+  turn alone (`POST /sessions/:id/abort` takes an optional `traceId`), and a minimise, which collapses it
+  to a one-line chip; minimised chips gather on a row at the conversation's right edge.
+- **`provider-google`** — a tool parameter with a JSON Schema type list (`type: ['string', 'array']`)
+  no longer fails every request with a 400. Each `anyOf` branch now takes the keywords for its own type
+  (`items` goes on the array branch). They used to stay on the parent, where Gemini rejects them.
+- **`caching-tool-types`** — a failed settings read logs a warning and rebuilds the type index,
+  rather than failing tool validation. The rebuilt index remains available in memory.
+- **`edit-session`** — `fork` and `split` no longer write `parentSessionId` on the new session; the
+  relation marker is the record of where it came from.
+- **`edit-session`** — a cut, split, compact or summarise of ANOTHER session with a turn running in it
+  is deferred until that turn ends, as one of the caller's own session already was. It was written at
+  once and then silently undone by that turn's write-back. A deferred edit is addressed by the message it
+  names, not by its index, so a reply placed into the running turn meanwhile cannot shift it, and one
+  whose message has gone by then is not applied. One that loses its compare-and-swap reads again and
+  retries instead of being dropped. `compact_sessions` defers any session with a turn running in it, not
+  only the calling one; it compacted the others in place, under their turns' write-backs.
+- **`sessions`** — `session_action` rename, hide and unhide of a session with a turn running in it are
+  deferred until the turn ends, and the result says `deferred: true`. They were written at once and
+  then silently undone by the turn's write-back — renaming or hiding a conversation from the web sidebar
+  while it was answering did nothing.
+- **`frontend-web`** — `POST /sessions` takes an optional `{ status }` body, and both transports'
+  `createSession` pass it through, so a client can create a session hidden.
+- **`cli`** — `console.info` and `console.debug` go through the same prefixing and background suppression
+  as `log`/`warn`/`error`. They bypassed it, so the plugin loader's cache-bust notes landed in a background
+  job's output file (its stdout), and in a piped foreground answer.
+- **`tool-types`** — a call matching none of a tool's forms, where the forms share no discriminant, says
+  why each form refused it (`(1) .interval: required property missing; (2) .at: …; (3) .name: unexpected
+  property`), instead of only "no union member matched".
+- **`background-jobs`** (new: `@matatbread/matbot-background-jobs`) — supersedes `matbot-tool-background`,
+  as `background_job` / `background_job_action`, with one change of meaning: a job's reply is not its output. A job tells the
+  user something by appending to a conversation (by default the one it was created from), writing a file
+  or sending a notification, as its prompt asks, and stays silent when there is nothing to say. Jobs run
+  in-process on an ephemeral run, so a job's own transcript is never stored, and the plugin is
+  cross-runtime — in a browser it runs jobs while a tab is open, one tab at a time. Stored jobs wait a minute
+  after the plugin loads before any may fire, so one past due at startup does not run while the tools it
+  needs are still loading. Keeps its own store: the old
+  plugin's schedules are listed as `legacy` (never run) and can be cancelled, so moving one is "create
+  here, cancel there". A recurring job keeps the tail of what it last printed as `lastReply`, for seeing
+  why a job that should have reported did not.
+- **`background-jobs`** — every write of a job row is a compare-and-swap, so the writers no longer erase
+  each other: a suspend landing while a job ran was undone by the stamp that followed it, and a cancelled
+  row was recreated by that stamp and run again on the next boot. A cancelled job now stops the run it has
+  in flight, and a suspend or resume contended by a run reports that rather than appearing to succeed.
+- **`background-jobs`** — a job fires once per occurrence however many matbots share its store. Every open
+  browser tab loads the plugin over the same IndexedDB and each armed a per-job loop of its own, so a job
+  ran once per tab: N turns and N reports in the conversation. The per-realm loops are replaced by one
+  bounded tick per matbot, and **the row is the schedule while `nextRun` is the claim** — a due job is
+  taken by compare-and-swapping its fire time forward, and run only by whichever matbot won the swap.
+  Nothing is held and nothing is leased, so a tab closed mid-run costs a recurring job one occurrence,
+  while a one-shot's claim moves its fire time out instead of deleting the row and is therefore claimed
+  again a few minutes later (at-least-once, the better failure for a request that was asked for and never
+  ran). Two consequences beyond the duplicate: a job created in one tab is no longer armed only there and
+  orphaned when that tab closes, and a `suspend`, `resume` or `cancel` made in one tab now reaches the
+  matbot that runs the job — a resume used to need to wake a loop in the tab that made it, so a job
+  another tab held suspended slept for ever. All four are row writes, picked up by whichever matbot ticks
+  next (at once in the one that wrote them, within a minute elsewhere). Exclusivity is the backend's `cas`:
+  IndexedDB and SQLite are exclusive across realms, which is what the browser case needs. Two further
+  fixes fall out: a recurring job's cadence no longer slides by the length of each run, since the fire time
+  is advanced before the run rather than stamped after it, and a job overdue by many intervals runs once
+  rather than once per occurrence it missed.
+- **`background-jobs`** — a one-shot is deleted because it RAN, not because it was reached. A run that
+  could not start at all (no provider to run as, a failed spawn) or was cut short by teardown left no row,
+  losing the request unrun and unreported for a usually-transient condition; it now stays and is tried
+  again on the next boot.
+- **`background-jobs-node`** (new: `@matatbread/matbot-background-jobs-node`) — `background-jobs` with each job
+  in its own process, which can be killed and shares no heap with the server, at the cost of a full boot
+  per run. A job reaches its parent over an IPC channel, which also carries what it changes back to the
+  parent's bus — so a file a job writes shows in the web UI. Same tools and store: load one or the other.
+  A job process that cannot be spawned is logged, and is not fatal to the server.
+- **`sessions`** — `session_action` gains `append`: post a message into a conversation without starting
+  a turn (default: this one, or in a background job the one it reports to). In a background job, rename,
+  hide and unhide are refused.
+- **`edit-session`** — in a background job, `session_edit` refuses everything but `fork`, and
+  `compact_sessions` is not offered.
+- **`frontend-web`** — a message appended to the open conversation appears in it without a reload.
+- **`frontend-telegram`** — a message appended to a chat's session is delivered to that chat, so a
+  follow-up asked there has it as context. `telegram_send` is documented as the low-level direct send it
+  is: it records nothing in any conversation.
+- **`frontend-telegram`** — a chat keeps one session id for good. Archiving its conversation used to make
+  the next message start a new session under a new id, stranding anything holding the old one (a
+  background job reporting to it appended into the archive, which the chat never shows); now the history
+  is moved to a new archived session, linked both ways as a split is, and the chat's session is emptied in
+  place, by the session's runner, after any turn holding it. A message appended to an archived chat session
+  reactivates it and stays in it, so the user's reply runs with it in context. A `pinned` chat session is no longer mistaken for an archived one. New
+  `telegram_session` finds a chat's session id by the name or @username of the person in it, without
+  moving its history. Machine-authored turn content (a
+  trigger's injected context, a followup's prompt) is no longer sent to the chat.
+- **`sessions`** — `session_action append` uses the turn's own appender when its runner supplies one, and
+  then never defaults to the turn's own (throwaway) session.
+- **`skills_compiler`** — a compile's demonstration runs on an ephemeral run instead of a scratch session in
+  the user's store, so it is no longer listed while it runs or left behind if the process dies mid-compile.
+  Two log lines report where it ran and confirm it never reached the persisted store. Cancelling a compile
+  now stops its demonstration, which carried on calling tools after the compile was abandoned.
+- **`storage-filesystem`** — two concurrent writers of one document no longer tear each other's write.
+  Every write used the same scratch name (`<file>.tmp`), so one writer renamed it away and the other's
+  rename failed `ENOENT` — then unlinked that name, which by then could be the winner's next scratch
+  file. Each write now names its own, and `set` takes the per-key lock `cas` already held. Two writers
+  are expected here: a settled parallel reply compare-and-swaps itself into a session while the running
+  turn commits its own whole-document write, and the compare is how the loser learns it lost — but the
+  file write tore before any compare could answer, so the placement reported a failure instead.
+- **`triggers`** — the classifier prompt is more selective. Every condition is judged on the basis it
+  declares — FORM (the shape of the message: a challenge, a doubt, a contradiction), SENTIMENT (the
+  feeling or illocution it carries) or CONTENT (a fact, a name, a number, a date, a stated phrase) — and
+  on that basis alone: a form condition is never satisfied merely because the message is on the right
+  topic, and a content condition's latitude stops at close paraphrase of what the condition actually
+  names. Where a condition spans two bases, every requirement it states still applies. The doctrine
+  `trigger_action` already states to whoever WRITES a condition — a rule is a condition on the form or
+  sentiment of a message, not its topic — was missing where the JUDGE needs it, which is what let a
+  condition naming a topic be satisfied by the topic's presence. The MATCH / DO-NOT-MATCH precedence
+  rules are gone: they were themselves a patch for the long exclusion lists the stored conditions used to
+  carry, and they were what let a specific MATCH clause overrule a general exclusion and fire on a turn
+  about the mechanism it was meant to ignore. The judge is also told explicitly that only the subject
+  message is judged (the paired one is context for relational conditions, never a subject itself), and
+  that a silent condition costs nothing while one firing wrongly is disruptive and expensive. The message
+  clip rose from 1500 to 4000 characters, the conditions are delimited rather than one per line, and the
+  `why` fragment from ~8 to ~15 words.
+- **`cognition`** — the `ask_inner_voice` back-off counts consults per TURN rather than consecutively,
+  and the cap is 2 rather than 3. "Consecutive" broke the count whenever another tool ran in the same
+  assistant message, so a critique batched with any verification call reset it to zero and the cap was
+  unreachable in practice. An agent that critiques AND acts in the same round is behaving well, and
+  batching must not buy it more consultations.
+
+## 0.4.17
+
+### API gaps filled
+
+- **`assembleMachine` / `preScanStorage`** — the boot graph as one core function: swap-members and their
+  boot defaults, guarded stores, the deferred `StorageBackend` swap, the mount table, `complete`, the
+  session runner and the core tools. Both apps now stand their machine up through it, passing only what
+  is platform-specific; an embedder can do the same instead of copying ~250 lines of an app's boot.
+
+### Bug fixes
+
+- **Shutdown** — `teardownPlugins` runs teardowns one at a time in reverse load order, each within the
+  10s budget `plugin unload` already applied. It promised reverse order and ran them all at once with no
+  limit, so a plugin could close a service a later-loaded one was still flushing through, and one
+  teardown that never settled held process exit open.
+- **Hooks** — a hook registered while its channel is running joins the next pass, not the one under way.
+  Registration sorted the array a run loop was iterating, so the new hook could run immediately, or the
+  registering hook could be moved back under the cursor and run again — a hook that registers on every
+  call never finished the pass.
+- **Service attribution** — a plugin is attributed a service key only once `register()` has succeeded,
+  and only once however often it registers it. A failed registration was still recorded, so unloading
+  the plugin reverted a service it never held — for a swap-member, someone else's.
+- **Plugin settings** — document versions are random, not `Date.now()`: two writes in one millisecond
+  minted the same version, letting a compare-and-swap accept a stale read.
+- **Notifications** — the warning for an unqualified notification `kind` is logged once per emitter and
+  kind, rather than on every publish.
+
+### Optional
+
+- **`bash` / `docker-bash`** — one process streamer, exported as `@matatbread/matbot-tool-bash/stream`,
+  which `docker-bash` now depends on. `docker-bash` gains what only the local tool had: a default
+  10-minute `timeout` (a hung command previously ran until the turn was aborted), completion that no
+  longer waits on an output pipe held open by a surviving process, and a description that states both
+  defaults. The `bash` contract is declared once, in that module.
+- **`docker-bash`** — a container removal that genuinely fails is reported rather than swallowed, and
+  `bash_config set` removes the old container before persisting, so a failure changes nothing instead of
+  leaving the old container running beside a new one.
+- **`docker-bash`** — `bash_config pull` streams through the shared streamer and is ended by the turn's
+  abort signal; it previously ran to completion however long the image took.
+- **`docker-bash`** — the container is created with `--init`. Its PID 1 was `sleep infinity`, which never
+  reaps, so every process a command left behind — killed on timeout or abort, or backgrounded — stayed as
+  a zombie until the container was removed. An existing container keeps the old PID 1 until it is
+  recreated (`bash_config restart`).
+- **`docker-bash`** — a command no longer outlives the matbot that started it. The exec's stdin is held as
+  a lease: nothing ever writes to it, so EOF means the host-side docker client is gone, and the wrapper
+  answers it by KILLing its own process group — the script and everything it spawned. Because the daemon
+  closes that stdin whenever the client dies, this covers the paths no cleanup code can reach (SIGKILL, a
+  crash, an OOM-kill) as well as the graceful ones; `--init` reaped the zombies a leak left behind, but
+  nothing killed a live orphan, and one was observed holding two cores for over four hours. The plugin
+  also implements `teardown()`, which releases every lease it holds — the one case the daemon cannot
+  signal, since a hot-unloaded plugin leaves matbot running. The lease replaces the pidfile the host used
+  to read: the kill now originates inside the container, which knows its own process group, so
+  `.data/.matbot-exec` and the read/remove race around it are gone. A script cannot use stdin, which is
+  not a new limit — nothing ever wrote to it, so such a script hung until the timeout and now gets EOF.
+- **CLI** — the package ships `remote-loader.js`. `ts-hooks.js` has imported it since 0.4.5 and `files`
+  never listed it, so every CLI published from 0.4.5 to 0.4.16 failed at boot when installed from npm,
+  with `ERR_MODULE_NOT_FOUND`. A test now boots the CLI as `npm pack` packs it.
+- **CLI** — module hooks run in-thread, through `module.registerHooks()`, instead of on a hooks thread
+  through `module.register()`: deprecated (DEP0205), and since Node 24.12 a round trip the main thread
+  waits on for every resolve and every load. `matbot --version` on Node 24.16 takes 283 ms rather than
+  387 on one CPU, 153 rather than 237 on four. Resolution is unchanged, and a `require()` passes the
+  hooks by, as it always did. A fetched plugin's imports are still fetched on demand, on a worker the
+  hook waits on, which starts only for a file not yet on disk.
+- **CLI** — fetching a plugin's imports over http is bounded: 30 s per request, headers and body
+  (`MATBOT_FETCH_TIMEOUT_MS`), and a fetch worker that never starts or never answers fails the import
+  rather than waiting on it. An origin that took the connection and never answered used to freeze the
+  whole process for good — the thread that asked runs nothing while it waits, not even a SIGINT handler.
+  The CLI now requires Node 24.12: before it, `register()`'s hooks left the main thread running during a
+  fetch, and the in-thread hooks do not.
+- **CLI** — the boot storage is the `FilesystemStorageBackend` whose layout the CLI already used, so
+  `services.StorageBackend` is present by default. `tool-store`'s namespace-collision check, which
+  enumerates it, previously found nothing on a default install.
+- **web bundle** — warns when a plugin's storage backend displaces the one opened at startup, as the CLI
+  already did.
+- **`frontend-telegram`** — interactive prompts. A turn's questions, including every permission gate,
+  are sent to the chat: choices as inline buttons (a `select`, a `confirm`, a text field's default),
+  free text as a reply. Only the sender whose message is being served can answer. `/cancel`, sending
+  another message instead of pressing a button, or 10 minutes without an answer each cancel the question
+  and abandon its turn — never answering with the default, which for a gate can mean "allow". A
+  `password` field is refused rather than asked, since the answer would stay in the chat history. The
+  frontend previously supplied no `PromptFn`, so every gate took its site's non-interactive answer.
+- **`tool-types`** — callers that meet while the index is building share one build. Each started its own
+  `ts.Program`, synchronously and one after another: three in one tick took twice as long as one, and a
+  build is about 2 s on one CPU. A tool registered during a build is no longer lost either: the build is
+  left stale for the next caller to redo, where it was marked current.
+- **`caching-tool-types`** (new) — `tool-types` with its build kept in plugin settings, loaded instead of
+  it. A process whose plugins, synthetic contracts, principal and scanned files are unchanged takes a
+  stored build (~45 ms) instead of making one (2–3 s), so the first tool call after a restart no longer
+  blocks. The stored build covers every scanned tool and is filtered to the live ones, so a tool added or
+  removed — the `mcp__*` tools arriving after boot — costs no rebuild; the last four builds are kept, one
+  per plugin set. A changed file is found by size and mtime, then content where only an mtime moved. The
+  settings medium holds executable validator source, so it must be trusted like plugin code.
+- **`tool-types`** — the build is also available as plain data (`buildToolTypesData`: validator source,
+  not compiled functions, the dts split per tool, and every file read), with `filterToolTypesData` to
+  narrow it to a live tool set; `ToolTypeIndexImpl` is exported, taking the function it fills a miss from.
+  `buildMatbotToolsDts` and the index's output are unchanged.
+- **`mcp-http`** — `mcp_action` advertises `type` (`"remote"`) in its schema. The contract it shares with
+  node `mcp` requires it on `add`, so with ts-validation rejecting, an `add` sent as the schema described
+  it — without `type` — was refused.
+- **`background`** — `every_action list` returns each schedule as stored: `intervalMs` (absent for a
+  one-shot) in place of the formatted `interval`, plus `prompt`, `createdAt`, `provider` and `principal`.
+  A caller reading `interval` must read `intervalMs` instead.
+- **`default-gate`** — exports `defaultGate`, the bundle a host passes to `assembleMachine`.
+- **`skills`, `triggers`, `background`, `cognition`, `function-tools`** — document versions are random,
+  not `Date.now()`, for the reason given under *Plugin settings*.
+
+## 0.4.16
+
+### Breaking changes
+
+- **`MatbotPluginSpec.storage` / `StoreFactory` are removed.** Write-only machinery superseded by
+  `storageBackend`: registrations were collision-checked, recorded and deleted on unload, but nothing ever
+  read them back, and no plugin declared one. Breaking only for a third-party plugin declaring `storage:`,
+  which could never have had an effect.
+
+### API gaps filled
+
+- **`scopeIterator` / `scopeIterable` (`plugin-api/host`, re-exported by core)** — the per-pull ambient-scope
+  wrap `runAs` already applied to a returned async iterator, named and shared. Both carriers need it, since
+  a generator's body does not begin until the first pull and the tool ABI returns exactly that shape; the
+  usage carrier had its own, less faithful copy. A plugin still gets the behaviour from `runAs` and needs
+  neither.
+- **`createMessage` moves to `plugin-api`** (core re-exports it, so every consumer imports it from where it
+  always did) — the hook registry builds marker messages in that package and had a copy because core is
+  downstream of it. Five hand-written copies of one literal were five places a message could acquire a
+  different shape.
+- **`rejectingPrompt` / `defaultingPrompt`** — the two non-interactive `PromptFn` stand-ins, named once
+  each rather than re-spelled at their call sites. The distinction is load-bearing for the permission gate:
+  `undefined` means no human is reachable, and a stand-in that answers with a field's default must never be
+  handed to `decide`.
+
+### Bug fixes
+
+- **`ToolProxy`** — `await tool.x(…)` resolves to `undefined` when a tool completes with no `result`
+  event, instead of throwing `Tool produced no result`. A tool whose work is a side effect yields nothing
+  by design (`function-tools` omits the event when a body returns nothing, and the triggers dispatcher
+  fires only on a yielded result), so the one calling surface meant to be silent was the one that failed.
+  That a body declaring a DATA result actually produces one is enforced where the types are, at definition
+  time: the snippet checker compiles it against its declared return type, and `strict` rejects one that can
+  fall through. `toolResult` itself still throws — it remains the low-level contract.
+- **Config** — a `#` inside a YAML value is no longer treated as a comment. The tokenizer ran `/#.*$/`
+  over every line, so `github:owner/repo#path:sub` silently lost its subdirectory and loaded the repo
+  root, and a quoted value lost everything from the `#` on, closing quote included. Now follows YAML's own
+  rule: outside quotes, at a line start or after whitespace.
+- **`runner`** — a provider that rejects with a non-`Error` no longer discards the turn. The failure
+  handler tested `'cause' in e`, which throws on a primitive, so the catch itself threw and left
+  `runSession` by the one path that does not commit — losing every completed round, which is precisely
+  what that branch exists to prevent.
+- **`followup` hooks** — `retractAndRerun: {}` retracts. Whether a retract had been requested was derived
+  from the payload size, so a hook asking to pop and re-run with nothing added got no pop, no redo and no
+  diagnostic.
+- **Session media** — the per-session media quota counts media only. It listed by `sessionId` alone, and
+  the MediaStore is routinely the host's own file area, so a `sessionId`-tagged workspace file or detached
+  job output was charged to the quota and could refuse an attachment on its behalf.
+- **Tool descriptions** — the `TypeScript result` block in a tool's wire contract is now a closed fence.
+  It was emitted without the newline between label and fence, so the type opened inline and the block
+  never closed — in the text every model reads for every tool, every turn.
+- **Plugin settings** — a settings write bounds its compare-and-swap retries (8, then it throws naming the
+  namespace) instead of `for(;;)`. A backend whose compare can never succeed spun hot with no error and no
+  exit.
+- **`plugin unload`** — the 10s teardown-timeout timer is cleared when the race settles. It was left
+  running after every successful unload, holding the event loop open for the remainder of its 10s.
+- **Tool execution** — a tool returning a class-based iterator keeps its own members, prototype and
+  `instanceof` under usage-site scoping. The runner wrapped each pull in an object literal that replaced
+  the iterator wholesale, which held only for as long as every tool is a plain async generator; it now
+  shares `runAs`'s Proxy (`scopeIterable`, above).
+- **`KnowledgeIndex`** — `search()` rejects with the signal's reason when called with an already-aborted
+  signal, as the persistent index already did when aborted mid-rerank. `LookupKnowledgeIndex` ignored the
+  signal and returned normally, so one interface had two abort behaviours (#75).
+
+### Optional
+
+- **`provenance`** — `determine_provenance` now states which results are not searchable yet: those from
+  tool calls issued in the same batch, and those made inside a `tool_function`, which never enter the
+  session at all. Both read as `vetoed` for a value just fetched, with previously nothing to say why.
+- **`tool-plugin`** — `provider update` naming a profile that does not exist yields an error rather than
+  a result whose prose says it failed.
+- **`frontend-web`** — `url_for_resource` describes what it actually returns: a URL path relative to this
+  server's origin, not an absolute shareable URL.
+- **`frontend-web`** — an answered choice prompt highlights the option actually picked, not the default;
+  a cancelled or elsewhere-answered one highlights none.
+- **`frontend-web`** — a copy button on every code block and message, and a resend (↻) on a user turn's
+  divider. The glyph is `::before` content so it never lands in the copied text, and a code block's button
+  is spliced into `md()`'s output so it survives a streaming re-render. Resend cuts the session at that
+  user turn and resubmits its human blocks — robo blocks are re-injected by the new turn, and file-refs
+  survive the cut and go back by reference.
+- **`workspace`** — `workspace_action list` accepts a `prefix` that is a complete file name and returns
+  that one file, instead of a silent empty list.
+- **`triggers`** — `trigger_action` reports `enabled` on every trigger it returns, resolved from the
+  stored document (absent ⇒ enabled), rather than omitting it when it was never explicitly written.
+- **`cognition`** — `remember_fact` no longer records a third party's facts as the user's (#74). The
+  extractor was told to normalise every fact to "the user", and saw one message with no context, so a
+  pasted document about someone else became the user's email, marks and award date, and merged into the
+  user's profile at strong confidence. The extractor is now told who wrote the message and sees up to 3
+  preceding messages to identify subjects. It attributes a fact to the user only when the user states it
+  about themselves, names any other subject, and drops a fact whose subject it cannot identify rather
+  than defaulting to the user. Facts captured before this fix are unchanged.
+- **`skills`** — skills are re-indexed when the `KnowledgeIndex` is swapped, or reverts to the host default
+  on unload (#75). The host can drain only an index exposing `entries()`, which `persist-ki-bge` does not,
+  so unloading it left search empty until the next restart. `persist-ki-bge` `search()` also checks the
+  signal before reading the whole store.
+
+## 0.4.15
+
+### API gaps filled
+
+- **`FunctionRunner`** — an optional `MatbotServices` member: a host-supplied compiler for model-authored
+  code whose *synchronous* execution is bounded, since a loop that never awaits otherwise freezes every
+  session sharing the event loop. Only stretches between awaits are bounded, so slow tool calls are
+  unaffected. Absent ⇒ unbounded, as before (and as the browser must be). A run stopped at the limit
+  rejects with `code: FUNCTION_TIMEOUT`.
+
+### Bug fixes
+
+- **`invokeTool`** refuses to start a tool once `opts.signal` has aborted, so a composed body looping over
+  `await tool.x()` stops calling tools when its turn is cancelled rather than leaving each callee to decide.
+
+### Optional
+
+- **`function-tools`** — lambdas, defined functions and packages compile through `services.FunctionRunner`
+  when present; a package export is now called inside that bounded run. `runFunction` stops waiting when
+  its call is aborted and reports it cancelled. A run stopped at the limit is logged, naming the tool
+  (`tool_function lambda` for a lambda), session, call and the definition's first line.
+- **`cli`** — registers a `node:vm` `FunctionRunner`: a `tool_function` doing more than 10s of synchronous
+  work before its first await is stopped with an error naming the likely runaway loop, instead of freezing
+  the daemon. The limit is `function_timeout_ms` in `matbot.yaml`; `0` registers no runner at all (bodies
+  run unbounded, as before), for testing, and warns at boot. A loop after an await is not covered: the
+  design that covers it aborts the process when async hooks are enabled (nodejs/node#38503).
+- **`function-tools`** — `tool_function { action: 'package', name, definition }` defines a **package**: one
+  TypeScript module whose `export`ed functions become tools named `<package>__<function>`, and whose other
+  declarations (helpers, types, constants) are private and never registered — so an internal helper no
+  longer has to be a tool competing for the presented window. `__` rather than `.`, which Anthropic and
+  OpenAI reject in a tool name; the name the model sees is the one code calls as
+  `tool.<package>__<function>(…)`. Exports take one object parameter; the module is type-checked as a
+  whole and defined, replaced and removed as a group, failing the whole definition on any name clash. A
+  package is **stateless** and not a substitute for a plugin: its top level is evaluated afresh per tool
+  call and may hold only `function`/`async function` (exported or not), `const`, `interface` and `type`
+  — a `let`/`var`, `class`, `enum`, `declare`, `import`, bare statement or top-level `await` is refused,
+  pointing the author at a plugin for anything that must persist. `list` gains `packages`; `check` and `remove` take
+  `package`. (#63)
+- **`frontend-web`** — contributes system context describing the relative `POST /tools/<name>` and
+  `POST /stream/tools/<name>` entry points, so a model writing a live dashboard or similar script knows
+  it can call registered tools over HTTP. Only once the server is listening. (#72)
+- **`tool-types` / `json-validation`** — a call carrying a key the tool does not declare is now diagnosed
+  as that key rather than as whatever else is missing. `background({ action: 'cancel', id })` (the
+  `every_action` call shape sent to the wrong tool) used to report `.prompt: required property missing`;
+  the typed validator now reports `.action`/`.id: unexpected property` on a union with no discriminant,
+  and the schema validator names undeclared keys first when it is refusing a call anyway (it still never
+  refuses one for an undeclared key alone, the schema admitting them).
+- **`cli`** — the boot banner's "version skew" warning compared version NUMBERS, so it fired on every
+  release that bumped the CLI without core (packages are versioned independently) while missing two
+  copies carrying the same version. It now compares the resolved package directories of core and
+  plugin-api, as reached from the CLI and each of its dependencies, and names the duplicate copies.
+- **`ts-validation`** (0.4.13) — the published package now declares `@matatbread/matbot-core` as a peer
+  dependency, which it imports a type from. The fix landed in 0.4.12's source after 0.4.12 was published,
+  so npm never had it. (#71)
+
+## 0.4.14
+
+### Breaking changes
+
+- **`default_settings.__matbot_core__.overwriteToolsOnCollision` is gone**, in both forms (a stored
+  answer and a configured floor), and is **not migrated**
+  ([#62](https://github.com/MatAtBread/matbot/issues/62)). The tool-collision decision is now a
+  *permission gate*, and standing answers belong to the policy that asks. Re-author it as
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'tools.overwrite': [bash, plugin]      # or: true
+  ```
+
+  The standing answer is re-offered the first time that collision comes round again, so restoring it
+  is one click — an adopt-once path would have been migration machinery, and a reserved namespace kept
+  alive, to save a single keystroke. An install still carrying the old key is warned at boot, naming
+  where it went. (The `string[]` form added earlier in this cycle moved with it, unchanged.)
+
+- **`ToolTypeIndex.check` returns a `ToolCheckReport`, not `string[]`.** It returned formatted
+  multi-line blocks with the overflow summary appended as a further ELEMENT, so `diagnostics.length`
+  counted prose as a finding and any per-code breakdown taken by iterating the array was unreliable
+  wherever an overflow had occurred. The report states `total` separately from the capped
+  `diagnostics`, and puts the cap in `omitted: { count, byLabel }` where it is data. Each finding
+  carries its own `rendered` block, so a consumer displays that and counts, groups or routes on the
+  fields — rather than regexing `line \d+ TS\d+` back out of prose, which is what the flattened form
+  made every consumer do. The typed record existed upstream all along and was discarded at render
+  time.
+
+  The report also carries a required `checked: boolean`, which qualifies `ok`: an index that cannot
+  type-check (the browser, which has no TypeScript program) reports `ok: true, checked: false` — nothing
+  was examined, rather than nothing was wrong. Required rather than optional for the reason stated
+  elsewhere in this path: a checker that reports success while checking nothing is indistinguishable from
+  one that works, and `function-tools` was recording such a definition as verified.
+
+- **`ToolContext.gate` is required, and `PluginSettings.entries()` with it.** Both are additive for
+  *callers* and breaking for anyone who **implements** those shapes: code that hand-builds a
+  `ToolContext` (an embedder standing up its own tool-invocation door, a test fixture) or its own
+  `PluginSettings` facade no longer compiles. `bindGate(machine.PermissionGate, toolName, ask)` supplies
+  the first in one line — the same helper the runner, `invokeTool` and frontend-web use — and there is
+  no way to make a gate optional without making "this tool cannot ask permission" a silent state.
+
+### API gaps filled
+
+- **`PermissionGate`: a privileged operation declares, a replaceable policy decides.** A call site
+  that needs acceptance — installing a plugin, adding a provider profile, connecting an MCP server,
+  overwriting a tool another plugin owns — calls `ctx.gate({ gate, subject, label, fallback })`, and
+  the installation's registered `PermissionGate` decides how that acceptance is obtained. It used to
+  do both jobs itself, which is why an alternative installation could only *defeat* a policy, never
+  supply one: core held a settings key, a memo, a per-tool allowlist and two "always" options, and
+  `confirmAction` was implemented three times over.
+
+  `decide(req, ask)` receives the prompt channel in scope for that call, and **`ask === undefined` is
+  "no human is reachable"** — which is when the request's own `fallback` applies, reproducing each
+  site's non-interactive behaviour exactly. `gate` is a suffix the host qualifies with the tool's
+  *registered* name, so one answer covers both runtimes' implementations of a tool and no plugin can
+  address a gate it does not own. A swap-member, not an optional service: the host boots a default and
+  `unregister` reverts to it, so unloading a policy means "back to asking". 20 call sites, 13 gate ids.
+
+  What it buys is that a privileged operation is **decided somewhere replaceable**, and by default that
+  means a human is asked. It is not out of the model's reach: the default policy stores its answers in
+  `.data/settings/`, which any shell tool can write, and a standing answer is a decision rather than a
+  channel — so it applies at doors with no human behind them (`POST /tools/:name`, `invokeTool`, a
+  trigger). A deployment that needs a real boundary ships a gate with its rules compiled in.
+
+- **`ToolContext.gate`, `PermissionRequest` / `PermissionGate`, `bindGate`, and the host default
+  `askPermissionGate`** (`plugin-api/host`, re-exported by core).
+
+- **`PluginSettings.entries()`** — a plugin can enumerate its own settings. The facade was
+  `get`/`set`/`delete`, so a plugin holding per-key state had to keep an index key beside the data: an
+  index that cannot see a key the *installation* configured (in force, and therefore part of the
+  answer), that drifts if the write and the index-write are interrupted — state in force but invisible
+  to the plugin's own listing — and that records what was *ever* written rather than what is set.
+  `entries()` returns everything in force as one map, layered exactly as `get` is (stored key wins,
+  else the configured default), and costs exactly one `get`, because a settings namespace **is** one
+  document. That is also why there is no `keys()`: it plus N × `get` would be N+1 reads of the document
+  this returns in one.
+
+- **A `select` option can carry a value distinct from its label.** `FormField.options` takes
+  `string | { value, label }`; a bare string still means "the value is the label". Frontends render
+  `optionLabel(o)` and answer with `optionValue(o)`, and `default` names a value — so a caller that
+  branches on the answer compares a token rather than rendered, rewordable, localisable prose.
+
+- **`ToolCheckReport` / `ToolCheckDiagnostic`, `renderToolCheck` and `renderToolCheckOmitted`.** The
+  report shape above, plus the one renderer that turns it into the text a model repairs from (and the
+  overflow summary alone, for a consumer laying the findings out itself). The renderer is in `plugin-api`
+  because two packages render one report — the node checker that produces it, and any consumer
+  putting it in front of whoever wrote the code — and the overflow line is precisely the part worth
+  having in one place.
+
+- **`core` re-exports `CONFIRM_YES` / `CONFIRM_NO`.** It already re-exports every other cross-boundary
+  runtime value so an app needs no direct `plugin-api` dependency; these were missed, and an app
+  implementing a `PromptFn` is exactly who needs them — the tokens a `type: 'confirm'` prompt resolves
+  to, which a consumer must branch on rather than on the rendered (and potentially localised) label.
+
+### Bug fixes
+
+- **A one-off *Allow* no longer records a standing answer.** The permission gate matched its four
+  options by prefix, and *Allow* shares its first letter with *Always allow …* — so answering Allow
+  once wrote an allow-list entry nobody gave, and every later privileged act on that subject proceeded
+  silently. Options now carry values and the answer is matched against those; an answer matching no
+  option is a refusal, since permission is what has to be given.
+
+- **A tool collision resolved with nobody to ask says so again.** The pre-gate code warned when it
+  overwrote non-interactively; routing the decision through a gate dropped the line, leaving the one
+  decision here that proceeds with no human and no record. Core logs it at the call site (it knows
+  whether a prompt existed; the policy's answer is its own business).
+
+- **The telegram frontend supplies no `PromptFn` rather than a stub that answers with each field's
+  default.** The stub was a worse lie than the absence: to a tool it resolved silently — the model
+  proceeding as if answered while the chat saw no question — and to a permission gate it looked like a
+  reachable human, since "no PromptFn at all" is the one signal for *nobody is here*. Outcomes are
+  unchanged (the runner's own stand-in still answers a tool's `prompt` with the default); what changes
+  is that a privileged operation now gets the call site's stated non-interactive answer.
+
+- **A plugin's `services.PermissionGate` is the live policy, not a copy taken when it loaded.** The
+  per-plugin machine is built with `{ ...services }`, which evaluates the host's getters once — fine
+  for the swap-members that hand back capture-safe proxies, and not fine for the one that deliberately
+  does not. A plugin therefore consulted whatever policy was active when *it* loaded: one registered
+  afterwards was never reached through that machine (frontend-web's `POST /tools/:name` route reads
+  exactly this way), and unloading one left the copy on the gone impl rather than reverting to the boot
+  default. The scoped block re-declares it as a getter, as it already did for `Notifier`.
+
+- **`gate_action clear` no longer reports a configured default as cleared.** `delete` reverts to what
+  the installation configured, so for a gate answered only in `default_settings:` it changes nothing —
+  and naming it under `cleared` was a success report for a no-op. The outcome is read back and the
+  answers compared: what changed is reported as forgotten, and what is still in force is named
+  separately as coming from config.
+
+- **A policy that displaces another can delegate to it.** `PermissionGate` was a capture-safe
+  `forwardingProxy` like the other swap-members, so the documented composition — capture
+  `services.PermissionGate`, register your own, defer to what you displaced — captured a reference that
+  resolved to *whatever is current*, i.e. the capturing gate: it called itself until the stack
+  overflowed. The hosts expose the member as a getter instead, so a read yields the concrete impl;
+  every consumer already resolves it per call. (`ToolCallValidator`, which composes the same way, was
+  never proxied, which is why that idiom worked.)
+
+- **Two "Always allow" answers at once no longer drop one.** Appending a subject is a read-modify-write
+  and `PluginSettings` has no CAS on a value, so both reads saw the same list and the second write won.
+  The policy serialises its writes and re-reads inside the queue.
+
+- **The CLI's abort-time form path resolves select answers.** It passed a synthesised label + hint
+  string to `prompt()`, which took the free-text branch, so a form's select answer came back as
+  whatever was typed rather than as the option it named.
+
+### Optional
+
+- **`@matatbread/matbot-default-gate`** (new) — the default permission policy: ask, offer standing
+  answers (*Always allow "<subject>"* / *Always allow every `<gate>`*), honour what was remembered.
+  A library each host *seeds*, in the `tool-plugin` mould — not a configured plugin, because a minimal
+  install's first act is a gated one, so neither the policy nor the means to inspect it may depend on a
+  `plugins:` line. Carries the built-in `gate_action` tool (`get` reports what is in **effect**;
+  `clear` forgets an answer, reverting to whatever the installation configured — and, via
+  `PluginSettings.entries()`, lists the answers an installation *shipped* beside those someone gave at
+  a prompt). There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names the specific act. `get`
+  reports **answers, not a vocabulary** — a gate nobody has answered is absent from the listing rather
+  than described as "will ask", because an absent key says only that nobody answered; what happens then
+  is the call site's `fallback` and whatever policy is registered. Gate ids are open, so a built-in list
+  would be stale as soon as a plugin contributed one.
+
+- **`tool-plugin`, `mcp`, `mcp-http`, `browser`** — their 19 `confirmAction` calls became `ctx.gate`,
+  and the three copies of `confirmAction` are gone. **A different implementation, the same
+  functionality**: each site still asks a human when there is one and still declines when there is not
+  (every gate but `tools.overwrite` declares `fallback: false`, which is what the `CONFIRM_NO` default
+  already resolved to). What changes is *who* answers — the installation's policy rather than a helper
+  hardcoded per plugin — and that an install can now decide for itself. `mcp_action add` is the case to
+  know about, since it is also newly gated in this release: a caller with no prompt channel
+  (`invokeTool`, a trigger, a compiled skill, `POST /tools/:name`) gets `Cancelled.` rather than a
+  connection. To let those through, name the gate in the policy's settings rather than editing a plugin:
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-default-gate':
+      'mcp_action.add': true          # or a list of server names
+  ```
+
+  The id is qualified by the **tool** name (`mcp_action`), so one key covers both the node `mcp` plugin
+  and cross-runtime `mcp-http`, which register the same tool. Every other gate takes the same treatment.
+
+#### docker-bash
+
+- **The default image is `node:24-bookworm`** instead of `ubuntu:24.04`, so Node 24 and npm are
+  preinstalled; still Debian, so `apt` and existing scripts are unaffected. An existing `matbot-bash`
+  container keeps the image it was created from.
+- **`bash_config { action: 'pull' }`** fetches the configured image, streaming its progress, and
+  recreates the container from it — unconditionally, since an up-to-date image says nothing about which
+  image the existing container was built from. It is how an existing install adopts the new default.
+
+#### triggers
+
+- **A trigger with no `params` calls its tool with `{}`**, not `undefined`. Every such trigger — the
+  seeded `remember_fact` one among them — was rejected by the tool-call validator each time it fired.
+- **`trigger_action` checks `params` against the tool's declared input** on `add`, `update`, `move`
+  and `copy`, using the registered `ToolCallValidator`, and refuses a trigger that could never run. A
+  tool that is not loaded is still accepted (fails soft, as before).
+- **A fired trigger whose call is rejected is reported to the model on the next turn**, naming the
+  trigger and the rejection, so it can be repaired with `trigger_action update`. Previously the only
+  trace was an LLM-invisible marker and a server-log warning.
+
+#### tool-plugin, mcp, mcp-http
+
+- **Every privileged confirmation is a structured `confirm` field, and connecting an MCP server asks.**
+  `mcp_action add` was ungated in both plugins — only `remove` asked, which is backwards: connecting
+  registers a remote party's tools for the rest of the session, and the local (stdio) variant spawns a
+  child process on the host. Both now confirm, and the local prompt names the command line. The eight
+  remaining free-text `[y/N]` prompts (five in `provider`, three across `mcp`/`mcp-http`) are now
+  `confirm` fields compared against the canonical tokens, instead of a regex over a rendered label —
+  so rich frontends draw real buttons, while the CLI still renders `[yes/NO]` and prefix-matches `y`.
+  Every non-interactive caller keeps declining, the `CONFIRM_NO` default being what they already
+  resolved to. `confirmAction` goes from three copies to one per dependency edge: shared within
+  `tool-plugin`, and exported from `mcp-http` for the node `mcp` plugin that already hard-depends on it.
+
+- **`plugin` / `matbot install`: an npm install into a pnpm workspace root now succeeds.** Both shelled
+  out to `pnpm add <pkg>` in the directory holding `matbot.yaml`; at a workspace root pnpm refuses
+  outright (`ERR_PNPM_ADDING_TO_ROOT`, on the assumption that a member package was meant) and the
+  install failed naming a `-w` flag the user had no way to pass. A member package was never meant — the
+  project directory is the project — so the root is stated explicitly when a `pnpm-workspace.yaml` is
+  present. Other package managers are unaffected.
+
+#### tool-store
+
+- **A store's `shape` is read as TypeScript, not matched against an end-anchored pattern.** The shape is
+  model-authored source, and comments are the normal thing to find in it. A comment *inside* the
+  declaration survived into the `toolContract`, which is emitted as one line — so `// the note body`
+  commented out every arm after it and the tool's whole contract became unparseable (a stated refusal).
+  A comment or blank line *after* the declaration missed the `}\s*$` anchor entirely and the document
+  type degraded to `Record<string, unknown>`, silently. Comments are now stripped (string literals
+  intact) and the body is brace-matched, so `extends`, a union alias, a trailing note and a `//` inside
+  a string literal type all read correctly; an unparseable shape still degrades to the permissive type.
+  The shape's NAME is read by the same path — its old regex (`type\s*=\s+(\w+)`) never matched a type
+  alias at all, so an aliased shape was described as `Store<Record<string, unknown>>` in prose.
+  Three further silent-emit paths are closed: an UNTERMINATED quote (an apostrophe in prose — `Note's
+  fields:`) no longer makes the rest of the shape inert, which had re-opened the very comment leak above;
+  `extends Base<{ … }>` no longer hands back the base's type ARGUMENT as the document body (the brace is
+  now found by scanning at angle-depth 0, not by a `[^{]+` pattern that stops inside the heritage clause);
+  and `=>` in a function type no longer counts as a closing angle bracket, which had truncated an alias
+  mid-member and emitted it unbalanced. Each produced a wrong document type and reported no fault.
+- **A shape must be ONE declaration with nothing after it, and says so when it isn't.** Both halves were
+  silently violable and each emitted a confident wrong contract: a second declaration was ignored with the
+  FIRST winning (`type Id = string; type Note = { id: Id }` emitted `string` — the helper type as the
+  document), and an unterminated alias read to end-of-input, so trailing prose became part of the type
+  (`{ text: string } Stored per user.`) — accepted at create, unparseable by the time anything downstream
+  read it. The alias's end is now found by scanning the type expression (units joined by `|`/`&`, with
+  `<…>`/`[…]` suffixes) rather than by reading to the next `;` or the end.
+- **An `id` inside `data` must agree with the key, on `set` and `cas`.** The key is the top-level `id`
+  (minted when absent) and is written into the body, so the two can never disagree in storage — which is
+  why a disagreement in the CALL is refused rather than resolved: discarding `data.id` writes the edit to
+  a document the caller did not name, and honouring it writes to one they did not name either. Both were
+  reachable from the natural round-trip, since `{ ...doc }` carries the id it was read with, and one of
+  them was previously silent. The error names the two repairs — pass the id as the key, or blank it in
+  `data` — and an absent or `undefined` `data.id` states no opinion, which makes
+  `{ ...doc, id: undefined }` the way to say "copy this".
+- **A store tool declares one contract arm per action, so a call narrows its result.** It emitted one
+  arm carrying two unions, which `ToolProxy` turns into a single call signature with nothing to
+  overload: the declared result was the union across all five actions, and no action's own fields were
+  reachable without a guard. Since a cast is barred by the check gate, a caller could not write correct
+  code against a store tool at all — the workaround was to flatten the document shape into one record
+  with every field optional, losing the modelling the contract exists to carry. Compile-time only; the
+  runtime validator discriminated on `action` either way.
+- **`set` accepts and ignores `id`/`version`.** `get` handed back a document carrying `version` and
+  sending it straight to `set` was rejected as an unexpected property, so every update had to be
+  rebuilt field by field — and `set` replaces, so whatever the rebuild forgot was silently deleted. The
+  document type is now emitted twice: present on results, optional on `data`. `set` also honours an `id`
+  carried INSIDE `data`, which is what the round-trip idiom produces: minting a fresh one when the
+  top-level `id` was omitted turned "replace this document" into "create a second copy under a new id",
+  silently, leaving the original behind. `cas` needs no equivalent — it errors when `id` is absent rather
+  than inventing one.
+- **`set` is described as create-or-replace, not "upsert".** The executor never read the existing
+  document, so a partial `set` deleted every field it omitted. Merging stays out of the store —
+  JS merge semantics are underdetermined, so it is a policy of the consumer — and the description names
+  the read-modify-write instead.
+- **A shape that yields no document type is refused at create/expose, rather than degrading silently.**
+  It fell back to `Record<string, unknown>`: a document of anything, which validates anything, so the
+  store appeared to work and checked nothing. Four faults are named separately — no declaration, an
+  unmatched `{`, an alias with nothing after `=`, and an empty body (`interface X extends Y {}` matches
+  but only the braces are inlined, so the base's members are lost). An already-persisted def warns
+  instead, so an existing store never loses its tool at boot.
+- **A store may hold several kinds of document.** Write the shape as a discriminated union and each kind
+  keeps its own fields: a read narrows on the discriminant, and a write mixing one arm with another's
+  fields is rejected against the arm the caller meant. This follows from the per-action arms above — the
+  document type is parenthesised before the intersection, so the union survives into the contract and the
+  validator's discriminant dispatch reaches it. Previously the only workable modelling was one flat record
+  with every field optional. Now stated in `store_action`'s description, which said nothing about it.
+
+#### tool-types
+
+- **A cast-gate finding is labelled `CAST-GATE` wherever it is rendered.** The detail renderer honoured
+  the synthetic flag and the overflow summary did not, so one rule had two names decided only by
+  position in the list — and the second, `TS90003`, is not a tsc error code at all, so a reader who
+  looked it up concluded the compiler had no such code. The "likely cascading" advice is now dropped
+  when every hidden finding is structural: a cast-gate rule fires at one site and cascades from
+  nothing.
+- **The `plugins/` scan skips dot-directories, rather than naming `compiled-plugins`.** That was a
+  second spelling of a constant `skills_compiler` owns — now relocatable per installation, so
+  unknowable here — and unreachable besides, the walk rooting at `plugins/` while the build dir is its
+  sibling. The rule it was actually for survives: a build dir sited *inside* the scanned source root
+  would re-root the prior version's `ToolContracts` arm, which `skills_compiler` filters out of its
+  `pluginUrls` for exactly that reason. A compiled plugin's own contract is unaffected either way — it
+  reaches the dts by `resolvedUrl`, which the glob only ever supplemented.
+
+#### function-tools
+
+- **`check` reports `checked` alongside `ok`, on the result as well as on each row.** Where no
+  type-checker can run, every row comes back clean, and a bare `ok: true` reported success for work
+  nothing did.
+- **A function defined without a type-check is marked `definedUnchecked`** in `list` and on each
+  `check` row. `define` said "(type-check skipped)" once, in the moment, and nothing afterwards knew —
+  so a `noTypeCheck` definition was indistinguishable from one that passed, and the errors it hid
+  surfaced much later as failures that had been latent all along. Both bypass routes set it, the
+  explicit flag and the implicit "no checker available here". It records the provenance of the
+  definition, so a later passing `check` deliberately does not clear it.
+
+#### skills_compiler
+
+- **The compiled-plugin build root is `.compiled-plugins/`, renamed from `compiled-plugins/`, and is
+  **not migrated**.** Every other matbot-written, gitignored root beside `matbot.yaml` is dot-prefixed
+  (`.data/`, `.plugins/`, `.env`); this one was the outlier. An install with compiled plugins renames
+  the directory and the matching `./compiled-plugins/<tool>` entries in its config together, or pins
+  the old name through the setting below — a stale entry fails to load, naming itself, at boot.
+
+  It stays out of `.data/` for a second reason now recorded beside the durability one (a compiled
+  plugin has no upstream, so a cache clear would lose it): `docker-bash` mounts the project root
+  read-only and then `.data` read-write over it, so a build dir under there would be writable by the
+  model from inside the container — and a loaded plugin is full Node capability with no sandbox, which
+  is the thing `plugin.add`'s gate exists to decide.
+
+- **An installation can site that directory**, via `compiledPluginsDir` in the plugin's own settings
+  namespace — for a deployment running matbot per user (separate pods, a read-only project root, a
+  per-user volume):
+
+  ```yaml
+  default_settings:
+    '@matatbread/matbot-tool-skill-compiler':
+      compiledPluginsDir: .compiled-plugins
+  ```
+
+  There is deliberately no action to change it at runtime, and the reason is the migration hazard
+  above: `plugin add` records `./<dir>/<tool>` in the config — or in whatever has taken over
+  `plugins:` — so every already-compiled tool's entry is spelled with the name, and a change orphans
+  all of them at once. An installation answering the question at boot is a different act from a
+  running machine moving the goalposts. A configured value is normalised to the spelling `plugin add`
+  will record (leading `./` and trailing `/` stripped), because that specifier is compared against
+  `plugin list`'s `configured` entries to decide add-vs-reload, and two spellings of one directory
+  miss each other as strings.
+
+## 0.4.13
+
+### API gaps filled
+
+- **`ProviderPatch`, and one patch policy for every host that applies one.** `provider update`'s input
+  shape lives on `plugin-api`'s shared `ProviderToolContract` (so the node and browser tools cannot
+  drift), and its *semantics* live in `applyProviderPatch` beside `applyCreateSecret`, for the same
+  reason: three hosts now apply a patch — the node tool against matbot.yaml, the browser bootstrap
+  against localStorage, the Drive backend against its manifest — and what a patch **means** must not be
+  one of the things they differ on. `null` clears a field, absent leaves it alone. `patchedFields`
+  reports what a patch actually names. Both re-exported by core, so an app needs no direct plugin-api
+  dependency.
+
+### Bug fixes
+
+- **A local plugin's host singleton is linked even when it has nothing to install.** The link loop sat
+  behind an early return that skipped the whole of `applyProvision` when there were no registry
+  dependencies to `npm ci` — so the simplest plugin there is, one whose only dependency is the
+  `@matatbread/matbot-plugin-api` peer, got no `node_modules` and no link, and resolved the singleton by
+  whatever happened to sit above it on disk. Whether an unrelated third-party dependency is present
+  cannot be what decides if the host's copy is reachable. Every plugin in this repo has dependencies,
+  which is why nothing caught it.
+
+  Two things behind it are fixed with it. The target came from `hostPackageDirFrom(name, pluginDir)`,
+  which resolves from the plugin's own directory first and so answers "what would a plugin here get" —
+  an author's `devDependencies` copy, if one is installed — rather than "what does the host have"; it now
+  asks `hostOwnPackageDir`. And a path that already exists is no longer taken as good enough: what
+  matters is that it leads to the host's copy, so a second physical copy of a singleton is replaced. That
+  is what `npm ci` already does on the path where it runs (it deletes `node_modules` first), so the two
+  paths now agree instead of differing on whether a dependency happened to be declared.
+
+- **A rethrown plugin-load failure keeps its identity.** `loadPlugins` with `onLoadError: 'throw'` built a
+  bare `new Error(message)`, so everything but the text was lost — including the `ERR_MODULE_NOT_FOUND`
+  code that `plugin add` reads to name a missing dependency and offer to install it. That branch was
+  therefore dead for every http plugin, and dead *silently*: the fallback still printed the underlying
+  message, so the output looked like a considered answer rather than a missed one. The wrapper now carries
+  the original as `cause` and copies its `code`, and the reader walks the cause chain rather than trusting
+  one layer to remember.
+
+- **Removing a provider profile no longer swallows the section after it.** The block remover matched
+  every following line that did not begin `  <non-space>` — which a *top-level* key does not. Deleting
+  the last profile in `providers:` therefore also deleted the header of whatever came next and left that
+  section's children indented under `providers:`, so `default_settings:` ceased to exist and a settings
+  namespace became a provider profile. The file still parsed, so nothing said a word. Indentation is
+  what delimits the block, so that is what it now reads.
+
+- **`plugin add` over http now offers to install the dependencies it cannot bring.** A source-fetch
+  copies one package's own files, not a dependency graph, so a plugin with registry dependencies fetched
+  from a URL failed to activate on its first unresolved import. It now resolves what the plugin declares,
+  asks once with the full transitive list, installs, and retries activation in process. Declining leaves
+  the previous advice unchanged. The approval is the same out-of-band human confirm as the install
+  itself, so a fetched plugin cannot install anything by asserting it needs it.
+
+  They install into the plugin's **own cache root** under `.plugins/`, which is the same `planProvision`/
+  `applyProvision` path a local plugin takes. Not the user's project: `pnpm add` refuses outright at a
+  workspace root (`ERR_PNPM_ADDING_TO_ROOT`), and where it succeeds it writes a fetched plugin's
+  dependencies into a tracked manifest and lockfile that have nothing to do with them. Not the
+  `.plugins/node_modules` link farm either, where an install would prune the host singletons and plugin
+  self-links as extraneous. The cache root sits earlier in the resolution walk-up than the farm, so what
+  lands there is reachable from that plugin and invisible to everything else — which also means each
+  plugin's dependencies are removed with it, and `rm -rf .plugins/` clears the lot without touching
+  matbot's own `node_modules`.
+
+- **`plugin add` states the missing package again, instead of the raw resolver error.** The tailored
+  remedy ("it depends on X, which a raw github/URL fetch does not bring in… do not retry name
+  variations") was matched off Node's `Cannot find package 'x'`, but a bare import from inside
+  `.plugins/` never reaches Node's error: ts-hooks retries it against the host's graph and throws its
+  own `Cannot resolve "x"` carrying the same code. So the branch was unreachable for the http route it
+  was written for, and the generic "activation failed: <error>" fell out instead. Both wordings are read
+  now, pinned by a test against the error a real unresolved import throws.
+
+- **`provider` tool: an `update` action** (node, browser, and the Drive-backed provider admin). Changes
+  `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile — `null` to clear one — where
+  previously the only route was `remove` + `add`. That route could not work for the case that prompted
+  this: `provider list` reports `hasCredentials`, never the `${NAME}` reference, so an LLM re-adding a
+  profile had nothing to write back and had to re-prompt for a key that had never been lost. A model
+  rename (DeepSeek's) is now one call, and the credential is the one field `update` will not touch.
+
+  Two things it deliberately cannot change. **Credentials** — that is `plugin store-key`, which writes
+  the new value to the vault under the name the profile already references, so nothing about the profile
+  changes to rotate a key; folding it into `update` would have meant guessing between rewriting a
+  reference and replacing a literal. And **`module`** — changing the adapter re-opens every resolution
+  question `add` answers, so that stays `remove` + `add`.
+
+  `parameters` is replaced wholesale rather than merged per key: the values are forwarded to the
+  endpoint unmodified and so have no shape to merge against, and `list` reports them in full, which is
+  what makes read-modify-write something a caller can carry out. The profile's yaml block is
+  regenerated, so comments inside that one block are lost — stated in the confirmation prompt before it
+  happens. A profile contributed at runtime rather than by matbot.yaml is reported rather than appended.
+
+## 0.4.12
+
+**Tool inputs are typechecked, whoever the caller is.** A tool declares its call contract as a
+`ToolContract` arm — a real TypeScript type — and until now nothing enforced it: the model's arguments
+were checked against `inputSchema`, a lossy *projection* of that type, and only on the model's path.
+0.4.12 makes the type itself the thing enforced, at the one seam every caller passes through.
+
+### Breaking changes
+
+- **Validation moved off the `toolcall` hook and onto the executor, so it covers every door.** The hook
+  channel is unchanged and still supported — `toolcall` remains the place to *reject* a call, and
+  triggers still use it — but it is a **runner** channel, so a validator installed there guarded the
+  model's path while `POST /tools/:name` and `invokeTool` called `tool.executor.execute` directly and
+  fired no hooks at all. Core now consults an optional **`ToolCallValidator`** service (`MatbotServices`,
+  declared by core because core is what reads it) at the executor, wrapped once per tool at
+  registration. One check instead of one per door, and nothing to drift.
+
+  Core's own contract is therefore additive: with no validator registered nothing changes, since core
+  mandates no validation and only honours one that is registered. What breaks is the **behaviour of an
+  install that loads a validator plugin**, in two deliberate ways:
+
+  - **An unknown property is rejected**, as TypeScript rejects one on a fresh object literal, which is
+    exactly what a model-authored params object is. Accepting it silently is the commonest tool-call
+    hallucination made invisible: `sessionId` mis-sent as `session_id` was dropped, and the tool then
+    ran believing no session was given rather than reporting a typo. Callers that got away with a loose
+    payload now fail; `enforce: 'warn'` logs one release of "Would reject" to find them first.
+  - **Internal calls are validated too.** A statically-typed call site should already be sound, so this
+    is partly waste — but `invokeTool` with a dynamic name, a trigger's `invoke.params` (typed
+    `object`) and a compiled skill's payload are all internal callers no compiler has checked.
+
+  A rejected call yields an `error` event carrying the offending field paths and `TOOL_INPUT_INVALID`
+  (422 — the body parsed, its *shape* is wrong; and a process exit code cannot exceed 255, so it can
+  never be mistaken for one). The web tool routes answer with a 4xx code rather than 500.
+
+### API gaps filled
+
+- **`ToolContract` params types are compiled to validators.** `tool-types` emits a pure-JS validator per
+  tool from the **checker's resolved type**, inside the pass that already builds the dts — so
+  conditionals, generics, `Omit`/`Pick`/`Record`, `keyof` and indexed access all arrive already
+  evaluated, and the workspace is not scanned twice. A multi-action tool gets one validator that
+  dispatches on its discriminant, so a missing field is reported against the arm the caller actually
+  selected, which is what `inputSchema` cannot express: `session_action`'s schema requires only
+  `action`, and every per-arm requirement is lost in the projection.
+
+  It targets the JSON *projection* of the type rather than the type: a `toJSON` return wins, a class
+  instance is its own enumerable data properties, and methods, function-valued and `undefined`
+  properties cannot reach the wire at all. So only `bigint` is refused outright — the one thing
+  `JSON.stringify` itself throws on. A contract that cannot be honestly validated yields a stated
+  refusal, never a permissive validator.
+
+- **Errors name the field as a caller would write it, and show what was sent.**
+
+  ```
+  Invalid input for tool "about_matbot": .x: never (no value is valid), actual value `{"x":8}`
+  ```
+
+  Paths are dotted (`.items[0].name`) rather than JSON Pointer, because the reader is either a model
+  repairing its own call or a developer looking at a 422, and both write dots. The value is rendered
+  wrapped in its own field name, so it is a fragment the caller can compare against what it sent; an
+  array element or the root renders alone, having no name to wrap it in. A missing property shows no
+  value — JSON carries no `undefined`, so there is nothing to show beyond saying it is absent. The
+  rendering is capped, so a rejected attachment cannot turn one bad field into the bulk of a turn's
+  context, and it cannot throw: an internal caller may arrive with a bigint or a cycle, and a throw
+  while *reporting* an error would replace the diagnosis with a stack trace.
+
+- **Settings changes are observable** ([#58](https://github.com/MatAtBread/matbot/issues/58)). A
+  settings write announced nothing, so no consumer could know a setting had changed: every reader had a
+  choice between re-reading the store on each use — on the filesystem backend, a disk read — and caching
+  with unbounded staleness. `ts-validation` made that concrete, reading its `enforce` setting on every
+  tool call through every door to re-learn a value that changes approximately never; there was no correct
+  cache to write, event invalidation being impossible and a TTL being a guess.
+
+  `makePluginSettings` now wraps its store in `notifyingStore`, so `set`/`delete` publish an `ItemChange`
+  with `namespace: 'settings'`, the settings namespace, and the writing **principal** (an override is
+  per-principal, so a cache must be keyed by one). `ItemChange` already means "the thing at
+  `(namespace, id)` is stale, re-read it, whatever holds it".
+
+- **`ItemChange` carries the caller's `key`, where the medium derives `id` from it.** A settings
+  document's id is its plugin package name slugged to satisfy the filesystem store's `/^[\w-]+$/`, and
+  another backend could legitimately hash or truncate — so a consumer asking "are these MY settings?"
+  had to reproduce a transformation it does not own. That copy keeps compiling after the rule changes and
+  simply stops matching, leaving a filter that never fires again: silent, and indistinguishable from
+  "nothing changed", which is the opposite of what an invalidation is for. The producer now states the
+  key it was addressed by (`notifyingStore` takes a `keyOf`), and a consumer compares it against its own
+  `services.self.name`. Absent means the id IS the key — every other namespace today — so a consumer
+  finding none invalidates rather than assuming a mismatch.
+
+  The bus is installed by the host as module state (`installSettingsNotifier`, beside
+  `installSettingsDefaults`) rather than passed in, for the reason already recorded for the defaults: a
+  parameter is a thing a call site forgets with no error and no symptom, and `plugins/browser` builds its
+  own facade over a concrete backend on purpose. It is read per publish rather than captured, so a facade
+  built before the host installs the bus is not silenced forever. Hosts pass their capture-safe `Notifier`
+  proxy, so a registered distributed notifier relays settings too.
+
+- **`NoParams`** (`plugin-api`) — `Record<string, never>` for a tool that takes no arguments. `{}` was
+  the obvious spelling and is wrong: in TypeScript it means "any non-nullish value", and omitting the
+  type argument is looser still (`unknown`). Adopted by the no-argument tools, which consequently now
+  reject stray properties.
+
+### Bug fixes
+
+- **`POST /tools/:name` with no body handed the executor `null`, not `{}`.** Nothing noticed until the
+  input was actually validated, at which point the web UI's own no-argument calls 422'd on page load.
+  An absent body means "no arguments"; an explicitly posted `null` still reaches the executor unchanged,
+  since a client that says `null` said something and hiding that would hide a real client bug. Fixed in
+  the HTTP route and both in-process transports.
+
+- **A vault write refuses a name the backend cannot store**
+  ([#57](https://github.com/MatAtBread/matbot/issues/57)). A secret stored under a name the medium
+  cannot hold was accepted and then quietly lost — the default vault persists to a `.env` file, so
+  `email:70de70:password=…` is written, dropped by whatever reads the file back (`Ignoring invalid
+  environment assignment`), and the failure surfaces a boot later as a secret that has ceased to exist.
+  Most such names come from an LLM inventing one, which is precisely the caller with no way to know
+  the rule.
+
+  `VaultSpec` gains an optional **`unstorableKey(name)`**, answering *why* this backend cannot hold a
+  name — what is storable is the backend's business and nothing above it can know: an in-memory map
+  takes anything referenceable, the `.env`-backed one takes environment-variable names. Every backend's
+  `writeSecret` asserts it (so `createSecret` is covered too, ending as it does in a write) and throws
+  the new branded **`InvalidSecretNameError`**, carrying the rejected `key` and the backend's `rule` —
+  phrased as what IS storable, since the reader's next act is to choose another name. Removal
+  (`writeSecret(name, '')`) deliberately skips the check, so a name that predates the rule, or arrived
+  from an environment snapshot, stays deletable. Backends that omit the method accept any name; the
+  base rule every vault shares is that a name must be referenceable as `${NAME}` at all.
+
+- **A tool's own `teardown` is not responsible for unregistering its services**, and never was — the
+  loader unregisters a plugin's registered keys *before* awaiting its teardown, so a consumer sees
+  absence (which it can handle) rather than a closed service that looks present and throws on use. Now
+  pinned by a test, since a validator on the executor turns that particular failure into every tool
+  failing at once.
+
+### Optional
+
+- **`ts-validation`** (new, node) — consumes tool-types' supply, applies `enforce: off | warn | reject`
+  (default **reject**, since loading the plugin is the opt-in; cached per principal and invalidated by
+  the settings `ItemChange` above — matched on its `key`, never on the slugged `id` — since validation at
+  the executor otherwise re-reads it from the store on every tool call through every door) and registers the `ToolCallValidator`
+  core consults. Its dependency on tool-types is hard and direct — a `dependencies` entry and a plain
+  import, the relationship `mcp` has to `mcp-http` — so it **installs the service itself** when nothing
+  else has: there is no load-order requirement and no mount-table latch. Listing `tool-types` as well
+  is still the better setup, since it then owns the service and other consumers (`function-tools`,
+  `skills_compiler`) get one too. Presence is duck-typed rather than `instanceof`-tested, so a reloaded
+  tool-types is recognised instead of duplicated.
+
+- **`tool-types`** — supplies validation and registers no validator service, so a code generator loading
+  it for `dts()` alone never silently starts having its tool calls rejected. Tools built at **runtime**
+  are covered as well: a `toolContract` string is not a `ts.Type`, so those are rendered into a virtual
+  augmentation and typed by a small second Program (that file plus plugin-api — no second workspace
+  scan). Those were the tools described to the model in full and enforced least, which is backwards,
+  their parameters having been authored by an LLM rather than a compiler. Each string is screened alone
+  before the batch is rendered — they become properties of one interface, where a stray brace would
+  swallow every arm after it — and the file must then typecheck cleanly, because an unresolved type
+  reference is `any`, which validates everything. A fault becomes a stated refusal rather than a
+  validator that reports success and checks nothing.
+
+- **`json-validation`** — moves onto the same seam and is no longer a hook, so schema checking covers
+  every door too, and still works in the browser where tool-types cannot run. A validator that displaces
+  another captures and defers to it when it has no opinion, so the typed and schema validators compose
+  along the line the type system already draws — typed contracts first, loose `inputSchema` behind —
+  rather than shadowing each other by load order. Its paths and values are reported identically, so
+  which validator rejected a call is invisible to the caller.
+
+- **`triggers`** — `trigger_action update` accepts `cooldown: null` to clear the stored limits. The
+  executor has always honoured it, its own error message documents it, and the web UI has always sent
+  it, but the arm declared `cooldown?: TriggerCooldown` — so a documented call was untypeable, which
+  went unnoticed until the params type was enforced. `add` still refuses `null`: there is no prior limit
+  to clear. The tool description now says so, rather than only the error path.
+
+- **`frontend-telegram`** — files a turn produces are rendered as attachments
+  ([#59](https://github.com/MatAtBread/matbot/issues/59)). The `file` pipeline event was swallowed, so
+  every file-producing tool looked like it had done nothing: the model says "here is the chart" and the
+  chat shows only that sentence. A file event is a durable handle, not bytes on the wire, so the
+  frontend pulls it and uploads it — an image inline, audio as a clip, anything else as a document —
+  captioned with its name, ahead of the turn's prose (a file lands while a tool is still running, and
+  the assistant's text is only flushed when the turn completes). `telegram_send` takes a `files` list
+  too, each entry a file id or name, for a notification with an attachment outside any session.
+
+  A method Telegram rejects retries as `sendDocument`, because the constraints those methods add — a
+  photo's width+height sum, a container it will not transcode — are not checkable in advance, and a file
+  that arrives beats one that renders inline. An oversized file (Telegram accepts 50MB, 10MB as a photo)
+  is reported in the chat rather than read at all, and a failed upload never propagates: a file that
+  would not send must not lose the answer it came with.
+
+- **`frontend-web`** — the empty-body fix above, plus a 4xx `code` from a tool error becomes that HTTP
+  status instead of 500. Only 400–499 is treated as a client error, so a process exit code (`bash` and
+  friends put theirs in the same field) still reports 500.
+
+## 0.4.11
+
+### Bug fixes
+
+- **`runAs()` no longer drops the principal when `fn` returns deferred work**
+  ([#53](https://github.com/MatAtBread/matbot/issues/53)). An async generator's body does not begin until
+  the first pull, so an iterator returned out of the scope carried its whole extent outside it: `runAs`
+  established the identity for the *construction*, and the work then ran under whatever was ambient where it
+  was pulled. `ToolExecutor.execute()` returns exactly that shape, so a host wiring its own tool invocation
+  (an HTTP endpoint, a scheduler) reached for the broken form first — and with a boot principal entered at
+  process entry, it read a plausible-but-wrong identity rather than throwing, which is a silent
+  authorisation failure. matbot's own call sites were unaffected: each consumes inside the scope, including
+  both `frontend-web` tool routes.
+
+  `runAs` now re-establishes the identity around each pull of a returned async iterator, and unwraps a
+  native promise to find an iterator behind an `async () => execute(…)`. The value crossing back out stays
+  what it was — the wrapper is a Proxy over the pull points, so a class-based iterator keeps its own
+  members, its prototype and `instanceof`. Deliberately untouched: an exotic thenable (`PromiseLike.then`
+  need not return a promise, so adopting one would hand back a different object); a `ReadableStream`, whose
+  `for await` and `getReader` paths could be re-entered but whose `pipeTo`/`pipeThrough`/`tee` pull from
+  platform internals no wrapper reaches — a conditional guarantee being worse than none here, and its eager
+  `start()` already running inside the scope; a returned function, since the caller decides when and how
+  often to call it and can scope the call itself, where binding would pin an identity on every later
+  invocation; the caller's own continuations (a chained `catch`/`finally` runs in the caller's flow); and
+  `machineBusy`/`withUsageScope`, whose hold and roll-up settle when `fn` does and so cannot be re-entered
+  per pull. Nesting needs no rule of its own: `runAs(A, () => runAs(B, () => gen()))` resolves every pull to
+  B, as plain nesting does.
+
+## 0.4.10
+
+### API gaps filled
+
+- **An install can supply defaults for a plugin's settings, from the config**
+  ([#51](https://github.com/MatAtBread/matbot/issues/51)). `default_settings:` in `matbot.yaml`
+  (`BrowserConfig.defaultSettings` in the browser) is keyed by plugin package name — the settings
+  namespace — and supplies the install's value for any key a plugin keeps in the settings store. The
+  point is to be able to ship an opinionated install without a wrapper package per plugin: plugin
+  identity is loader-derived from the package name, so wrapping a plugin purely to initialise it moves
+  its settings namespace to the wrapper, orphaning whatever the install already stored and colliding on
+  every tool name if both load.
+
+  It is a **read-only floor**, and the design is one rule: reads are layered, writes are not.
+  `settings.get` returns the stored key if present, else the install default, else `undefined` — which
+  lands above a plugin's own `?? codeDefault`, so config beats code and no plugin needed changing. The
+  CAS write path reads the stored document only, so `set` persists exactly the key it was given, and
+  `delete` means "revert to the configured default", which is what every existing `clear` action
+  already meant. Nothing is seeded and nothing is written back, so editing the yaml still takes effect
+  for every key nobody overrode, a plugin or provider update cannot destroy a default, and a default
+  applies to every principal rather than only the one that booted. Merging is per key (a value is
+  opaque), `${NAME}` is not resolved in these values (secrets stay the vault's), and a key naming no
+  loaded plugin is warned about at boot, since it would otherwise look like it had worked.
+
+### Bug fixes
+
+- **The config parser no longer returns half a file.** An unparseable construct made it `break` its
+  enclosing loop, which returned what had been read so far and left the rest of the document silently
+  discarded: a stray `-` in `plugins:` dropped every plugin after it and every top-level section below
+  it, `providers:` included, with no error — an install that boots and behaves as though half its
+  configuration had never been written. It now throws, naming the line. Two constructs it could not
+  read are now read: a bare `-` takes the block indented beneath it as its item value (the branch for
+  that existed but was unreachable, the dash test having required a trailing space), and a quoted
+  mapping key is unquoted like any other scalar — `'@scope/pkg':` previously addressed a key literally
+  spelled with its quotes. YAML's compact mapping in a sequence entry (`- key: value`) stays
+  unsupported and is now rejected rather than mis-read: telling it from a plugin specifier needs the
+  spec's colon-space rule, without which `- https://host/p.ts` parses as a mapping keyed `https`.
+
+## 0.4.9
+
+### Bug fixes
+
+- **An aborted turn no longer depends on the tool's cooperation.** The runner iterated a tool executor with
+  a bare `for await`, so an executor that never returns held the turn open for ever — the session sat at
+  "working" and every further abort reported success, because the abort itself worked and the tool call was
+  simply unreachable. Once the turn is aborted the read is now bounded (`ABANDONED_TOOL_GRACE_MS`, 30s):
+  the runner stops reading, warns naming the tool, and records the call as interrupted — so every
+  `tool_use` still has its `tool_result` and the next request is not rejected for a dangling call. Armed
+  only on abort, so a legitimately long tool on a healthy turn is never cut short, and a tool cleaning up
+  after a cut-off is still waited for. `bash` reached that state through inherited file descriptors
+  (below), but any executor can.
+
+### Optional
+
+#### bash
+
+- **A `bash` call ends when the process it waited for ends, and takes every process it spawned with it**
+  ([#47](https://github.com/MatAtBread/matbot/issues/47), [#48](https://github.com/MatAtBread/matbot/issues/48)).
+  `bash -c` forks each pipeline stage as its own process; abort and `timeout` signalled the direct child
+  only, with no process group to signal, and completion hung off `'close'` — process exited *and* every
+  stdio stream at EOF. So `find / … | head -5` lost its shell to the SIGTERM, left `find` traversing the
+  filesystem reparented to init, and the orphan holding stdout meant the event stream never terminated:
+  an unrecoverable turn, fixable only by killing the orphan from outside the app. The script now gets its
+  own process group (POSIX; Windows keeps the direct-child kill), every stop signals the negative pid and
+  escalates SIGTERM → SIGKILL after a grace, and `'exit'` is authoritative for completion — `'close'`
+  still wins when it arrives, otherwise an idle drain window ends the call and says so in `stderr`.
+- **A kill is reported as a kill.** A signal-killed script gives `code === null`, which the success arm
+  read as exit code 0 — so a timeout and an abort both reported a clean run to the model.
+- **Two bounds for an unattended host, both defaults rather than limits.** `timeout` defaults to ten
+  minutes, and combined stdout+stderr to 1000000 bytes via a new `maxOutputBytes` param; either can be
+  raised per call, and both are stated in the tool description. A bound the caller cannot lift is a ceiling
+  on what the tool can be used for rather than a safety net — the only party who knows whether 400KB is a
+  verbose build or a `yes` loop is the one that wrote the command. The numbers are generous because the
+  failure directions are not symmetric: overflowing output is output whose process was *killed*, so too low
+  kills legitimate work, while runaway protection barely notices — anything genuinely runaway trips either
+  number in well under a second. Overflow names the remedy, and a nonsensical value is refused before the
+  script runs.
+
+#### docker-bash
+
+- **A kill is reported as a kill here too.** The container variant carried the same `code === null` →
+  exit code 0 misreport in its own `close` handler. Only the *local* `docker exec` client being signalled
+  reaches it: an in-container process killed by a signal is propagated by `docker exec` as its own numeric
+  exit code (verified — an in-container `kill -9` surfaces as 137), so that case was already reported
+  correctly.
+- **`maxOutputBytes` is accepted per call here too**, overriding the `bash_config` setting for that one
+  command and leaving the persisted value as the default for the rest — changing a global to get one verbose
+  build through is the wrong shape of answer. Its default rises to 1000000 to match the local variant: two
+  tools sharing one name and one merged contract should not behave differently.
+
+## 0.4.8
+
+### Breaking changes
+
+- **`createAboutMatbotTool(version)` is now `createAboutMatbotTool(version, services)`.** The tool reports
+  the system prompt in force, so it needs the live machine to rebuild it — the same second argument
+  `createSingleTurnTool` already takes. `SystemContextRegistry` gains a required `parts(ctx)` with it,
+  which breaks a host that hand-rolls that registry instead of constructing core's
+  `SystemContextRegistryImpl` (nothing in this repo does).
+
+### API gaps filled
+
+- **`SystemContextRegistry.parts(ctx)` — the system prompt, attributed.** The prompt is assembled once per
+  submit and never persisted, so there was no route to it from a tool and no way to say WHICH plugin put a
+  line in it. `parts()` returns each contribution with the name of the plugin that registered it, and
+  `build()` now derives from it — one traversal, so the text sent and the breakdown reported cannot drift.
+  `about_matbot` carries both: `systemPrompt` (exactly what the turn received) and `systemContext` (the
+  same content, per contributor), which is how "what are your instructions?" and "why do you keep doing
+  that?" get an answer that names the thing to change.
+
+- **User-supplied session media.** A person can attach an image, PDF or audio clip to a message and the
+  model sees it. The mirror of the existing `model-content` pull path, and it needed no new
+  `MessageContent` arm: bytes arrive **by value** in `SubmitOpenOpts.content` (now `UserContent[]`, a
+  deliberately narrow subset of `MessageContent` — a wire boundary must not accept a forged `tool-result`,
+  `thinking` block or `marker`), and `SessionRunner.open()` writes each inline arm through the new
+  `MediaStore` service and replaces it with a `file-ref` **before the submission is enqueued**. What
+  persists is always a reference; no base64 ever reaches a session document. The runner resolves those
+  refs back to inline bytes on the outgoing copy only, newest-first, inside an 8MB byte budget computed
+  once per turn — beyond it the ref is left alone and the provider adapters degrade it to the
+  `[Attached file: x]` note they already wrote.
+
+  `MediaStore` is an **alias of `FileStore`**, so every existing implementation (filesystem, SQLite, OPFS,
+  Drive) is a candidate unchanged and putting media on a different medium is a registration, not a port.
+  Both hosts seed their own file area as the boot default, so this works with no configuration; a plugin
+  may `register('MediaStore', …)` to replace it, and unregistering reverts to the host default rather
+  than turning media off. With nothing registered, an attachment is refused *naming the file* and text is
+  completely unaffected.
+
+- **`MediaRejectedError`** (`mediaRejectedError` / `isMediaRejectedError`), branded like the other typed
+  errors. Carries `reason` (`no-store` / `unreadable` / `unsupported-type` / `too-large` /
+  `session-quota` / `unknown-ref`) and the offending `file`. Refusing at the boundary is the point: the
+  alternative is a provider 400 part-way through a turn the user already believes was sent.
+
+  Three of the six are about the bytes not being sendable. `unreadable` covers bad base64 and a
+  **magic-byte mismatch** — a file whose bytes are not the type it claims. `unsupported-type` catches the
+  same failure a step earlier, and is why `armFor` may return `null`: **`image/*` is the one prefix that
+  cannot be admitted by prefix alone**, because a provider *tries* to decode whatever the image arm carries
+  and 400s on what it cannot, where an unrecognised document or audio type degrades to a text note instead.
+  So HEIC (what an iPhone camera roll hands back), SVG, BMP and TIFF are refused rather than routed to an
+  arm that will fail — the same list and the same reasoning as `workspace`'s `showArm`. Both checks exist
+  because the consequence is worse than one failed message: the `file-ref` is by then in history, where it
+  resolves into every *subsequent* outgoing copy and fails the session for good. Neither is a validity
+  check — a well-formed header on a structurally broken document still passes, since only the provider can
+  know that.
+
+  `unknown-ref` is about the arm a caller may send *itself*. `UserContent` admits `file-ref`, so a frontend
+  that already uploaded can skip the rewrite — which makes a `fileId` on the wire the client's word about
+  which bytes to send, and the resolver inlines what it is handed. Each is therefore checked against the
+  session that owns it: the handle must exist, its `sessionId` must match, and its namespace must be
+  `session-media`. Ownership rather than `allowed`, since every media put sets `allowed: true` and so cannot
+  separate one session's media from another's. Reported as *unknown* rather than forbidden, for the reason
+  `GET /media/:id` gives — a refusal must not confirm that an id exists.
+
+  Caps are 50MB per session, the total **derived** by summing what the store holds rather than counted, and
+  per file **is** the 8MB residency budget rather than a second number: a file larger than the outgoing-copy
+  window can never be resident, so admitting one would only buy an attachment that is stored, charged to the
+  session total, and then permanently invisible to the model with nothing having said so.
+
+- **`SingleTurnRequest.prompt` accepts `UserContent[]`** as well as a string, so a one-shot completion can
+  carry media.
+
+- **`ComposedCallContext.progress(pct, message?)` — a composed function can report while it runs.** A
+  `tool_function` body is a plain async function and so cannot `yield`, which left the `progress`
+  `ToolEvent` — the one a hand-written tool emits, already rendered by the web client as a bar and caption
+  and by the CLI as `[NN%]` — unreachable from the one place a long run actually happens: a lambda looping
+  over n items. It needed no new channel and no change to the authoring syntax, because `runFunction`
+  already pumps a live event queue for the nested-call stdout trace; `progress` writes onto that same
+  queue, so an existing function is unaffected by construction. It is the one method on
+  `ComposedCallContext`, and does not breach that type's facts-not-capabilities rule for the reason the
+  rule exists: it carries no authority — write-only, reading nothing and reaching nothing. `pct` is
+  rounded and clamped where the model-authored number is handed over rather than in each renderer.
+
+### Bug fixes
+
+- **A mid-turn steer could interrupt a turn the user never saw.** The decision to interrupt tested
+  `s.running`, which is true across the pump's **whole queue** — so it answers "something is running",
+  never "still the one you meant". Every await in front of that test can outlive the turn being steered
+  (the classifier and the nudge always could; media ingestion, new in this release, can hold for seconds
+  on a large attachment), after which the abort landed on whatever was running by then and the `steer`
+  event named the wrong `interruptedTraceId`. The target turn's `traceId` is now captured when the
+  submission *arrives* and compared before aborting; if that turn has since committed the steer falls
+  through and queues, which is what it has become — an ordinary follow-up.
+
+- **`SystemContextRegistry.parts()` could pair a contribution with the wrong plugin, and drop one.** It
+  awaited the contributors and then re-indexed the *current* array, so a plugin unloading during the
+  await (a hot reload) shifted every survivor onto its predecessor's text and lost the last one
+  entirely. Since `build()` now derives from `parts()`, that corrupted the prompt actually sent, not
+  just the breakdown `about_matbot` reports. The contributor is zipped into its own awaited value.
+
+- **Prior reasoning is replayed on a field, not as prose — it was leaking into visible answers.** Both
+  converters degraded a stored `reasoning` block into a literal `[Prior reasoning: …]` **text** part on
+  any turn that also carried tool calls. That was wrong twice over. It did not give the endpoint what it
+  asks for (a reasoning field, not prose). And it was *imitable*: a model that sees the pattern in its own
+  prior turns starts emitting `[Prior reasoning: …` as ordinary output — observed on DeepSeek via
+  openai-compat as a 4600-character answer that opened mid-reasoning and never closed its bracket.
+
+  `openai-compat` now sends it back on `reasoning_content`, the same field `adapter.ts` reads it from;
+  nothing goes into the visible `content` channel. Still only on tool-call turns — a plain-chat replay is
+  tokens for nothing. Verified against live endpoints: DeepSeek accepts the field, and a strict
+  OpenAI-family backend (gpt-5.x) accepts and ignores it, so this is safe for everything openai-compat
+  fronts.
+
+  `anthropic` now elides it. Only the openai-compat adapter ever produces a `reasoning` block, so one
+  reaching that converter came from a different provider earlier in a mixed-provider session — foreign
+  round-trip state, which the Messages API has no slot for and which must never be posted into a slot it
+  does not belong in. Voicing another model's private reasoning as this one's prose was exactly that.
+
+- **A robo resubmission's non-text blocks now carry `origin: 'robo'`.** The stamp was applied to text
+  blocks only, so machine-authored media was silently presented as the user's own. `origin` is authorship,
+  orthogonal to what a block carries.
+
+- **An attachment-only first turn gets a title.** Auto-titling read text blocks only, so a session opened
+  with just a photo got no title at all — which reads in the session list as a session that failed to
+  start. Falls back to the attachment names.
+
+### Optional
+
+#### background
+
+- **`at` — run a prompt once, at a stated time.** Previously a job ran now or repeated forever, so an
+  appointment could only be faked as a recurring schedule suspended after its first fire. `at` takes an
+  ISO-8601 date-time or a duration from now, returns the instant it resolved to, and is persisted, listed
+  and cancellable through `every_action` (`interval: "once"`, fire time in `nextRun`) until it runs, at
+  which point it deletes itself. The absence of an interval is what marks it a one-shot — no second flag
+  to contradict it. A time already past at creation is refused, naming what it resolved to; a time that
+  goes by while matbot is down is honoured late on the next start.
+
+- **Bug fix: a wait beyond ~24.8 days spun instead of sleeping.** `setTimeout` clamps a delay larger than
+  a 32-bit signed integer to 1ms, so a distant schedule woke immediately and went straight back round.
+  Long waits are slept in chunks against a deadline, which also covers a long recurring interval.
+
+- **Bug fix: `sleep` leaked an abort listener per call.** It detached its listeners only on the abort
+  path, never on the ordinary timeout, against signals that outlive it by design — `signal` lives as long
+  as the schedule's loop. One per interval fire was already wrong; chunking a long wait multiplied it, so
+  an `at` a year out added ~15 in one go, until node warned about an EventTarget leak and the closures
+  behind them stayed reachable. Detached on every exit now.
+
+- **`at` now documents whose timezone an offset-less date-time is read in.** `Date.parse` makes a
+  date-only value midnight **UTC** and a date-time with no offset **local** — and "local" is the *host's*
+  zone: the machine matbot runs on under the CLI or server, which is usually not where the person asking
+  is, but genuinely their own browser in the web bundle. So the same string means two different instants
+  depending on which host created the schedule, and `AT_PAST_GRACE_MS` cannot catch it because the drift
+  goes forward as often as back. Deliberately not normalised — forcing UTC would silently move an
+  appointment a browser-hosted user meant locally, and honouring the asker's own zone needs a carrier the
+  plugin has no access to. Instead the tool description, the `at` schema and the parse error all now say
+  to include an explicit offset, which is the one thing that makes both hosts agree.
+
+#### edit-session
+
+- **`session_edit` `summarise` — compact by meaning rather than by shape.** `compact` keeps every word
+  either party said and strips the machinery, which preserves the discussion, the dead ends and the stale
+  intermediate data while scattering what a successor needs. `summarise` rewrites `messages[0..msgIndex)`
+  as a two-part hand-off document — a `user` message carrying what was wanted, an `assistant` message
+  carrying what is known now — via one `singleTurn` on `provider` (default: the turn's own), both halves
+  `origin: 'robo'`. Two things in that prompt are load-bearing: it keeps ANSWERS (dropping "intermediate
+  data a successor can obtain again" describes every answer in a Q&A session, since each came from a tool
+  result — so the rule drops the bulk that produced an answer, never the answer), and it does not presume
+  the session had an objective (a conversation that ranged over topics is not a failure case — the list of
+  topics is the goal). It also says to ignore any request in the transcript to summarise or tidy the
+  conversation: that is the operation, not the work.
+
+  **`msgIndex` is optional here alone: omit it and the range is the whole session** — ending, in the
+  session the calling turn is running in, where that turn began. A turn's user message and tool rounds are
+  on `ctx.session` before any tool runs, so an unclamped "everything" includes the request to summarise and
+  the assistant's attempts at it, which are the freshest thing a hand-off prompt looks at; the first real
+  summarise duly reported the compaction as the goal. `[0, messages.length)` is a legal range, an explicit
+  index is honoured as given, and cut/fork/split/compact still require one.
+
+  The replaced messages move into a `summarised` marker rather than being destroyed: elided from every
+  submission, so they leave the context without leaving the record, and expanded again by a LATER
+  summarise so history is never summarised twice. That expansion means the summariser's prompt grows while
+  the live conversation does not, so a repeat summarise can exceed a window the session itself fits in —
+  left to fail (nothing is mutated, and naming a bigger `provider` is the remedy) rather than budgeted
+  against a character count that only approximates a token window. The LLM call runs before any mutation, so a failed or
+  malformed summary leaves the session untouched and says why; a write to another session CASes against
+  the version the summary was read from, and the calling turn's own session defers to the quiescent edge
+  like `cut`/`split`/`compact`. `summarize` is the same action.
+
+#### frontend-web
+
+- **Bug fix: the media-URL cache never released a byte.** `resolveMediaUrl` memoised by `fileId` in a
+  module-global Map that nothing ever cleared — and in the browser bundle those values are `blob:` URLs,
+  which keep their Blob alive because they are *registered*, not because anything references them. So
+  every file a long-lived page had ever rendered stayed resident, up to the 50MB session cap per session
+  visited. The old comment's claim that it was "bounded by the distinct media in a session" was wrong
+  twice: it was never per-session, and the wire's residency budget bounds one turn's outgoing copy, not
+  a page's lifetime.
+
+  The cache moved into the **browser transport**, which is the only layer that knows what an entry costs
+  (it just read the bytes) and the only one that can revoke it — the node transport now caches nothing,
+  because there `mediaUrl` is string concatenation. It is an LRU bounded in **bytes** (32MB, a first
+  guess), for the reason `MEDIA_RESIDENCY_BYTES` is: a 20-entry cache is 400KB of thumbnails or 160MB of
+  PDFs, and a count cannot tell them apart. Concurrent misses for one id share a single read, which is
+  not merely an optimisation — two mints would leave the first Blob unreachable *and* unrevoked, the
+  exact leak being fixed. And because eviction can revoke a URL whose `<img>` is still on screen, an
+  element re-resolves **once** on error before falling back to the file chip; without that, a bounded
+  cache would silently downgrade a visible image, which is what makes the bound safe to have at all.
+
+- **The system prompt is visible from the header.** Clicking `matbot vX.Y.Z` runs `about_matbot` over HTTP
+  and shows an overlay with the harness line, the provider, and the prompt broken down per contributing
+  plugin — re-run on each open, since a plugin loading or a skill being catalogued changes it while the page
+  is up. It reports the provider selected in the tab, saying so, because the direct tool endpoint has no
+  turn for the tool to report one from.
+
+- **Summarise is on the message-divider popup**, beside Compact. It passes the provider selected above the
+  composer — required rather than optional there, since the direct tool endpoint builds a session-less
+  context with no provider to fall back on — and pulses the divider line while the call is in flight,
+  because the popup closes and this is the only action on that toolbar that takes seconds.
+
+- **The mobile composer gives the textarea a row of its own.** It had only ever got narrower: at 390px,
+  three round buttons and their gaps took 141px of a 374px line, leaving room for ~29 characters — and
+  only two of those buttons were legal touch targets, the paperclip being 34px against a 44px minimum
+  while costing 40px of the line. Below 640px the controls now sit on their own row as four equal-width
+  labelled pills (Options / Attach / Stop / Send), and the textarea takes the full 374px, ~50 characters.
+  Wide beats tall for mis-taps — ~90px of separation instead of 6px — and the width is what buys room for
+  a word, which is a far stronger anti-misfire device than a 15px glyph. The extra ~28px of chrome is
+  repaid the moment a message wraps twice, which at 29 characters a line it did constantly.
+
+  Send owns the bottom-right corner and keeps it whether or not a turn is running (Stop's slot stays
+  reserved, so Send's position is fixed to the pixel): the corner a thumb lands on must not change
+  meaning. Provider and the queue/interrupt toggle — set rarely, and both unhittable at their inline size
+  — move behind the Options cog into a panel above the composer, where they render full-size.
+
+  `#input-row` is a **grid**, and the breakpoint changes only its template: no element moves between
+  parents, so the read-only state, the drag target and every handler keep working, and DOM order is free
+  to differ from visual order. The panel is the same `#input-meta` element the desktop shows inline,
+  restyled in place rather than duplicated — there is still exactly one `#provider-select`.
+
+- **Desktop puts attach after the textarea**, at the same 45px as Send and Stop rather than a smaller 32px
+  circle; outlined rather than filled is what marks it the secondary control. The meta row is denser.
+
+- **Composer attachments** — a paperclip button, drag-and-drop onto the composer, and paste (for a
+  screenshot that exists nowhere else). Attachments render as removable chips with a thumbnail, post by
+  value inside the submit body, and are **restored to the composer if the submission is refused** rather
+  than lost. Client-side caps mirror the server's so the common mistake is caught before the round trip.
+- **Media renders in the message thread** — inline in the user bubble, live and on reload, via a new
+  `GET /media/<fileId>`. That route is id-addressed rather than name-addressed (a store id is not
+  guessable the way `workspace/notes.md` is) and applies **no gate of its own**: `allowed` is the store's
+  own persisted flag and area routing is the backend's, because access control belongs to the layer
+  implementing storage, not the layer exposing it.
+- `POST /sessions/:id/submit` reads a larger body (64MB) since it may carry attachments; every other route
+  keeps the 1MB default. A refused attachment maps to 413/501/400 with the reason and the filename, not a
+  bare 500, and the client's submit timeout now scales with the payload instead of a flat 20s.
+- **No Web Crypto in the served client.** `crypto.randomUUID` needs a secure context, so it is undefined
+  over plain HTTP to anything but localhost — which is how a LAN or test deployment is normally reached.
+  The web-bundle loader shims it, but that loader runs only in browser-bundle mode; in server-backed mode
+  `app.js` is served bare. The composer no longer mints an id it never read.
+
+#### function-tools
+
+- **The description teaches `context.progress()`.** Told only that a body can be slow, a model has no way
+  to say so; the injected-bindings block now carries the call, with a worked loop, and states that progress
+  is never sent back to it — so reporting costs no context and there is no reason to be sparing with it.
+
+- **`tool_function` now recommends itself in the system prompt.** A model that never considers the tool
+  never reads its description, and left alone it pulls a verbose result into the conversation to extract a
+  line of it, or drives a loop a round at a time — keeping every intermediate result for the rest of the
+  session. The plugin registers a `SystemContextContributor` (constant text, so a stable cache prefix),
+  and the tool's description now opens with when to use it. Both are framed on the size and shape of the
+  work rather than the number of calls — a verbose result you need a fraction of, or a loop or conditional
+  — and both say what a lambda costs, since fetching the types and authoring the body is itself a call or
+  two. It appears only when the plugin is loaded, which is why it cannot live anywhere else.
+
+- **…and then names its own pathological case.** The nudge above over-corrected: told when a lambda
+  pays, the model began wrapping almost every tool call in one — the same result reaching the conversation
+  either way, for a types call and an authoring round more. Both texts had stated the exclusion as a cost
+  rather than a rule, which is easy to rationalise past. The test is now one question — are you REDUCING a
+  result? — and the exclusion is a prohibition: a lambda whose body is one `await tool.x(params)` and a
+  `return` of what came back is strictly worse than the call it wraps. The tool description gains a
+  `NOT FOR THIS` block and a worked anti-example.
+
+#### single_turn
+
+- **`attach?: string[]`** — name stored files (by store id or by name, looked up across the `MediaStore`
+  and the turn's own file store) to send alongside the prompt as inline media. A file the store does not
+  have is reported, not silently dropped: a consulted model answering about something it never saw
+  produces a confidently wrong answer.
+
+#### workspace
+
+- **`workspace_action show` — the model can look at a stored image, PDF or audio clip.** matbot's first
+  real producer of the `model-content` pull path, which until now was built, tested against a fake tool,
+  and emitted by nothing: the *push* half (a person attaches something) worked, while the model asking to
+  see a file it already knows about had no route at all. Asked to examine a workspace PNG, a model would
+  correctly reason that it needed the bytes inline, find no tool that could do it, and fall back to
+  `bash` — curling the file back off matbot's own HTTP port, sniffing the PNG header, reaching for PIL.
+  `show` streams the file, hands it over as the matching inline arm, and returns **metadata only**
+  (`{ name, mimeType, bytes }`), so the transcript records that a file was shown and never the bytes it
+  showed.
+
+- **Bug fix: `show` refused audio, which it advertises.** `MIME_MAP` had no audio extension at all, so
+  every workspace `.mp3` typed as `application/octet-stream`, `showArm` returned null, and the tool that
+  promises audio told the model to `read` it — handing back base64 it cannot hear, the exact dead end
+  `show` exists to close. Audio extensions are mapped, and the default is inverted: a format we hold no
+  opinion about is routed and left for the **endpoint** to reject, because there is no per-model mime
+  capability table here and refusing was guessing on the model's behalf. Only SVG and `text/*` are still
+  refused, neither for capability reasons — `read` hands over their source, which is the better answer.
+
+  Deliberately the opposite policy to core's `armFor`, which must refuse an undecodable `image/*`.
+  Different blast radius rather than an inconsistency: there the refusal protects a **persisted**
+  `file-ref` that would fail every later turn too, while here the worst case is one turn, because tool
+  media is wire-only and dies with it.
+
+  `read` could not have been extended to do this and the description could not have papered over it: a
+  `read` result is a **string**, so base64 there is 4/3 of the file *persisted into the session document*
+  and re-sent on every later round, for something the model still cannot see. That trap was previously
+  advertised (*"use encoding 'base64' for binary files (images, PDFs, zips)"*) with nothing to say it was
+  not vision; `base64` is now documented as the way to **move** bytes, and the description points at
+  `show` for looking at them.
+
+  Refusals name the type and point somewhere useful. SVG is the one exclusion inside `image/*` — it is
+  XML, no vision endpoint decodes it, and `read` gives you the source, which is the better answer anyway;
+  text goes the same way, and an unknown type is refused rather than guessed into a `document` arm a
+  provider would 400 on. One file may be up to **8MB**, refused on the handle's declared size before any
+  read: shown media rides the outgoing copy for the rest of the turn, so it is paid for once per *round*,
+  not once. Same number as `MEDIA_RESIDENCY_BYTES` because it is the same question — how many bytes may
+  ride the outgoing copy — and, like that one, a first guess.
+
+- **`workspace_action write` returns the `fileId` it minted**, alongside `name` and `bytes`. A caller that
+  had just uploaded could previously only address the file by guessing its name back, which is not the
+  same question once a backend partitions or renames.
+
+#### frontend-telegram
+
+- **Photos, documents, audio, voice notes and video are now received** and sent to the model — the case
+  that proves the by-value boundary, since bytes arrive WITH the message and no upload-in-advance leg
+  exists or can exist. A photo's largest rendition is used (a thumbnail is what makes vision look bad),
+  and `caption` is read as the message's prose — previously a photo-with-a-question was dropped entirely,
+  because the dispatch loop gated on `text`.
+
+## 0.4.7
+
+### Optional
+
+#### frontend-web
+
+- **The per-session SSE stream survives its own connection dropping.** One defect with two faces, and the
+  same root: the stream was fire-and-forget in one direction and unrecoverable in the other. Raising an
+  interactive prompt was a single write, so it was lost outright whenever the session had no live stream at
+  that instant — the user on another conversation, a reloading tab, or a socket killed by sleep that nobody
+  had reaped — and the turn then parked forever with no prompt anywhere on screen, which is the
+  `skill_action` compile install confirmation that "never appeared". A prompt is *state*, not an event: it
+  stays true until answered, so it is kept and re-sent to every stream that connects while it is
+  outstanding. Read the other way round, the same gap is a turn that "never completes": a stream replays the
+  *running* turn and says nothing about one that began and ended while it was gone, so the loading dots
+  stayed up until the page was refreshed. The transport announces the discontinuity and the UI re-reads
+  committed history — what a refresh does, without losing the page.
+
+- **`GET /ui-config`** serves the values the server and its UI have to agree on — `heartbeatMs` today — and
+  the client derives its idle and freshness thresholds from it. They were two constants in two files kept
+  consistent by hand, so changing the server's interval silently made the client wrong, and wrong here means
+  tearing down a healthy stream on every deadline. Deliberately narrow and deliberately not a feature-flag
+  channel: whether a capability exists is answered by the tool registry, which changes while the page is up.
+
+- **A stale "plugin not loaded" banner clears when the plugin loads.** `session_edit`'s banner (it does offer
+  to install, like the workspace panel's) had no panel behind it to redraw, so it sat there contradicting a
+  feature that now worked. Keyed on the tool's own `added` notification, so it is never dismissed while
+  still true.
+
+- **Both SSE endpoints heartbeat** (`WebServerDeps.heartbeatMs`, default 20s), and the client bounds how
+  long it will sit in silence. Nothing was written to a quiet stream between turns, so neither end could
+  tell quiet from dead: the server kept a zombie connection in its viewer set and went on reporting
+  successful writes into it (which is *how* a prompt was lost), while the client's `reader.read()` stayed
+  pending with no error, so its reconnect loop never ran at all. A long, quiet turn is exactly the window a
+  socket dies in. Reconnect was never the missing piece; liveness detection was.
+
+- **The in-process (`matbot.html`) transport had the same prompt hole, with no socket in it.** Injecting a
+  prompt was one pass over whatever streams were draining, and a session the user is not looking at has
+  none — so the question reached nobody and the turn parked, in a system with no network. Parked and
+  injected on subscribe, exactly as the server now does. The clearest evidence that the prompt rule is
+  about statefulness rather than transport: `evalInBrowser`, one function below it, already checked.
+
+- **Becoming visible revives a quiet stream instead of waiting out the watchdog.** `visibilitychange` and
+  `pageshow` both, because they answer different questions — the latter is the back/forward cache, where a
+  page is restored with its scripts un-rerun and its streams gone, which Safari leans on heavily and where
+  mobile Safari has frozen JS (so a timer cannot be the only mechanism). Deliberately *not* a
+  disconnect-on-hide policy: a hidden tab usually keeps its connections, so forcing the gap would make the
+  recovery re-read certain rather than rare. Only a stream that has actually gone quiet is torn down.
+
+- **A viewer going away is no longer treated as an answer.** The "no viewers left" release resolved the
+  pending prompt with `''`, which the prompt implementation turns into the *field's default* — an answer
+  nobody gave, to a question nobody saw. Harmless-looking on a confirm (it declines) and destructive on
+  `plugin store-key`, whose default is `''` and where a blank value **removes the key**. A prompt now
+  simply stays pending, to be put to the next viewer; `POST /abort` and server shutdown cancel it
+  (`PromptCancelledError`, which a tool already reports as an error) rather than inventing a choice.
+
+- **An optional tool the UI probes for no longer costs 30 seconds of blank page.** The `/tools` endpoints
+  hold a name that has not registered yet, because the server starts listening inside `setup()` — before the
+  plugins configured after it, and before core's own tools — so a browser already open when the server
+  restarts would otherwise 404 tools that are merely late. But the wait ended on a *clock*: 30s from server
+  construction, whatever the registry was doing. A name that would **never** register — the UI asking
+  `profile_action` whether a profiles backend exists — therefore parked for the whole remaining window
+  before 404ing, long after every plugin had finished loading. Nothing was slow at boot; the wait was for a
+  deadline, not for an event. The tool registry going quiet is the signal that was missing: boot registers
+  in a dense burst, so 2.5s of silence means the burst is over and an unknown name is genuinely unknown.
+  Re-armed rather than polled, so a boot that keeps registering keeps its grace, and the 30s ceiling still
+  backstops a wrong guess. Deliberately a heuristic — "loading has finished" is not a fact a plugin can be
+  told, and inventing a notification for it would put boot sequencing into core to save a frontend two
+  seconds.
+
+  Nothing's *correctness* rests on that guess, which is the part that matters. A `setup()` may itself call
+  `loadPlugin()` — google-drive and per-user bootstrap plugins both do — so tools can register long after
+  the burst, and no deadline the server picks can outlast a slow enough nested load. A 404 therefore means
+  "not registered when you asked", never "absent", and the boot window is a courtesy rather than a contract.
+
+- **A control the UI built out of a tool call now tracks the tool registry, in both directions.** Every
+  panel rendered from a tool's output follows tool churn, and the profile/sharing UI — which was gated on a
+  one-way flag latched at boot — is re-derived instead. The latch got both directions wrong, and neither is
+  hypothetical: a capability whose plugin loads late (via a nested `loadPlugin`, so arbitrarily late) never
+  appeared however long you waited, and one *unloaded* from this very UI's plugins panel went on offering
+  sharing operations that 404. Withdrawal hides the controls and re-reads the two panels that render
+  ownership. The one-time wiring is separated from the part that re-runs, so an arrival cannot stack
+  duplicate listeners; the sync is debounced against a boot's burst of registrations and keeps one probe in
+  flight, since mid-boot a probe for an absent tool waits rather than 404ing.
+
+- **The web UI no longer serialises its whole bootstrap behind that probe.** `initProfiles()` is now awaited
+  only when there is a URL fragment to interpret, because its one ordering-critical job is adopting a
+  `#<profile>:…` deep-link before anything opens a session under the old identity. With no fragment the
+  shell comes up immediately and the profile UI wires itself in when the answer arrives, re-reading the two
+  panels that render ownership. The fragment's *presence* is the test, not its shape: a profile name is
+  indistinguishable from a bare session id without the profile list, which is the thing being fetched.
+
+- **`docs/SSE-CLIENTS.md`** — how to write a UI of your own against this server, since anything embedding
+  matbot has to reimplement all of the above. What the two streams guarantee and what they don't, the four
+  mistakes that are invisible in testing and permanent in production, and the socket budget. Written
+  against the *transition* rather than the browser event: a soft-tabbed shell gets no lifecycle event when
+  a panel is hidden, so the rules attach to whatever the UI's own foreground/background signal is (a click,
+  a route change, a store mutation) with `visibilitychange`/`pageshow` as two sources among several. Plus a
+  section for an embedder who owns the server half too — five guarantees a client cannot work around the
+  absence of — and one on the serverless in-process build, where turn durability is the opposite way round.
+
+## 0.4.6
+
+### Optional
+
+#### tool-types
+
+- **Two plugins may declare a same-named local type without breaking the derived dts.** Bundling flattens
+  every referenced workspace type into one scope, but the bundle was keyed by declaration identity, so two
+  file-local types sharing a name were both emitted side by side — a `TS2300` in the artefact, and both
+  references then resolving to an *error* type. `background` and `edit-session` each own a `SkipKind`, which
+  is legal TypeScript and deliberate (`background` says why it is not shared), so the generator now
+  represents it: the first symbol to claim a name keeps it, later ones are alpha-renamed (`SkipKind$1`), and
+  every reference is rewritten to match. Keyed by symbol, never declaration, so a merged interface is not
+  renamed apart. The narrowing both plugins tell callers to rely on ("branch on `kind`, never on the prose")
+  reaches a generator again — `function-tools` and the skills compiler are graded against this dts, and it
+  had been grading them against an error type.
+
+- **The emitted dts is now compiled by a test.** Nothing in the repo compiled the generator's own output:
+  `typecheck` builds each plugin separately so two file-local types never meet, `check:contracts` never
+  compiles the dts, and the checker *deliberately* drops diagnostics inside the ambient prefix (a broken
+  prefix is our bug, not the snippet's) — which is why the above was silent and surfaced downstream. One
+  assertion separates "the contracts resolve" from "the contracts appear to resolve".
+
+## 0.4.5
+
+### Breaking changes
+
+The plugin-loading rework changes how an existing install resolves what it already has configured. None of
+it is a migration you have to perform, but each item can make a working install behave differently, so all
+of them are listed — including the ones that only bite in a source checkout.
+
+**A configured plugin that appeared to load may now fail loudly.** The http route used to lex each module
+with regexes and *silently skip* anything it could not classify — an import that resolved nowhere was simply
+never fetched, and the plugin either worked by luck or failed later with a message about a file. Node now
+resolves the graph, so an unresolvable import fails at load, naming the specifier and the importer. Nothing
+resolves *less* than before (dynamic, root-relative and absolute-URL imports resolve for the first time);
+what changes is that a latent failure is now reported instead of deferred. If a fetched plugin stops loading
+after this upgrade, the error names the missing dependency, and the fix is one of: install it beside matbot,
+add it to `plugins:` if it is itself a plugin, or import it by URL.
+
+**A bare name in `plugins:` now prefers a local package that declares it.** Previously a name was matched
+against the filesystem only as a *path*, so `@scope/name` came from the registry or `node_modules`. Now a
+package under `<configDir>/plugins` (two deep) declaring that name wins. Only installs that keep a `plugins/`
+directory next to `matbot.yaml` are affected — for them, a name that used to load an installed copy may now
+load local source instead. A `@<range>` suffix, or `npm:`, still always means the registry.
+
+**`github:owner/repo#path:sub` resolves differently.** The legacy pnpm fragment used to switch the specifier
+to a package-manager install; it is now folded into the URL path and fetched over https like any other
+subdirectory, and warns once naming the modern form (`github:owner/repo/sub#ref`). The old behaviour was not
+meaningfully working — npm ignores `#path:` and installs the *entire monorepo* under the repo's name while
+reporting success, and pnpm extracts the right package but leaves `workspace:` peers unmet — so an install
+that relied on the whole-monorepo side effect will see a different tree.
+
+**`plugin add` on a local path may now run npm in that plugin's directory** — but only for a plugin that
+declares plain registry ranges. A manifest carrying **any** `workspace:`/`catalog:`/`link:`/`file:`/URL range
+returns before npm is invoked at all (not "npm runs and finds nothing"), and says so in one line. That covers
+every plugin bundled with this repo, whose dependencies are all `workspace:` or `catalog:`, so **a source
+checkout sees no change** — and it is all-or-nothing by design: a mixed manifest is left entirely alone
+rather than partly provisioned. Where it does apply — the vendor-wrapping case the feature exists for — it
+resolves the dependencies first and lists the resolved set, transitives included, in the approval you are
+already being asked for; the directory then gains `node_modules` and `package-lock.json`, and because the
+install phase is `npm ci`, **an existing `node_modules` there is deleted first**, so anything hand-placed in
+it is lost.
+
+**`plugin add` records the canonical package name, not the path you gave it.** New entries only; existing
+`matbot.yaml` entries are untouched. Anything that greps the config for `./plugins/...` should expect a name.
+
+**`.plugins/` gains `node_modules/@matatbread/{matbot-plugin-api,matbot-core}` symlinks** pointing at the
+host's own copies — this is what lets a fetched plugin import them. A real directory sitting at either of
+those paths is replaced. The cache is matbot-owned, so this should be invisible; it is listed because the
+directory is also mounted read-only into docker-bash.
+
+**A second copy of `plugin-api` or `core` now warns at boot.** Nothing breaks — the duplication was already
+there and is survivable by design — but an install that has one (commonly: a plugin installed from npm whose
+peer dependency was auto-installed rather than deduped) will see a new warning naming the directory and both
+versions.
+
+**Two boot diagnostics are gone.** The source-scanned "unsatisfied import" warnings predicted failures from a
+regex scan; the resolver now reports the real thing. The manifest-derived one (a declared dependency nothing
+satisfies) stays. Anything parsing boot output for the old wording will not find it.
+
+**For anyone importing `@matatbread/matbot-tool-plugin` directly** (no first-party consumer does), three
+exported signatures changed: `Classified` loses its `'remote'` and `'pnpm-url'` arms and gains `'http'`
+(carrying `url` and an optional `advice`); `materializeRemote` returns `{ entry, pkgRoot, unsatisfied }`
+instead of the entry path; and `fetchRemoteManifest(spec)` now takes `(spec, dotPlugins, live?)`.
+
+**A recompiled plugin's scaffold is rewritten.** `skill_compiler` now states its compiler options inline
+instead of extending `<configDir>/tsconfig.base.json`, writes `peerDependencies: { …plugin-api: "*" }` rather
+than `workspace:^`, and adds a `description`. On the next compile or iterate of an existing compiled plugin,
+its `package.json` and `tsconfig.json` are overwritten accordingly, so hand edits to either are lost. A
+plugin-api link left dangling by an earlier build is replaced rather than trusted, and an unresolvable
+plugin-api is now a build error instead of a link that fails the typecheck on line 1.
+
+**`onContextQuiesce` moved to the plugin-api root, out from behind `/host`.** Deferring work to the next
+safe moment is the one piece of the quiescent edge a plugin has any use for, and it sat behind the subpath
+documented as boot assembly for an embedder — where `CLAUDE.md` also asserted that no plugin imports it. That
+assertion was false: `edit-session` reached into `/host` for exactly this, being the only plugin that ever
+wanted it. So `context-switch.ts` is now a fourth split-down-the-middle file, alongside principal,
+notifications and the mount table: the root exports `onContextQuiesce` and `Quiescer`, while holding the
+machine (`machineBusy`, `contextSwitch`), waiting on it (`quiesced`) and coalescing stagings
+(`scheduleAtEdge`) stay host-side. Importing from `/host` still resolves, so nothing breaks.
+
+`check:isolation` now fails if any package under `plugins/` imports `@matatbread/matbot-plugin-api/host`. The
+boundary was described as a file boundary that "cannot quietly erode", and it had quietly eroded — a claim in
+prose is not a check.
+
+**`onContextQuiesce` registers and announces, and passes its own unregister fn.** Scheduling edge work is
+now one call: `onContextQuiesce(un => { un(); work() })` is a one-shot, the same without `un()` is a standing
+flusher. Registering raises the barrier, so the edge is guaranteed to arrive rather than depending on some
+other operation happening to release. New `scheduleAtEdge(work)` covers repeated announcements that should
+collapse into one apply — a guarded one-shot whose guard coalesces the stagings while the work reads a
+last-write-wins slot, so three `register('StorageBackend')` calls before an edge install one backend rather
+than three in turn. Both hosts use it and no longer keep a standing flusher, which left
+`flushIfQuiescent()` with no callers at all — so it is **no longer exported**. Announcing is what registering
+does, and exposing "force an edge" only offered callers a way to reason about firing that they should not need
+to have. The tests that used it now register work the way a consumer would. Continuous delivery remains a
+standing registration and must never be a callback re-registering itself — registering announces, so that
+would be unbounded demand and the edge would re-enter forever.
+
+Announcing used to be a second, separate call, and the only plugin registering a one-shot (`edit-session`'s
+deferred session edit) never made it — so the barrier never engaged for the very work whose starvation
+motivated it. Two calls that must be paired, where omitting the second is silent, is the failure mode this
+module exists to prevent. The flusher signature gains a leading `unregister` parameter, mirroring the hook
+channels' `ctx.removeHook()`; existing zero-argument flushers are unaffected. Registration schedules its edge
+attempt on a microtask rather than inline, so a callback cannot run before the statement registering it has
+returned — which also means a **non-idempotent** standing flusher now sees one extra sweep at registration.
+
+**`machineBusy` is a barrier and returns a promise.** `machineBusy(fn)` and `contextSwitch(principal, fn)`
+now return `Promise<T>` rather than mirroring `fn`'s sync/async return, because entry can wait: staged
+deferred work lands before the hold is taken. A synchronous `fn` still runs inline within the call — the
+barrier adds a hold, never a scheduling gap — but a synchronous throw now arrives as a rejection. Only
+`core`'s turn pump called either (`contextSwitch` had no callers at all), so first-party code is unaffected;
+anyone holding the machine directly must `await`.
+
+The change is about **liveness, not coherence**. The edge was a counter, and nothing forced it to zero: under
+continuously overlapping holds — several sessions on a busy server, each pump holding across its own queue —
+it never arrived, so a deferred `session_edit` never landed and a staged `StorageBackend` swap never applied.
+Both are failures with no symptom. Coherence was never this module's job and still isn't: `mediumGuard` fails
+a write whose read came from another backend, which is what makes barring entry safe to add. Exclusivity for
+an async flusher — no entrant slipping in through its `await` — falls out of the barrier for free.
+
+The wait is **bounded** (2s, then it proceeds and warns), because a counter cannot distinguish a nested
+entrant from a concurrent one: an LLM reaching a matbot HTTP endpoint through its own `http` or `bash` tool
+runs inside its own turn's hold, and would otherwise wait on a drain that includes itself. The bound degrades
+to the previous behaviour rather than hanging. `quiesced()` survives for an operation that needs deferred work
+complete without holding the machine; the pump no longer calls it, since the barrier delivers that guarantee
+where it cannot be forgotten.
+
+### API gaps filled
+
+- **`PluginListResult` gains `duplicateSingletons`: a second copy of `plugin-api` or `core`.** Reported
+  beside `failed` because it is the same kind of fact — something about the installed set worth knowing
+  that nothing else would surface. A second copy is a different module object (separate state,
+  `instanceof` false across the seam), and matbot is hardened against exactly that, so the design that
+  makes duplication survivable also makes it silent.
+
+- **A plugin load request accepts `version`: the package.json version the host already read.** It travels
+  beside `name` and for the same reason — `resolver.version(spec)` starts from the *config* specifier, and
+  a bare name, a URL or a version range locates no manifest, so a plugin configured portably reported no
+  version while the identical plugin configured as `./plugins/foo` reported one. The host reads the
+  package.json it is about to import; it had no channel to say so. Its reading wins, and nothing is
+  invented when neither side knows.
+
+- **A plugin load request accepts `notes`: what the host noticed while resolving.** The failure a load
+  reports is usually downstream of its cause — a dependency the host could not satisfy arrives as
+  `ERR_MODULE_NOT_FOUND` naming a file — and the host is the only layer that saw the cause. `notes` are
+  folded into any failure `loadPlugins` records for that specifier, so the `plugin` tool and web UI show
+  the reason rather than the symptom, and dropped entirely if the plugin loads anyway: a host cannot
+  distinguish an unused declaration from a fatal one.
+
+### Bug fixes
+
+- **A `StorageBackend` swap is now announced on the notification bus.** `notifyingStore` sees writes made
+  *through* it, so replacing the medium — every document in every namespace now coming from somewhere
+  else — passed it in silence: nothing was written, so no `ItemChange` addressed anything. `services.mounted`
+  carried the fact to in-process subscribers only, which is why the SkillManager rebuilt its cache while the
+  browser showing those skills did not know to re-read them. The mount table now also publishes each
+  transition as a `RegistryChange` on a third registry, `services` (`name` is the `MatbotServices` key; a
+  remount reads as `added`), so a reader outside the process learns what an item-addressed notification
+  cannot say.
+
+  It is published *after* that key's handlers settle, and whether or not any exist — the handlers are how
+  the caches a remote reader queries through get rebuilt, and the interests map holds this process's
+  plugins, which says nothing about who is listening on the bus.
+
+### Optional
+
+#### frontend-web
+
+- **Every panel re-reads when the storage backend is swapped.** Enabling or disabling a storage plugin
+  changed the sidebar's conversations and its plugin list but left skills and the workspace showing the
+  displaced backend's contents. Neither was ever refreshed *because of* the swap: the plugin list moved
+  because the plugin list had changed, and the conversation list moved because the client's end-of-turn
+  refresh is debounced by 150ms and happened to land after the quiescent edge — the file listing, fired
+  in the same breath without the debounce, landed before it. The UI now dispatches on the new
+  `services` `RegistryChange` and re-queries sessions, skills and files together when `StorageBackend`
+  transitions, rather than waiting for an unrelated change to refresh a panel by luck. The open
+  conversation's own message pane is deliberately left alone.
+
+#### cli
+
+- **The first-run setup wizard stores its API key through the `Vault`, instead of writing `.env`
+  itself.** Answering the "API key" prompt with the *name* of a key the `.env` already held — the
+  natural thing to do when pointing a second config at credentials you have already set up — appended
+  a synthetic `MATBOT_API_KEY_<PROVIDER>` whose value was that key's name, and wrote a config
+  referencing the new entry. The typed string was also handed to the provider verbatim as the live
+  credential for that first run, so the reference itself was posted to the endpoint as if it were the
+  secret; a restart then read the reference from the config and resolved it to the same wrong value.
+
+  Nothing at the prompt can distinguish a secret from the name of one, which is what `Vault`'s
+  `createSecret` is for, and it has resolved this everywhere else since the vault-backed credential
+  model landed — `provider add`, the web bundle's bootstrap, the Drive vault. The wizard predated it
+  and hand-rolled its own `.env` writer, which is the whole of the bug: naming an existing key now
+  references it, a value already stored under another name dedups to that name, and only a genuinely
+  new secret mints `MATBOT_API_KEY_<PROVIDER>`. The written config and the running process reference
+  the same key, since the wizard hands back the placeholder rather than what was typed.
+
+  A blank answer now writes no `credentials:` block at all rather than an empty `.env` line, which is
+  what a keyless endpoint (`chatjimmy`, `customer-services`) wants: an empty value is the vault's
+  removal signal, so persisting one would leave the config naming a key that does not exist, and boot
+  prompts for a missing secret and rejects a blank answer.
+
+#### tool-types
+
+- **The tool dts is anchored on plugin-api from this module too, not the project root alone.** The anchor was
+  `<projectRoot>/plugin-api/src/index.ts`, else a require from the project dir; a deployment where matbot is
+  not resolvable there (installed globally, or a config dir outside the project) got `null` — and the
+  *silence* was the damage. `skills_compiler` then falls back to a three-arm hardcoded stub while still
+  telling the model "a tool not declared here does not exist", so generated code is graded against a registry
+  view that omits most live tools. Measured: asked to call `whoami`, the model declared a `ToolContracts` arm
+  for it *itself*, inventing `{ id: string; type: string }` — which compiled clean and merely resembled the
+  real `Principal`. A wrong guess would have compiled too, and the cast gate cannot see it: nothing was cast,
+  a contract was asserted. `tool-types` peer-depends on plugin-api, so its own resolution always works; this
+  is the same fix, and the same reasoning, as the compiled-plugin scaffold's link.
+
+#### skill-compiler
+
+- **The hardcoded three-arm `ToolContracts` fallback is gone; a compile that cannot derive contracts fails.**
+  The dts is an *input* to code generation, derived from the live registry — it is not something the model
+  authors. A stub is not a smaller truth but a false one: the codegen prompt asserts "a tool not declared here
+  does not exist", so under three arms that sentence is wrong about most of the registry, and the model closes
+  the gap by declaring contracts itself. An empty *derived* set is fine and is not this case ("we know of no
+  tools" is true); an undeclarable one now yields no plugin rather than a guessed one.
+
+- **A generated tool may declare its own `ToolContracts` arm and no other.** Enforced structurally, like the
+  cast gate and for the same reason: tsc accepts an arm the model authors, so a hallucinated contract compiles
+  and fails at runtime, and no amount of prompt prose closes that. `checkProjectDir` takes `ownContracts` and
+  rejects any other arm with a diagnostic that says what to do instead — call the tool and use the type it
+  already has — so the repair loop fixes it rather than the compile shipping it. Measured before this existed:
+  a compile needing `whoami` declared `ToolContract<{ id: string; type: string }, {}>` for it, which typechecked
+  clean and merely resembled the real `Principal`.
+
+- **A cancelled install is no longer reported as success — on either path.** The verification (is the compiled
+  tool actually resolvable?) was skipped whenever the plugin was already configured, which assumed a reload
+  always has an old version still loaded. When it does not — a build dir deleted under a config that still
+  lists it, so the boot load failed — a cancelled reload reported `installed` *and went on to hide the source
+  skill*, leaving neither a tool nor a visible skill. What remains genuinely undetectable is a cancelled reload
+  masked by a still-resolvable older version.
+
+- **A compiled plugin describes itself.** The generated plugin now carries `manifest.description` — the
+  tool's own one-line description — so `plugin list` no longer shows a blank beside every
+  `@local/compiled-*` package. It never had one: the template declared `apiVersion` and `setup` only, and a
+  loaded plugin's description is read from its manifest alone.
+
+- **A compiled plugin's build dir no longer assumes `matbot.yaml` sits at a source checkout's root.** The
+  generated tsconfig extended `<configDir>/tsconfig.base.json` and the `node_modules` link pointed at
+  `<configDir>/plugin-api`; an installed deployment has neither, and both failures were silent.
+  `symlink()` succeeds against a nonexistent target, so the link dangled and the plugin failed its own
+  typecheck with `TS2307: Cannot find module '@matatbread/matbot-plugin-api'` on line 1 — an error
+  attributed to the model's code that the repair loop cannot fix and burns all four passes on, beside a
+  HINT saying that module is the only importable one. An unreadable `extends` is not an error either, so
+  `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` and `erasableSyntaxOnly` quietly stopped
+  applying — and the last of those is what keeps a plugin loadable, so an `enum` passed the gate and then
+  died at import as "not supported in strip-only mode". The scaffold now states its compiler options
+  instead of inheriting them (the same ones, so a checkout is unchanged) and resolves plugin-api the way
+  the remote-plugin bridge does; unresolvable is an error, and a dangling link from an earlier build is
+  replaced rather than trusted. `paths` is gone with it, so the link is the single mechanism both tsc and
+  Node resolve through — two meant a typecheck could pass while the import failed.
+
+#### background
+
+- **`every_action({ action: 'suspend' | 'resume', id: '*' })` skips a schedule it cannot write.** The same
+  exposure as `compact_sessions` below, one namespace over — `schedules` is isolatable like any other, so a
+  schedule shared in read-only refuses the write — but with a worse ending: the throw escaped after the loop
+  had already flipped and woken the schedules before it, so a partial change was announced as a total
+  failure. Refused schedules are now listed under a new optional `skipped` — each with a `kind` (`denied` /
+  `unavailable`, the 4xx/5xx distinction) and a `reason` naming the owner — while `count`/`ids` report what
+  actually changed, so "all" that wasn't all says so. Any other failure still stops the sweep.
+
+#### edit-session
+
+- **A skipped session says which of the two kinds of skip it was.** Each `skipped` entry now carries a
+  `kind` alongside its prose `reason`: `ineligible` (nothing to do — below the thresholds, or already
+  compacted), `denied` (readable but not writable by you, so asking again will be refused again) or
+  `unavailable` (the write could not complete this time; a later run may succeed). The 4xx/5xx distinction,
+  and the remedies are opposite — go to the owner versus come back later — so one opaque string could not
+  carry both. Branch on `kind`; the prose is for people.
+
+  A lost compare-and-swap is `unavailable` and is **not** retried inside the sweep. `mediumGuard` reports a
+  `StorageBackend` swap as exactly this lost CAS, advising "re-read and retry", but that advice cannot be
+  taken here: the swap lands at the quiescent edge, and under the pump the machine is held across the whole
+  queue, so the edge is unreachable until the turn ends — an inline retry would re-read the same medium and
+  lose again, and sleeping first would only hold open the turn the edge is waiting for. Compaction is
+  idempotent and scheduled, so the next run is the retry.
+
+- **`compact_sessions` skips a session it cannot write instead of aborting the sweep.** A store partitioned
+  by profile holds sessions the caller may read and may not write — ones shared in read-only from another
+  profile, or from the base — and their `cas` raises a branded `ReadOnlyError`. Nothing caught it, so the
+  first such session ended the whole sweep with an exception: a profile with any share in it compacted
+  *nothing*, while the tool's own contract advertised a `skipped` array for exactly this. Each one is now
+  reported there with its owner, and the sweep goes on. Only that one branded error is caught — a genuine
+  fault still aborts, because a sweep that met a broken backend and returned a tidy summary would be worse
+  than one that raised.
+
+#### skills
+
+- **A skill is indexed before its analysis cache is written, not after.** The cache is an optimisation on the
+  skill document; the index is what makes the skill findable. Writing the cache first meant a document this
+  principal cannot write — a skill shared in read-only — threw on the optimisation and took the indexing with
+  it, leaving the skill absent from search with only a console warning.
+
+#### storage-profiles
+
+- **`share`'s `owner` action no longer reports the base partition as an empty string.** The base's id *is*
+  the empty string — the path segment that isn't there, and right as routing — but both the single and the
+  `id: '*'` bulk form handed it back verbatim, in a result whose `null` already means "you own it". Two
+  readings of one answer, with the misleading one the likelier. It now renders as `"global"`, the way the
+  `ReadOnlyError` from a refused write to the same item already named it.
+
+#### sessions
+
+- **`session_action query` rejects an unknown top-level key instead of matching everything.** The store
+  tools got this in 0.4.3; `session_action` kept the pre-fix behaviour for one reason — it takes the same
+  grammar *flat* beside `action`, and destructured `{ where, sort, limit, cursor }` out of its arguments
+  before validating. So a key like `filter` (the SQL-ism the 0.4.3 entry describes) was dropped before
+  `validateQuery` could see it: the query degraded to match-everything and the caller got every session
+  back with no error and no total. The caller's envelope — every key beside `action` — is now validated
+  first, so the error names the bad key and the valid set, exactly as the store tools do.
+
+#### tool-plugin
+
+- **A second copy of a host singleton is named, at boot and in `plugin list`.** Nothing is re-linked:
+  replacing a package-manager-installed directory with a symlink invites the next `install` to undo it, and
+  the failure averted is one the design already survives. The test is `realpath`, not path existence, and
+  that is the whole feature — the symlink farm under `.plugins/node_modules`, a compiled plugin's scaffold
+  link and a provisioned plugin's `node_modules` all hold an entry named `@matatbread/matbot-plugin-api`
+  pointing *at* the host's copy, so all three collapse to the host's realpath and stay quiet. Resolution is
+  probed from where each loaded plugin actually lives and from the config dir, since "what would this plugin
+  get?" is a question a resolver answers and a directory listing only guesses at — while the host's own copy
+  is resolved from the host, never from the config dir, or a copy installed beside `matbot.yaml` is mistaken
+  for the host's own.
+
+- **Node resolves a fetched plugin's module graph; the regex crawler is gone.** `materializeRemote` used to
+  lex every module with three regexes and fetch the whole graph ahead of Node. A lexer guessing at a module
+  graph got three things wrong, silently: `import(variable)` was invisible so a computed dynamic import was
+  never fetched; a root-relative specifier has no package name, so `/ms@2.1.3/es2022/ms.mjs` — what esm.sh
+  rewrites every dependency import to — was filed as a package called `''`, whose symlink path collapsed to
+  the farm's own directory and therefore "resolved"; and an absolute URL import was dropped from both
+  buckets and failed at load. Fetching now happens where resolution does: a module hook maps a file under
+  `.plugins/<host>/…` back to its origin URL and fetches what is missing, so all three work. Only the
+  manifest and the entry are fetched up front — the manifest first, so the `matbotRuntime` gate still runs
+  before any of the plugin's code is on disk. Identity stays `file:`, so `import.meta.url`,
+  `createRequire`, `discover_local`'s walk and docker-bash's read-only mount all keep working; a `.origin`
+  file per host records the scheme the mirrored path cannot carry. Warm boots still make zero requests and
+  still work offline. What it can no longer do is skip silently: an unresolvable import fails naming the
+  specifier *and* the importer, so the two source-scanned diagnostics are retired — they predicted failures
+  now either fixed or reported accurately. The crawler's `linkHostPackages` goes too; bare imports resolve
+  through Node, which finds a sibling plugin's self-link and the host singletons linked in beside it.
+
+- **The host singletons are linked into `.plugins/node_modules`, so a fetched plugin can import them.**
+  Resolving them in the module hook instead cannot work, and briefly did not: the only anchor a hook has is
+  its own file, and `apps/cli` depends on `core`, not on `plugin-api`, so the retry could never reach the
+  package it existed for. Walking up from the cache does not save it either — in an installed deployment
+  `.plugins/` sits under a project whose flat `node_modules/@matatbread/…` lies above it and the walk
+  succeeds by luck of layout, while a pnpm workspace keeps its links inside each package, so a source
+  checkout's root holds no `@matatbread` at all. A link is the disk's version of the browser bundle's import
+  map and every resolver honours it — the ESM resolver, `createRequire`, tsc — instead of ESM alone. It
+  points at the host's own directory, so the duplicate-singleton report resolves it to the same realpath and
+  stays quiet; a link that no longer leads there is replaced rather than trusted.
+
+- **An unresolvable bare import names the file that imported it.** `nextResolve` merges the context it is
+  handed into the shared context object, so the hook's retry (which sets `parentURL` to its own file to ask
+  the host) overwrote the field the error message then read: every such failure was reported as
+  `imported by …/apps/cli/ts-hooks.js`, pointing the reader at the hook rather than the plugin.
+
+- **Five acquisition kinds collapse to three routes: `local` | `npm` | `http`.** Two of the five were the
+  same route reached by punctuation — a `.tgz` was `pnpm-url` while a directory URL was `remote`, and
+  `github:o/r#path:sub` switched mechanism on the strength of a `#`. `github:` is now plain http, and the
+  legacy `#path:` fragment folds into the URL path while advising the modern form, which resolves
+  identically; it never worked as a package-manager install (npm ignores `#path:` and installs the whole
+  monorepo, reporting success; pnpm leaves `workspace:^` peers unmet). A scoped `@scope/name` is checked on
+  disk before the registry like any other bare name, and `npm:` is the one explicit override. A specifier
+  that still works but should be rewritten says what to replace it with — once at boot, and again attached
+  to the failure if that plugin does not load.
+
+- **`discover_local` reports a plugin as configured however the config entry names it.** It answered that
+  question by string-matching the path form it had just built (`./plugins/foo`) against the `plugins:` list,
+  so the moment `plugin add` began recording the canonical package name, a plugin that was both configured
+  *and loaded* reported `configuredVia: null` — the report contradicting the running process. The same
+  blindness covered an absolute path or a `file:` URL naming that very directory. A specifier is not an
+  identity, so the comparison is now on what an entry refers to: the package's name, the specifier as
+  discovery wrote it, or the directory a path-shaped entry resolves to.
+
+- **`plugin add` records the canonical package name, not the path it was given.** A path is right only for
+  one working copy, while the name resolves in a checkout and in an installed deployment alike and is the
+  handle `remove`/`reload` address a plugin by — the rule the `provider` tool and the setup wizard have
+  always followed for provider modules. Only when the name resolves *back* to the directory just approved,
+  so a compiled plugin under `compiled-plugins/`, a sibling checkout reached by `../`, or a directory
+  declaring a name that belongs to a different package all keep their path. The web UI's add/remove buttons
+  name a local plugin the same way (a cached remote keeps its URL, which is how it resolves).
+
+- **A bare name is local if anything here *declares* it, not if a path of that shape exists.** The local
+  test was a path test, and a package's path has nothing to do with its name: `@matatbread/matbot-edit-session`
+  is `plugins/edit-session`. So in a full checkout the portable form of every first-party plugin fell through
+  to the registry — `plugin add` would install a published copy of code already on disk (a second package,
+  free to skew in version, shadowing the source being worked on), and a `plugins:` entry naming one failed
+  outright with `Cannot find package`; only the few the CLI itself depends on resolved, by accident of its
+  own node_modules. The disk is now asked what it can answer — "does a package under `plugins/` call itself
+  this?" — over the same two-deep root `discover_local` scans, so a name that tool reports is a name that
+  resolves. A `@<range>` suffix stays a registry question whatever is local, since a constraint is exactly
+  what a filesystem cannot solve, and `.plugins/` is not consulted: a fetched plugin's identity is its URL.
+
+- **A local plugin's own dependencies are installed when it is added**, so wrapping a third-party module
+  in a tool works locally. The local route resolved nothing: a local plugin's bare imports were whatever
+  happened to be installed around it — always true in a workspace checkout, rarely anywhere else — so the
+  identical plugin loaded over http and failed as `./mine` with `Cannot find package 'debug'`.
+  `plugin add` now resolves the declared dependencies with npm's `--package-lock-only` *before* asking,
+  folds the resolved set (transitives included) into the approval it was already asking for, and then
+  `npm ci` installs exactly that. Always npm, because `pnpm install` inside a workspace walks up, reports
+  "Already up to date" and installs nothing. `--ignore-scripts` on both phases. `--omit=peer` is
+  load-bearing rather than hygiene: without it npm fetches a second `@matatbread/matbot-plugin-api` from
+  the registry at whatever version is published (measured: 0.4.4 beside a host running 0.4.5), so host
+  singletons are linked to the host's copy afterwards instead — after, because `npm ci` deletes
+  node_modules first. A manifest carrying `workspace:`, `catalog:`, `link:`, `file:` or a URL range is
+  left entirely alone and says so once; those mean "something already resolves me", which is every
+  in-repo plugin including the sqlite example.
+
+- **A remote (`github:`/`https://`) plugin's mirrored tree is now actually the cache.** `.plugins/` was
+  a write-only mirror: the crawl needs each module's content to find the next import, so it asked the
+  network for every file on every boot — and then discarded what came back, because `writeCached`
+  refuses to overwrite a mirrored file. Four HTTP requests per *warm* boot of a single plugin, all of
+  them redundant or self-defeating, and with the tree fully populated and the server unreachable the
+  `fetch` threw and the plugin was dropped from the boot. Every read is now tried against the tree
+  first, so a warm materialise makes **no requests at all** — which is the whole of the offline story,
+  since there is nothing left to ask for. Every candidate of the `.js`→`.ts` probe is tried on disk
+  before any is tried live, because the `.js` name is the preferred URL while the `.ts` name is what
+  gets mirrored. The trade is deliberate: a boot never picks up changed upstream source, and
+  `reload --refresh` — which evicts the subtree, and re-reads the manifest live so a moved entry is
+  noticed — is the one path that does. `fetchDeclaredFiles` is offline-tolerant for a related reason:
+  an asset that never cached is retried every boot, so a network error there took the whole boot down
+  for a file the plugin may never read.
+
+- **What this route cannot resolve is reported instead of skipped.** It fetches one package and
+  installs no dependency graph, which was silent in three ways: a bare import resolving nowhere the
+  host could see was skipped; a root-relative specifier (what esm.sh rewrites imports to) was filed as
+  a package named `''`, which "resolved" to the symlink farm's own directory and counted as success;
+  and a declared dependency on another matbot plugin — the one place such a dependency is named — was
+  never read. All three now surface, naming the package to install or the plugin to add to `plugins:`.
+  The check is deferred until every remote is materialised, so a plugin depending on a sibling
+  configured after it is not accused of missing it.
+
+## 0.4.4
+
+### Breaking changes
+
+- **The quiescent edge is the drained queue, not the end of a turn.** A deferred machine mutation — the
+  `StorageBackend` swap, the mount table's batched notifications — landed whenever no *turn* was in
+  flight, and the pump does a great deal of store work outside a turn: it re-reads the committed
+  document for `followup`, appends markers to it, rewrites it for a retract, and persists the next
+  queued turn's user message before that turn opens. All of it was quiescent, so a backend could be
+  swapped in the middle of it: the turn's write-back landing in one backend and the followup marker
+  appended to it in another. A two-turn queue reached the "idle" edge six times mid-flight; it now
+  reaches it once, after the queue drains — the same boundary accounting already flushes at, for the
+  same stated reason that the end of a turn is not a moment anything can be totalled or swapped at.
+
+  The hold is a new `/host` primitive, `machineBusy(fn)` — "hold the machine for this operation" —
+  which is the half of a context switch that is not about identity. `contextSwitch(principal, fn)`
+  keeps its meaning and its signature, and is now literally `machineBusy` + `runAs`; the pump holds
+  once around its whole queue and `runAs`es per item, each item carrying its own submitter. It is a
+  wrapper rather than a `begin`/`end` pair on purpose: the hold is released on every exit including a
+  synchronous throw and a rejected promise, because a stranded counter is unrecoverable — every later
+  flush no-ops forever and the only symptom is a deferred mutation that never happens.
+
+  **A flusher may now be asynchronous** — `onContextQuiesce` takes `() => void | Promise<void>` — and
+  returning a promise makes the edge wait rather than merely start the work. `quiesced()` is the other
+  half: an operation that must not overlap deferred work awaits it before holding the machine, which
+  the pump does, so an edit deferred out of one turn has landed before the next turn takes its copy of
+  the session. Without it the deferral only moved the race: the edit began after the turn committed,
+  and a submission arriving meanwhile could read the document before the CAS and put the pre-edit
+  version back with its own write-back.
+
+  Flushers are invoked in registration order and then settle together, the synchronous prefix still
+  running inline — so staging a mutation and landing it with a bare `flushIfQuiescent()` is in effect
+  before the call returns, as before. The edge does not give exclusivity against the rest of the
+  machine and could not: once any flusher awaits, an HTTP endpoint can accept a request and run a tool
+  call to completion inside that window, so serialising flushers against each other would remove one
+  source of concurrent mutation while leaving every other in place, at the price of every flusher
+  waiting on the slowest. Contention over a service is the service's to resolve — a `Store` answers it
+  with compare-and-swap — and the sweep's job is to make contention rare, not to pretend the machine
+  stops. A backend swap is staged, never applied, while a flush is
+  settling, which narrows one further window — compare-and-swap answers "did this document change?",
+  not "did the medium change?", so a read from one backend and a write to another compares a version
+  against a backend that never issued it. That exposure is not new and is not the flushers': an HTTP
+  tool call has always been able to straddle a swap the same way. The fix belongs where the consequence
+  lands, in a `cas` that checks it is writing to the backend it read from — noted here as a known gap.
+
+  Listed as breaking because the *timing* an embedder or plugin observes changes: a `register()` from
+  inside a turn now takes effect when the session's queue drains rather than at that turn's end, which
+  for a session running back-to-back turns (a `followup` resubmission, a retract-and-rerun) is later
+  than before. The mount contract already promised only eventual, ordered delivery and explicitly not
+  timing, so nothing that honoured it needs changing. Frontend entry points are unaffected: a web
+  request or telegram message still uses `runAs` and deliberately does not hold the machine, its scope
+  spanning a long-lived stream.
+
+- **`workspace_action` speaks of names, not paths.** `path` becomes `name` on read, write and
+  delete and in every result; `list` takes `prefix`; `recursive` is gone. A workspace file is an entry
+  in a `FileStore` namespace, addressed by one flat string — the `/` in `charts/data.csv` is an
+  ordinary character, not a level, and there is no directory anywhere in the medium to create, change
+  into or walk. Calling the parameter `path` invited the whole hierarchical model in, and the calls it
+  produced failed in the ways that model predicts and this one cannot honour: `list { path: "." }`
+  matched nothing (the executor appended a `/`, and no name begins `./`), and `write { path: "./notes.md" }`
+  created a *second* file distinct from `notes.md`, addressable only by repeating the `./`, because
+  names are stored verbatim. Normalisation now drops `.` segments everywhere, so those two converge,
+  and a `..` in a `list` prefix is an error rather than a silently empty listing, as it already was
+  elsewhere.
+
+  **`recursive` is removed, and `list` now always returns every matching file.** It never recursed:
+  the executor enumerates the whole namespace on every call and `recursive: false` only discarded names
+  with a further `/` in them, so the default suppressed results already in hand and bought nothing —
+  a depth default borrowed from filesystems, where a deep walk is expensive, applied to a store where
+  both branches cost the same. Its failure was quieter than the `path` one, too: `list {}` returned a
+  short list that reads exactly like a complete answer to "what is in my workspace". Narrowing is
+  `prefix`'s job; if listing size ever needs a control, that control is a limit, not a depth.
+
+  Listed here rather than under **Optional** with the plugin's other changes: the tool ships by default
+  and every parameter of it changed at once, so a stored `function-tools` lambda, compiled skill or
+  trigger `invoke` naming the old shape breaks — and breaks *quietly*, since `inputSchema` is loose by
+  design and an unknown key is ignored rather than rejected. A stale `list` call now lists the whole
+  workspace instead of erroring; a stale `read` or `write` fails on the missing `name`.
+
+### Bug fixes
+
+- **A store write can no longer cross a `StorageBackend` swap.** Exactly one backend is active and
+  nothing is migrated between them, so a caller that read a document before a swap and wrote it after
+  was addressing two media with one read-modify-write — and nothing could see it: compare-and-swap asks
+  "did this document change?", which the incoming backend answers about a document it never issued,
+  usually "there is nothing here". An unconditional `set` then recreated the previous backend's
+  document inside its replacement, and a session had silently migrated. Reachable wherever a read and a
+  write straddle the swap: an HTTP tool call has always been able to, and deferred quiescent-edge work
+  now can too.
+
+  `mediumGuard` (`@matatbread/matbot-core/storage-base`, wrapped around each store proxy by both hosts)
+  puts the check where the consequence lands rather than asking every caller to know something only
+  storage knows. The version is the only token tying a read to its write, so it carries the medium:
+  stamped on the way out, checked and stripped on the way in — stripped because most write-backs reuse
+  the version they read (`store.set(id, { ...doc, title })`), and a persisted stamp would be stamped
+  again on the next read. An unstamped version is always accepted, being a document the caller minted
+  rather than read. A stale `cas` returns `{ ok: false }` — the loss every caller already handles, with
+  the medium in the role of the other writer — and a stale `set` throws, having no other channel.
+
+### Optional
+
+#### edit-session
+
+- **`session_edit` defers an edit of the running turn's own session instead of refusing it.** `cut`,
+  `split` and `compact` on `ctx.session.id` used to return an error, because the runner holds one
+  in-memory copy of the document and writes it back unconditionally at turn end — an edit landing
+  mid-turn is silently overwritten. The edit is now queued on a one-shot `onContextQuiesce` flusher and
+  applied at the next quiescent edge, by which point the turn's write-back has happened and the edit
+  reads the committed document. The result reports `{ deferred: true, sessionId, message }` rather than
+  the usual counts: the edge is by construction unreachable until the calling turn has ended, so
+  awaiting the real outcome from inside that turn would deadlock. A negative `msgIndex` is resolved to
+  an absolute one at call time, before the turn's own tail lands. Deferred edits are serialised against
+  each other; a failure is logged, having no caller left to tell. `fork` is unaffected — it only writes
+  a new document — and every edit of *another* session stays immediate.
+
+- **`compact_sessions` compacts the session it was called from, deferred, instead of skipping it.** It
+  reported the calling session as `skipped: 'current session'` — declining to compact the one session
+  whose history is re-sent on every round, for the same reason `session_edit` used to refuse it. It now
+  queues that one on the same quiescent edge and reports it under a new `deferred` array, which carries
+  no tier and no count: both are decided when it is applied. The whole per-session policy (tier
+  decision included) moved behind one re-read so the deferred pass decides against the document the
+  turn actually committed, not the one the scan saw — and because the tiers address messages from the
+  end (`-1`, `-10`), "keep the last 10" still means the last 10 once the turn's own tail has landed.
+
+  The guard remains `ctx.session.id`, which protects the *calling* turn and no other: invoked over
+  HTTP, where the tool context carries a stub session, nothing matches and a session another turn is
+  running in is compacted inline — where that turn's unconditional write-back at turn end silently
+  reverts it. That is the quiescent edge's granularity, addressed separately.
+
+- **Compaction removes a message it empties, instead of leaving an empty shell.** Both `session_edit`'s
+  `compact` action and `compact_sessions` dropped every block of a message that held only tool calls,
+  tool results or thinking, and kept the message itself — a stored husk no provider ever saw (the
+  Anthropic converter skips empty content and folds the adjacent same-role messages either side) but
+  which a frontend reading the stored array draws as an empty bubble. Both sides of a tool exchange are
+  stripped in the same pass, so they disappear together and no call is left without its result. Shells
+  left by earlier compactions are collected too, so an already-compacted session is cleaned by its next
+  compaction. Message positions before the cutoff therefore shift, which nothing addresses across a
+  reload — provenance (`remember_fact`, `dream_time` enrichment) is by message id, and the one index
+  that is baked, this plugin's cross-session `targetMsg`, is documented best-effort and was already
+  fragile to `cut` and `split`.
+
+#### frontend-web
+
+- **The browser UI is type-checked against the live tool contracts, and `pnpm web-build` fails if it
+  isn't clean.** The UI is plain browser JS served verbatim, so nothing connected its `callTool` calls to
+  the `ToolContracts` the tools declare — `workspace_action`'s rename of `path` to `name` blanked the
+  file panel, and the way it failed is the point: reading a field that no longer exists yields
+  `undefined`, which renders as an empty row rather than an error, so it looked like "no files" and not
+  like a bug, in the one part of the system nobody compiles.
+
+  `static/matbot-ui.ts` imports the packages whose augmentations declare the tools the UI calls and
+  derives the transport's `callTool` signature from them, so params are checked against the tool's arms
+  and the result narrows to the arm they match. Consumers annotate their params from the same source
+  (`ToolResult<'workspace_action', { action: 'list' }>`) rather than restating a shape. `pnpm web-build`
+  runs the check before baking `app.js` into `matbot.html`, since a bundle is the last place a broken
+  UI file can still be caught.
+
+  The gate is about DATA, not the DOM: element narrowing is deliberately widened away, because the ~80
+  casts it would take are noise against the bug class worth catching, and a gate that expensive gets
+  turned off. Its reach ends where a value enters an unannotated function, so a new panel needs its
+  consumer annotated to be covered — and it cannot see field names inside strings (a `[data-name]`
+  selector, a template).
+
+  Three real defects fell out of turning it on: `workspace_action` `delete` and upload still passed
+  `path`; `share`/`owner` was read as `.owners` (bulk) or `.owner` (single) without narrowing, though
+  the contract returns a union of the two and only the runtime id decides which; and the in-process
+  browser transport passed `ownerPrincipal` to `createSession`, which copies three fields and has never
+  been one of them, so session ownership there was silently discarded rather than recorded.
+
+#### function-tools
+
+- **`tool_function { action: 'check' }` re-type-checks functions you already defined.** A defined
+  function is type-checked once, at `define`, against the tool types as they stood then — and on every
+  later reload it is only *compiled*, never re-checked. So a tool that changes its contract silently
+  invalidates every stored function composing it: the function keeps registering, keeps being offered
+  to the model, and fails when it is next called. `check` closes that window by re-running the same
+  snippet through the same `ToolTypeIndex.check` that `define` and `lambda` use — no third notion of
+  what "checks out" means — and reports a row per function. Pass `name` for one, omit it to sweep all
+  of them. Nothing is run, registered or persisted.
+
+#### tool-store
+
+- **A query grammar key passed beside `action` is no longer silently discarded.**
+  `{ "action": "query", "limit": 0 }` — the grammar flattened one level up instead of nested under the
+  `query` parameter — reached `store.query(input.query ?? {})` as `{}`: the limit was dropped, the
+  query degraded to match-everything, and the count form came back as every document in the store plus
+  a `total`, which reads exactly like a working answer. It is the silent miss `validateQuery` rejects
+  unknown top-level keys to prevent, reappearing where `validateQuery` cannot see it, because the
+  misplaced key never becomes part of a `StoreQuery` at all.
+
+  The cause was the tool's own description: it documented the `StoreQuery` *type* but never the *call
+  envelope*, so the nesting had to be inferred, and the count form appeared as the fragment "pass
+  `limit: 0`" — which reads as an instruction to pass it at the top level. The description now leads
+  with the shape of the call and gives the count form complete. Misplaced keys are also rejected with
+  an error naming them and the correct call, rather than answered.
+
+#### storage-sqlite
+
+- **`StoreQuery` is compiled to SQL rather than interpreted.** The grammar is specified as a
+  translation target — a closed AST meant to become a `WHERE` clause, an Elasticsearch `bool`, a
+  Mongo `find` — but every backend in the repo delegated to the in-memory reference evaluator, so the
+  claim rested on the shape of the AST and nothing else. The SQLite backend now compiles the filter
+  to `WHERE`, the sort to `ORDER BY`, and the page to `LIMIT`/`OFFSET`, with `limit: 0` becoming
+  `SELECT COUNT(*)`. A filtered query no longer reads, parses and sorts the whole namespace to answer,
+  and a count materialises nothing at all.
+
+  Documents are JSON text, so a field is `json_extract(doc, <path>)` and its type
+  `json_type(doc, <path>)`. That pair carries the whole translation: `json_type` returns NULL for an
+  absent path and `'null'` for a stored JSON null — precisely the grammar's single "missing" state —
+  and it separates `'true'`/`'false'` from `'integer'`, without which type-strictness could not be
+  expressed at all, since a value accessor erases a JSON boolean to the same 0/1 a number produces.
+  Field paths are **bound**, never interpolated, so the compiler has no injection surface.
+
+  What the exercise actually establishes is where a native query language disagrees with the grammar
+  by default — four points, each of which returns plausible rows instead of failing, and each now a
+  named guard: SQL's three-valued logic (`NOT NULL` is NULL, so a row *missing* the field is dropped
+  from a negated predicate the grammar says it matches); boolean/number erasure, including inside
+  `arrayContains`; missing-value ordering (the grammar's missing-last is a property of the value, so
+  it reverses to missing-*first* under `desc`, where SQL's NULL ordering is a property of the
+  direction); and the `id` tiebreaker that makes the order total enough for a cursor to point at a
+  stable boundary.
+
+  Equivalence is enforced rather than asserted: one conformance corpus of ~70 queries runs through
+  both the pushdown and the in-memory reference and must return the same documents in the same order,
+  with cursor paging a disjoint cover and identical located `StoreQueryError`s for invalid input. The
+  corpus is built around the four traps — documents holding a number where another holds a boolean, a
+  JSON null beside an absent field, keys containing `.` and `"`, and ties on every sorted field
+  inserted out of id order so a missing tiebreaker cannot pass by coincidence.
+
+  One divergence remains, for a field holding **mixed types across documents** only: SQLite orders
+  every number before every string, where the reference stringifies and compares `"10" < "9"`. Within
+  a type — a sort on a real field — the two agree exactly.
+
+## 0.4.3
+
+### Breaking changes
+
+- **`Usage.reported` retains what the endpoint actually said; `Usage.costUsd` is deleted.** Adapters now
+  pass their `usage` object through verbatim alongside the normalised counters, and guard on **presence
+  rather than truthiness** — an endpoint reporting `cache_read_input_tokens: 0` is saying there was no
+  cache activity, which is not the same fact as not reporting it at all, and all three adapters
+  collapsed the two. `addUsage` sums `reported` numerics key-wise (within one provider only, since
+  `prompt_tokens` includes cache hits where `input_tokens` does not) and leaves non-numeric values —
+  `service_tier`, latency objects — alone.
+
+  This is what makes the existing normalisation non-destructive rather than replacing it: the adapter is
+  the right party to map its own protocol, and it stays so. openai-compat still reports `inputTokens`
+  net of the cache hit so a mixed-provider turn can be totalled — but `prompt_tokens` now rides
+  alongside, so the subtraction can be checked, reversed, or reconciled against a vendor's dashboard,
+  and google's `thoughtsTokenCount` survives being folded into `outputTokens`.
+
+  `costUsd` had no producer and never has: a rate table cannot be keyed on counters that have discarded
+  the tier, the modality and the reasoning split. With the raw retained, a consumer computes cost from
+  `reported` and holds the answer itself, so the slot has no consumer either. Removed rather than left
+  as dead surface (the CLI and web footers stop rendering it).
+
+- **The usage carrier carries a `UsageScope`, not a bare sink, and scopes nest.** `UsageCarrier.run`/
+  `tryCurrent` now deal in `{ entries, site?, parent? }`, and `withUsageScope(fn)` hands the scope to
+  `fn` so a caller can read what accrued. A scope opened inside another rolls its entries up into the
+  parent when it settles (including on rejection — the tokens were spent either way), so a sub-turn can
+  be asked what it alone cost without its spend disappearing from the turn containing it. Previously
+  `withUsageScope` established a fresh, empty sink and *shadowed* any enclosing one; that was invisible
+  only because nothing ever opened a second. Hosts implementing a carrier need the type change only;
+  `createSerialUsageCarrier` and the CLI's ALS carrier are updated.
+
+- **Accounting moved off the message that produced it and onto the turn head.** `Message.usage` is
+  replaced by `Message.activity: TurnEntry[]`, and `tool-result` blocks no longer carry `usage` at all —
+  everything a turn caused is an entry anchored on that turn's user message, self-describing via its
+  `site` and causal `traceId`. `createMessage` no longer takes `usage`. Reading is unaffected for anyone
+  using `usageByProvider`, which tolerates the old shapes; a consumer reaching into `m.usage` or
+  `tool-result.usage` directly should use `turnActivity(messages)` or `usageEntries(messages)`.
+
+  The move is what makes a retried turn account correctly: a retract-and-rerun pops the assistant and
+  tool messages into a retraction marker's payload, where no reduction over `session.messages` will ever
+  find them, so a retry silently under-reported by the attempt it discarded. The turn head is the one
+  message the pop keeps. Locality is not lost — `site` already names the round or tool call.
+
+- **`WatchVisibility.visible` takes a `VisibilityQuery` and is consulted for every notification kind.** The
+  predicate could not see the `kind` it was deciding about, so a consumer could not express a per-kind
+  delivery policy — routing a partitioned namespace and addressing a fact to a recipient are different
+  policies over the same stream, and only an implementation knows which of its kinds wants which. It could
+  not see `kind` because the caller had already gated on it: `frontend-web`'s firehose consulted the
+  predicate only for an `ItemChange` carrying a principal, so every plugin-defined kind was fanned out to
+  every connection with no hook capable of stopping it. Harmless on the in-process bus (one process, one
+  user); wrong the moment a distributed `Notifier` bridges an addressed fact in from another instance —
+  which these docs explicitly invite. The gate is gone and the judgement moved behind the interface: the
+  frontend hands over everything it knows and takes no position on policy.
+
+  `visible(q)` where `q` is `{ viewer, kind, namespace?, id?, origin? }` — an object rather than a fifth
+  positional because `kind`/`namespace`/`id` are three adjacent strings around two `Principal`s.
+  `namespace`/`id` are optional because a kind may address no item; `origin` was the 4th parameter. An
+  implementation must **fail open** on kinds it has no policy for, since it is now asked about all of them.
+
+  No behaviour change: the profiles backend's one policy is partition routing, meaningful only for an
+  item-addressed change with an owner, so it returns `true` when `namespace`/`id`/`origin` is absent —
+  exactly what the caller's kind gate used to do. The filtered set and every answer are identical.
+
+### API gaps filled
+
+- **`limit: 0` is the count form of a store query.** The filter runs, `QueryResult.total` answers, and no
+  document is materialised or cursor issued — so "how many sessions mention invoices?" no longer means
+  fetching every one of them and measuring the array, which was the only way to ask and cost the model
+  the whole result to read a single number. It is a page size of zero rather than a new `count` action or
+  a new grammar key because that is already what the word means, in the AST and in a backend's native
+  query alike: fetch no rows, report how many there were. One consequence is that every store-backed
+  `query` action gains it at once, including tools that do not exist yet, and it composes with `where`
+  rather than restating it. Every backend delegates paging to `executeQuery`, so all of them (filesystem,
+  sqlite, google-drive, IndexedDB, the caching decorator, the profiles delegator) answer it from the one
+  implementation; a pushdown backend compiles it to `SELECT COUNT(*)`.
+
+- **Every tool call is timed, and the number is kept.** The runner measured a tool's duration, handed it
+  to the `toolresult` hook and then discarded it, so a consumer had to re-derive it — less accurately —
+  from event arrival times. It is now persisted as a `{ kind: 'span' }` entry and carried live on
+  `tool:end`. A span is its own arm rather than a field on an accounting record because most tool calls
+  spend no tokens at all (`bash`, `http`, `workspace`): hanging duration off a `UsageRecord` would
+  capture it precisely for the tools that happen to call an LLM and lose it for every other one.
+
+  Provider calls carry their own bracket too (`startedAt` / `durationMs` on the call entry) — matbot's
+  scope around the call, distinct from any server-side latency an endpoint reports, which arrives in
+  `usage.reported` like any other provider-named field.
+
+- **`turnActivity(messages)` / `usageEntries(messages)`** — everything a set of messages records about
+  what happened, in message order, with no correlation to do. Filter by `traceId` for a turn, by `site`
+  for a tool call, or pass a whole session for its total; `usageEntries` is the calls without the spans,
+  and `usageByProvider` is a fold over that. One fact set answers "what did this tool cost", "what did
+  this user cost" and "how long did that take".
+
+- **`UsageRecord.traceId` names the turn that caused a call**, which is not the same question as where
+  the record ends up. A completion can be recorded after its turn commits (a detached trigger
+  classifier, a `followup` hook), and a retract moves messages underneath it. Carrying the cause makes
+  grouping by turn a query rather than an inference from adjacency.
+
+- **`UsageRecord.site` records where a completion happened** — `{ kind: 'round' }`, `{ kind: 'tool' }`
+  or `{ kind: 'hook' }`. This is the one accounting fact no adapter and no plugin can recover after the
+  fact, and it is what makes per-tool, per-user and per-task cost derivable by a plugin from a single
+  log without core knowing any of those groupings. Stamped by `recordUsage` from the site in force,
+  established by the runner around its own round and each tool executor, and by `HookRegistry` around
+  each handler (which already knew the channel and owning plugin). See `docs/ACCOUNTING-RATIONALE.md`.
+
+- **`FilePartition`** — a new optional `MatbotServices` member, registered by a backend that partitions the
+  file area (the profiles backend) and consumed by `frontend-web`:
+
+  ```ts
+  interface FilePartition {
+    current(): string | undefined;                              // the current file area, as an opaque token
+    enter<T>(token: string, fn: () => Promise<T>): Promise<T>;  // its inverse
+  }
+  ```
+
+  A file's address now comes from the router that placed the bytes rather than from a guess at the identity
+  in force, and the two halves are one round trip: `GET /files/~<token>/…` resolves through `enter` instead
+  of re-entering the token as a principal, which was the same guess one layer up. Base answers `undefined`,
+  so an unpartitioned deployment's URLs are byte-identical to before.
+
+### Bug fixes
+
+- **A completion run from a hook is no longer credited to whichever tool happened to be running.** The
+  runner attributed a tool's spend by slicing the turn's usage sink by index — mark the length before
+  the call, take everything appended after it — so any completion that merely *resolved* during a tool
+  call was booked against it. The triggers classifier does exactly that: it is kicked off detached
+  inside a `screen` hook and settles at an arbitrary later moment, so whose spend it became was decided
+  by a race. Attribution is now by the producer's own declared `site`, which the ambient carrier
+  captures where the work *starts*, so the race is unrepresentable rather than merely unlikely.
+
+- **Spend that was previously invisible now appears in the totals**, so figures will rise for anyone
+  running triggers or cognition. A `followup` hook ran outside any usage scope, making the triggers
+  agent-phase classifier free of charge on every completed turn; a round discarded by an in-situ restart
+  dropped its tally with the response, though the tokens were billed; and a retried turn lost the
+  attempt it discarded. These were under-reports, not a new cost.
+
+- **Accounting is flushed when the queue drains, not at a turn boundary.** "The end of a turn" is not a
+  well-defined moment to total anything at — steers terminate and resume, a retract re-enqueues the turn
+  it just popped, followup enqueues resubmissions, and a detached classifier settles whenever it
+  settles. A completion still in flight at one idle lands on the next, attributed by its own `traceId`.
+  Capture remains best-effort: state is disposed once a session is quiet and unsubscribed, and anything
+  still pending then is lost.
+
+- **A retract-and-rerun no longer loses its cost.** A redo re-runs an existing user turn under a FRESH
+  `traceId` and introduces no user message of its own, so the redo's entries had no turn head to anchor on
+  and the flush dropped them outright — the exact under-report that anchoring on the turn head was
+  introduced to prevent, reappearing one level up. A `TurnEntry` now carries `rootTraceId` and anchors on
+  the root's head when it has none of its own, which is the honest home anyway: a retry's cost belongs to
+  the turn being retried. Found by inspecting a live session — one turn held five entries and no assistant
+  message while its answer sat under another trace with none.
+
+- **A zero-length page no longer issues a cursor that pages forever.** `executeQuery` emitted one
+  whenever unread documents remained, including at `limit: 0`, where the next page starts at the same
+  offset and returns the same empty slice — a caller following the cursor never advanced and never
+  finished.
+
+### Optional
+
+- **sessions** — `session_action query` answers `{ total }` for `limit: 0`. It is the one query here that
+  cannot early-exit: the text columns it filters on are synthesized per session, so an exact count reads
+  every one of them, where a bounded page stops as soon as it is full. That is the expensive query on
+  this tool, deliberately — the scan is bounded by what is already on disk, while the array it replaces
+  is not bounded by anything the model can afford to read.
+
+- **tool-store** — the generated `<namespace>_action` tools document the count form in their `query`
+  grammar; they already forwarded `total`.
+
+- **frontend/web:** turn footers show a turn's spend, and stopped twitching to do it. Three defects, all
+  from the same mismatch — accounting is final when the pump's queue drains, which is later than the `done`
+  that draws the footer. A live turn showed a bare timestamp where a reload of the same turn showed the
+  tokens (the refresh skipped any turn that already had a footer, which is exactly the turn needing the
+  rebuild); the numbers then arriving swapped a bare `div` for a `details`, so the timestamp changed
+  container and gained a disclosure arrow a second after the turn finished; and footers drawn per `traceId`
+  put two under a retried turn — one with no answer left and an empty one under the answer — since a retry
+  is one VISIBLE turn spanning two traces.
+
+  The footer is now built once in its final shape and filled in place (an open breakdown survives), the
+  refresh only ever REPLACES an existing footer so an in-flight turn is left alone, and footers are drawn
+  per visible turn: a user message and everything up to the next one, across every trace in that span. The
+  refresh is ordered by a sequence token rather than debounced — two reads in flight can settle out of
+  order and paint an older session over a newer one, which a delay makes rarer rather than absent.
+
+- **triggers + cognition:** an interrupted trigger is recorded as interrupted, not failed. A trigger's tool
+  runs outside the runner's tool loop, so it never got the `INTERRUPTED_TOOL_RESULT` reframing: a mid-turn
+  steer aborted the signal and the raw abort reason landed in a durable marker as "remember_fact extraction
+  failed: steer", which reads as a real fault in a trace the user keeps. `dispatchTrigger` now records
+  `interrupted: true` and suppresses the warning, and `remember_fact` returns silently when its own
+  extraction round-trip is cut off.
+
+- **frontend/web + storage/profiles:** `url_for_resource` no longer stamps a partition segment onto files
+  that live in the shared base area. It minted the `~<id>` prefix from the identity in force, gated on the
+  presence of the `profile_action` tool — i.e. on "profiles are loaded", not on "these bytes went somewhere
+  addressable". A principal with no profile routes to the base area, so an ordinary file came back as
+  `/files/~matt/workspace/report.md`: a link that reads as partitioned, leaks the principal id into a URL
+  whose whole purpose is to be shared, and 404s the moment a profile of that name is created. The inference
+  was unsound in the other direction too — a principal may hold several profiles, and a profile may alias
+  its files onto another's area, so the identity does not name the area at all. The address now comes from
+  the backend that placed the bytes, through the new `FilePartition` member above.
+
+- **cognition:** `remember_fact`'s first trigger condition no longer treats specificity as durability. It
+  matched on "any specific name, number, date, location, relationship, or domain detail", which fires on
+  every sensor reading by construction — a battery voltage is the most specific thing in a session. Those
+  landed in `remembered_facts`, were merged into skills as if permanent, and then contradicted the next
+  reading of the same quantity (3990 vs 4023 mV, stuck vs un-stuck) — never a disagreement about the
+  world, just two timestamps of a changing one. The condition now requires the detail to still be true
+  tomorrow and excludes current status explicitly. Seeded with `importIfAbsent`, so it reaches new
+  installs only; an existing trigger must be updated in place.
+
+- **cognition:** dream-time merges stopped failing on legitimate deduplication. The merger prompt told the
+  model to fold a near-duplicate into the existing passage *and* that "the output's length must be >= the
+  input's" — two incompatible orders — and a `content.length < input.length - 20` guard then rejected the
+  merge when it obeyed the first, quarantining the fact permanently. Observed production failures were all
+  in-place dedup, shrinking a 15.5k skill by 34-274 chars.
+
+  The length instruction is gone (a stated length floor invites padding, which is exactly what a size check
+  cannot see), and the guard is now a shrink allowance of `max(100 chars, 3%)` — clearing observed dedup by
+  several multiples while still catching the loss of a subsection, with the floor because skills run small
+  enough that a bare ratio is tighter than whitespace jitter. A heading-presence check sits alongside it,
+  catching the trailing section dropped and made up for elsewhere. Both are tripwires for gross loss, not
+  proof of integrity. A structural trip now re-rolls once before quarantining: the same merge usually passes
+  on a second sample, and quarantine is terminal.
+
+- **tool-types:** the generated dts declares the **live tool registry**, not every plugin on disk. The scan
+  roots at each loaded plugin's `resolvedUrl` and then unions a glob of the monorepo `plugins/` tree onto it
+  (to catch host-constructed builtins like `plugin` and `provider`, which have no `resolvedUrl`), and every
+  `ToolContracts` key on the merged symbol was emitted — so the dts declared tools from plugins nobody had
+  loaded. In this repo that was six of them (`telegram_send`, `telegram_provider`, `telegram_open_door`,
+  `profile_action`, `share`, `bash_config`), fully typed and indistinguishable from the real ones.
+
+  They reached the model through `tool_function { action: 'types' }` and every skills_compiler codegen
+  prompt — which asserts "a tool not declared here does not exist" — and `ToolTypeIndex.check()` graded the
+  generated code against the same text. `await tool.telegram_send({ text })` therefore typechecked clean and
+  threw `Tool "telegram_send" is not registered` at runtime: the failure the check gate exists to prevent,
+  and one the repair loop cannot repair, because the code is correct against the types it was shown.
+
+  `buildMatbotToolsDts` now takes the live tool names and emits only those keys (the wire contracts and the
+  clash census are filtered with it); `ToolTypeIndex` and `skills_compiler` pass `tools.list()`. A scanned
+  root may supply a tool's *contract*; only the registry says a tool *exists*. The glob is unchanged, and
+  host-constructed builtins keep their scanned types. Omitting the argument keeps the whole-tree behaviour
+  the clash-census test wants. Node now behaves as the browser `ToolTypeIndex` already did. The per-turn
+  wire descriptions are unaffected — they were always keyed by the live registry.
+
+  What this does *not* fix: two roots declaring the same **live** name (`bash`, by `plugins/bash` and
+  `plugins/docker-bash`) still merge by Program file order, so an unloaded plugin's declaration can win and
+  describe the loaded tool. That is what `conflicts` reports; it is silent today only because the two are
+  identical.
+
+- **skills_compiler:** the typecheck-repair passes now carry the **specification**. Pass 1 opened with "THE
+  SPECIFICATION … it is authoritative" and handed over the skill, the distilled method and any operator
+  feedback; passes 2..4 saw only the environment block, the broken source and the diagnostics. `singleTurn`
+  is stateless and was called without a `system`, so nothing carried over — the spec was simply absent from
+  every repair, leaving "keep the behaviour identical" pointing at the broken code as its only stand-in.
+
+  A repair with no spec to fix *towards* can satisfy the compiler by deleting the behaviour that raised the
+  error: yielding a placeholder where a computed value belongs, dropping the offending field from the result,
+  or rewriting the `ToolContracts` arm to match whatever the implementation happens to produce — all of which
+  typecheck, and the last of which silently rewrites the contract other tools compose against. Over four
+  passes of "fix this" there was also nothing pulling successive attempts back towards the original intent.
+
+  The spec is now extracted once per path (`specBlock`) and used twice: in pass 1's prompt, byte-identical to
+  before, and as a standing `system` prompt for every repair pass, alongside a repair-specific discipline —
+  the source is a previous attempt, not a second source of truth; never resolve an error by removing what the
+  spec requires; restore anything an earlier pass dropped. Because it is `system` and identical across passes
+  2..N it is a stable cacheable prefix rather than context that grows with the attempt count, and the repair
+  prompt is now only what changes: the current source and the latest diagnostics.
+
+  Not covered: nothing grades whether the code that finally compiles *meets* the spec, so a pass-1
+  mis-implementation that typechecks still installs clean. The reasoning against a general "does this meet
+  the spec?" pass — and the structural form it would need instead — is recorded at the repair loop.
+
+## 0.4.2
+
+### Breaking changes
+
+- **The `plugin` and `provider` tools' contracts are now named, shared types in `plugin-api`, and the
+  browser implementations adopt node's field names.** Both tools have a node and a browser
+  implementation, and each declared its own `ToolContracts` arm. A registry key is registered by
+  declaration *merging*, so two declarations of one key are only legal while they are identical — these
+  were not, which made every program containing both a `TS2717`. `buildMatbotToolsDts` never read the
+  Program's diagnostics, so the error was invisible: one declaration won on file order and its shape was
+  emitted as the contract. In any tree containing `plugins/` — this repo, or an embedder vendoring it —
+  the **browser** shapes won, and a node deployment's generated code was typechecked against them. The
+  check loop therefore *rejected* `providers[].hasCredentials`, which node returns, and *accepted*
+  `providers[].hasKey`, which is `undefined` at runtime.
+
+  Both tools now declare `PluginToolContract` / `ProviderToolContract` from `plugin-api`, so there is one
+  declaration and it cannot drift. Renamed in the **browser** tool to match node and `matbot.yaml`:
+  `provider list` → `hasCredentials` (was `hasKey`), `provider add` → `module` (was `adapter`); its
+  `parameters` is `ModelParameters` rather than `Record<string, unknown>`. `ProviderRow` is now
+  `ProviderSummary`. Where the two runtimes genuinely differ the shared shape carries the superset and the
+  divergent member is optional (`DiscoveredPlugin.source`, `ProviderListResult.adapters`); each
+  implementation's `inputSchema` is unchanged and still the enforcement point.
+
+- **`FailedPlugin` moved from `core` to `plugin-api`.** It is part of `plugin list`'s result, so the
+  contract has to be declarable from a package the tools can reach. Still re-exported from `core`.
+
+### API gaps filled
+
+- **Builtin tool result shapes are named, exported interfaces, so they can be augmented.** They were
+  inline object literals, which closed the one extension point the rest of the API leans on: a host that
+  overrode a builtin tool and returned a superset could not say so — declaring its own arm is a merge
+  error, declaring nothing inherits a shape it does not return. `LoadedPluginSummary`, `DiscoveredPlugin`,
+  `PluginListResult`, `ToolSummary`, `ProviderSummary`, `AvailableProvider` and friends now take a
+  `declare module` augmentation like any other open registry, and it flows through to `toolResult`, the
+  `tool` proxy and the wire description. An undeclared field is still rejected.
+
+### Bug fixes
+
+- **`buildMatbotToolsDts` reports duplicate registry declarations instead of silently picking a winner.**
+  Detected from the merged symbol's declaration list, which also names which declaration won and
+  distinguishes a real clash from the legal identical re-declaration TypeScript never complains about.
+- **The dts scan roots any file that augments `plugin-api`, not only ones naming `ToolContracts` /
+  `MatbotServices`.** A file adding a field to a named result shape changes what a contract means without
+  mentioning either interface, so it was left unrooted and its field invisible to generators.
+- **Plugin-side augmentations of `plugin-api` interfaces are re-emitted into the generated dts.** The dts
+  references plugin-api types by name, so an augmentation lived in a file the generated compilation never
+  saw and the field vanished exactly where it was meant to be used.
+- **Named shapes are expanded in the wire description.** A tool description ships no declarations, so
+  `result: PluginListResult` would have told the model nothing. Expanded to the depth an inline literal
+  used to render, which also gives structure to tools that already referenced names (`Principal`,
+  `Trigger`, `StoreDef`, `DreamRun`).
+- **`plugin list` declares `resolvedUrl`**, which its node executor already returned. Conditional spreads
+  bypass excess-property checking, so the executor's binding never caught the omission.
+- **`--dump-tools` also emits the unfolded wire contract.** Each entry gains `wireContract:
+  { params, result }` alongside the description it was already folded into. Additive; existing
+  consumers are unaffected.
+
+### Optional
+
+- **web-bundle:** the baked per-tool wire contracts now come from the node compiler at build time rather
+  than the regex scanner, so the browser shows the model the same expanded shapes as node. The
+  compiler-free scanner still selects *which* tools are baked, and still handles http-fetched plugins at
+  runtime; it can now follow a named arm-union (`collectContractAliases`).
+- **google-drive:** its `plugin` override augments `LoadedPluginSummary` with `managedBy` instead of
+  casting the result to a wider shape.
+- **skills_compiler:** imports `SkillManager`'s type from `@matatbread/matbot-skills` (type-only, a
+  devDependency) instead of restating a two-method slice of the key. The slice was the last remaining
+  duplicate declaration — benign only because the full one happened to win — and being loose at runtime
+  never required disagreeing about the type. Consumption is unchanged (`services.SkillManager?.`, still
+  degrading when skills isn't loaded) and there is no runtime dependency.
+- **function-tools:** a defined function's `inputSchema` now carries the structure its signature declared.
+  Its params are projected twice from one parse — verbatim into the `toolContract` (TS to TS, lossless)
+  and into the `inputSchema` — and the second projection string-matched the whole annotation, so every
+  structural shape collapsed: `'a' | 'b'` → `{}`, `string[]` → `{ type: 'array' }`, `{ sql: string;
+  limit?: number }` → a bare `{ type: 'object' }`. Since the `inputSchema` is what the provider is given
+  and what `json-validation` enforces, the model was shown a contract in the tool description stronger
+  than the schema backing it, and validation had almost nothing to check. Literal unions now yield
+  `enum`, arrays `items`, inline object types `properties`/`required`, `Record`/index signatures
+  `additionalProperties`, and primitive unions a `type` array.
+
+  The conversion stays deliberately partial: a named or imported type, a union with a structural arm, and
+  a tuple's element types still degrade to the permissive form rather than to a guessed constraint. **A
+  defined tool now rejects calls it previously accepted** — a missing member of an object parameter, a
+  value outside a literal union — which is the point of it. One incidental effect: the Gemini adapter's
+  `items` injection (a loose `{ type: 'array' }` is rejected by that API) no longer has to fire for these
+  tools.
+
+- **New `pnpm run check:contracts`.** A tool with scannable source authors its parameters twice — as
+  `ToolContracts` arms and as an `inputSchema` — with nothing relating the two. They are deliberately
+  not identical (the arms are what a composer typechecks against; the schema is the loose gate the
+  provider is given and `json-validation` enforces), so neither can be derived from the other without
+  deleting what the other carries. The check therefore looks only for *contradictions*: a property in
+  one and not the other, a schema `required` no arm accepts, or two different value sets for the same
+  property. A schema looser than the contract is never reported — that is the documented multi-action
+  design. It reads the `--dump-tools` output, because the two artefacts only meet on the registered
+  `Tool` at runtime. Deliberate divergences go in the script's `ACCEPTED` map with a reason.
+
+  It found two divergences in the tree, both now resolved (below), so it currently passes.
+
+- **session_action: `immutable` is no longer part of the `query` contract.** The arm intersected the whole
+  of `StoreQuery`, which published `immutable` — a caller-to-store optimisation hint, not a query
+  parameter — as a tool input. The executor never read it: it hardcodes `immutable: true`, which is always
+  correct there, since every row is copied into a fresh summary and never written back. So the knob could
+  be passed by a composer and did nothing. Now `Omit<StoreQuery, 'immutable'>`. No behaviour change.
+
+- **http: `method` accepts `HEAD` and `OPTIONS`.** The schema enumerated five verbs while the executor
+  hands `method` straight to `fetch`, and `json-validation` enforces the enum — so two verbs the tool
+  fully supports were unreachable by the model. The TypeScript type stays the wider `string` on purpose,
+  recorded in the checker's `ACCEPTED`: `json-validation` runs on the `toolcall` hook, which only the
+  model-driven turn loop dispatches, so the enum guards what the *model* sends while a composition
+  (through `invokeTool`, which bypasses hooks) may legitimately use any verb.
+
+## 0.4.1
+
+### API gaps filled
+
+- **`CompletionRequest.parameters` and `SingleTurnRequest.parameters` are back, and no longer deprecated.**
+  0.4.0 removed them on the grounds that a per-call override belongs in the provider profile; that reasoning
+  held for *durable* model properties and not for transient ones, and the removal broke a downstream
+  consumer. Without them, poking a single call's behaviour — a lower `temperature` to classify, `thinking`
+  off for a cheap sub-call, a tighter `maxTokens` on output that gets parsed rather than shown — costs a
+  whole new provider profile in global, user-editable config, identical to its sibling but for one field.
+  That is a worse trade than the affordance it was meant to prevent.
+
+  Behaviour is exactly as it was before 0.4.0: shallow-merged over the named profile's own `parameters`
+  (request wins), resolved by the host before the adapter sees the config, and forwarded verbatim by
+  `singleTurn`. **Upgrading 0.3.x → 0.4.1 needs no change here**; only a consumer who already adapted to
+  the 0.4.0 removal can now revert that adaptation. The guidance, now documented rather than enforced by
+  absence: a profile describes the model, `parameters` describes one call.
+
+## 0.4.0
+
+### Breaking changes
+
+- **Host boot assembly moved off the `plugin-api` root to `@matatbread/matbot-plugin-api/host`.** The root
+  exported both what a plugin is written against and what an *embedder* uses to stand a machine up, which
+  made carrier installers, swap proxies, the mount table's producer half, `HookRegistry`, `createNotifier`
+  and the `Broadcaster` primitive look like stable author-facing API. They are not, and no plugin in this
+  repo imports one. Moved: `installPrincipalCarrier`, `enterPrincipal`, `createConstantPrincipalCarrier`,
+  `installUsageCarrier`, `createSerialUsageCarrier`, `recordUsage`, `currentUsageSink`, `withUsageScope`,
+  `contextSwitch`, `onContextQuiesce`, `flushIfQuiescent`, `unifyServices`, `forwardingProxy`,
+  `makeSwappable`, `createMountTable`, `singleTurnRequest`, `HookRegistry`, `createBroadcaster`,
+  `subscribable`, `createNotifier`, `scopedNotifier`, and the types `SwapFn`, `MountTable`,
+  `PrincipalCarrier`, `UsageCarrier`, `Subscribable`, `Broadcaster`, `Routed`, `RoutedFilter`.
+
+  Three subsystems are split rather than moved whole, keeping their author-facing half at the root:
+  `runAs`/`currentPrincipal`/`tryCurrentPrincipal`; the `Notifier` type with `notifyingStore` and the two
+  kinds; and `Mounted`/`MountConsumeOptions`/`MountedMachine` (the contract of `services.mounted`).
+
+  **`@matatbread/matbot-core` re-exports the whole of `/host`, so a host that depends on core needs no
+  change.** Only a consumer importing boot machinery directly from `plugin-api` does — repoint it at
+  `@matatbread/matbot-plugin-api/host` or at core. The boundary is enforced by file layout
+  (`host-machine.ts`), not by an export list, so it cannot erode by accident.
+
+- **`ProviderRegistry` is now one interface, not two.** `core/src/types.ts` declared a second, unrelated
+  `ProviderRegistry` (`register(adapter)` / `resolve(name)`) alongside its `export type *` of plugin-api —
+  and an explicit local export wins over a star re-export, so
+  `import type { ProviderRegistry } from '@matatbread/matbot-core'` silently resolved to the adapter
+  registry rather than the `ProviderConfig` map that `services.providers` actually is. Nothing imported it,
+  so nothing changes at runtime; what goes away is a name that resolved to the wrong shape with no error.
+
+- **`Session.contexts` is removed.** A required `string[]` on every session, written by `createSession`,
+  the web server and the skills compiler, and read by *nothing* in any package — system context is
+  contributed through `SystemContextContributor`, not carried on the session. All 188 sessions in the
+  development store had it empty. Old data keeps the field harmlessly as an excess property, exactly like
+  the already-undeclared `ownerPrincipalId`/`persona`; no migration needed.
+
+- **`CompletionRequest.parameters` and `SingleTurnRequest.parameters` are removed.** Both were
+  `@deprecated` with a note explaining that their obvious use is an anti-pattern (a per-call override takes
+  control away from the provider config, where parameters belong and stay user-editable — prefer a
+  dedicated provider profile). Both hosts honoured them and *no caller in the repo set them*. Shipping a
+  deprecated field into a stable line means carrying it to the next major, so it goes now.
+
+  **Reverted in 0.4.1** (see above) — "no caller in the repo" was not the same as no caller, and the
+  argument did not hold for transient per-call behaviour. Do not act on this entry.
+
+- **`MatbotRuntime.hooks` is typed `HookRegistrar`, not the `HookRegistry` class.** A plugin may only
+  `register` and `removeByPlugin`; the class also carries the host's dispatch surface (`runScreen`,
+  `runContribute`, `runToolCall`, `runToolResult`, `runFollowup`), which the plugin contract was
+  advertising. The tell was that the per-plugin scoped facade had to be `as unknown as HookRegistry`-cast
+  to satisfy its own declared type; that cast is gone. `HookRegistry` still exists, `implements
+  HookRegistrar`, and lives in `/host`, where core dispatches from it.
+
+- **`PLUGIN_API_VERSION` is `'0.4'`, and now means this package's `major.minor`.** It read `'0.1'`
+  throughout 0.3.x, so it conveyed nothing — while being the one string every third-party plugin hardcodes.
+  The gate is unchanged (major must match exactly; a *newer* declared minor warns and loads), so at 0.x
+  this breaks nothing: an existing plugin declaring `'0.1'` still loads, which a test now pins. It matters
+  at 1.0.0, where a plugin still declaring `'0.x'` fails loudly instead of loading against a contract it was
+  never built for. Declare `apiVersion: PLUGIN_API_VERSION` and it stays correct for free.
+
+### API gaps filled
+
+- **`@matatbread/matbot-core` re-exports every branded error, not most of them.** `readOnlyError`,
+  `isReadOnlyError` and the `ReadOnlyError` type were missing from core's root — `export type *` strips a
+  guard's value meaning, and the explicit re-export list had been kept by hand. A consumer importing from
+  core got some guards and silently missed others, including the one the turn pump itself depends on.
+
+### Bug fixes
+
+- **A provider call that fails mid-turn no longer discards the rounds that succeeded.** Nothing is written
+  mid-turn — `runSession` commits once, at whichever terminal it reaches — so an exit that returned without
+  committing threw the whole turn away. The failed-provider-call exit did exactly that, and the multi-round
+  case is precisely the tool-using one: an upstream 500 or a dropped connection on round 3 lost two
+  completed rounds of assistant messages and tool results that the frontend had already drawn, and that the
+  next turn (which re-reads from the store) would then be missing. The same defect had already been found
+  and fixed on the `toolcall`-abort exit; the shape that allowed both is gone (see the refactor below), and
+  every terminal now commits through one funnel.
+
+- **A tool-name collision can no longer crash the process or revive an unloaded plugin's tool.**
+  `ToolRegistry.register` returns `void` because the no-collision path completes in the calling tick, and
+  every one of its ~34 call sites fire-and-forgets. That left the collision branch — where the host may
+  ask the user whether to overwrite — as the one `await` with no caller to own its outcome. A throw there
+  (the settings read, or a `PromptFn` that rejects rather than defaulting, which is the documented
+  non-interactive contract) was an unhandled rejection, i.e. process exit under Node's default, reached by
+  the ordinary act of two plugins claiming one tool name. The branch now owns its own failure and resolves
+  to keep-existing. It also re-checks the plugin's load extent before registering: `setup()` has long
+  returned by the time a slow collision resolves, so an unload — or a `setup()` throw and its rollback —
+  could land first and the late registration would revive a tool owned by a plugin that is gone.
+
+- **A plugin's mount interests are dropped on unload.** `services.mounted.observe()`'s only cleanup path
+  was an aborted `signal`, and `signal` was optional — so a plugin that omitted it (`storage/profiles`
+  did) left a live interest behind, whose handler kept firing into a torn-down closure on every later
+  quiescent edge. Because reload is unload + load, each reload generation added another one, and the mount
+  table catches and logs a handler throw, so the accumulation was silent: N stale handlers doing duplicate
+  work against dead state, with a stale cache able to win. The host now binds every plugin-scoped
+  `observe()` to that plugin's load extent and aborts it in `unloadPlugin`, alongside the existing
+  tool/hook/service removals. `MountConsumeOptions.signal` keeps working and becomes a *narrowing*
+  convenience ("end earlier than my unload"), not the cleanup path.
+
+- **`teardownPlugins` named the wrong plugin in its error log.** `Promise.allSettled` ran over the reversed
+  plugin list while the log indexed the unreversed one, so a teardown failure was attributed to the plugin
+  at the mirrored position. Diagnostics only.
+
+### Optional
+
+- Internal refactors with no behavioural change, listed because they move code a consumer may be reading:
+  `plugin-api/src/types.ts` is now a barrel over `types/` (one file per domain, 18 of them — all 77
+  exported names and every declaration body preserved verbatim); host boot assembly split out of
+  `plugin.ts` into `host-machine.ts`; `runSession`'s six exits funnel through one commit-and-yield; the
+  three copies of "fold durable context onto the user turn" became `foldOntoUserTurn` in
+  `plugin-api/src/session.ts`; claiming a raced screen verdict is one step rather than two called at three
+  sites; `bindPluginOps` replaces the two hand-written `ToolContext` plugin-op closures; and
+  `makePluginSettings`' two near-identical CAS retry loops became one `update(mutate)`.
+
+- `ToolContract`'s phantom fields are keyed by non-exported `unique symbol`s, so the type is
+  uninhabitable — a hallucinated result shape can no longer be cast into existence. No effect on
+  `ToolResultOf`/`ToolResultFor`/`ToolProxy`, which only ever `infer` through the arms.
+
+- `unifyServices` no longer traps `has`, so `'Foo' in services` is structural rather than a registry
+  lookup. The documented presence check is unchanged: `services.Foo !== undefined`.
+
+- Docs: the five open-registry augmentation points (`MatbotServices`, `ToolContracts`, `Notifications`,
+  `MarkerData`, `ProviderMeta`) are one technique, now named and explained once — in `docs/DEVELOPING.md`
+  for plugin authors and `CLAUDE.md` for maintainers — with each declaration pointing at it instead of
+  restating it.
+
+## 0.3.10
+
+### Breaking changes
+
+- **`ProviderConfig.fallback` is removed.** It was declared in `plugin-api`, explicitly parsed out of
+  `matbot.yaml` by the config loader, and copied field-by-field through the node app — and read by
+  nothing, in any package. Nothing changes at runtime, because nothing ever consulted it; what goes away
+  is a config surface that silently did nothing. Someone could set `fallback: other-profile` on a
+  provider, get no parse error and no warning, and reasonably conclude that a failing provider would
+  fail over. Removed rather than implemented because failover is a real design question — it has to
+  decide how two providers billed for one turn are accounted, and what happens to a tool-call's
+  `ProviderMeta` round-trip token when the retry lands on a provider that never issued it — and a
+  stub answering none of that is worse than nothing. An existing `fallback:` key in a config is
+  ignored exactly as before.
+
+### API gaps filled
+
+- **A tool call cut off mid-arguments is now a recoverable round, not a dead turn.** When a response hit
+  its token limit part-way through a large tool call, the adapter threw — `Tool "x" arguments could not
+  be parsed … increase the provider's maxTokens` — which ended the whole turn. Raising `maxTokens` only
+  moves the ceiling; it cannot survive one call larger than the new ceiling, so the user got a dead end.
+  The `tool-call` `CompletionEvent` now carries an optional `truncated: { bytes, stopReason? }`, and the
+  runner answers such a call with an error result **without executing it** (`input` is `{}` — the real
+  arguments are unrecoverable, and the wire requires an object). The model reads the failure in the slot
+  it expects and retries smaller, which is the self-correction the loop already performs for a rejected
+  or unknown tool.
+  - **No retry counter.** A model that keeps overflowing burns rounds and meets `maxRounds`, exactly as
+    one repeatedly calling any failing tool does. One bounding mechanism, not two.
+  - **The pairing is what makes it safe**: the assistant message carries a `tool-call` block for the
+    severed call, and an unpaired `tool_use` is rejected by the next submission.
+  - **`toolresult` runs for it** (`toolcall` does not — there is nothing to judge, the call cannot
+    proceed whatever a hook says). That is the seam for advice the harness cannot have: *which* of a
+    given tool's parameters offers a cheaper edit is the tool author's knowledge, not core's. Narrow
+    with the exported `isTruncatedToolResult` rather than duck-typing the result.
+  - Detectable only where arguments stream as a severable JSON *string* — the Anthropic
+    (`input_json_delta`) and OpenAI (`function.arguments`) shapes. Gemini delivers each `functionCall`
+    complete with `args` already an object, so there is nothing to sever; `chatjimmy` and
+    `customer-services` emit no tool calls at all.
+- **A response cut short is recorded instead of vanishing.** A new `truncated` `CompletionEvent`
+  (`reason: 'max-tokens' | 'stream-end'`) reports that the provider stopped the response rather than the
+  model choosing to. The far commoner case has no tool call in it at all — prose stopping mid-sentence —
+  and matbot surfaced that nowhere: the stop reason was read and then used only in an error message that
+  fired for tool calls alone. The runner persists it as a `matbot-truncation` marker and carries it
+  live. Marker-role deliberately: a reader and an audit see it, the model does not — its own text is
+  already truncated in the transcript, and a block telling it so invites narrating the cut-off rather
+  than continuing past it. Acting on it (continue, re-ask with a larger budget) is a `followup` hook's
+  business. Emitted by the anthropic, openai-compat and google adapters; the two text-only adapters
+  expose no finish reason to report.
+  - Note for anyone switching exhaustively over `CompletionEvent`: it has a new arm.
+- **`ProviderConfig.maxRounds`** — an optional per-profile ceiling on the agentic rounds one turn may
+  take, a round being one provider call plus the tool batch it asked for. Reaching it ends the turn
+  (`aborted`, reason `round-limit: …`) instead of starting another round; absent ⇒ unbounded, which is
+  the previous behaviour, so nothing changes for a config that does not set it. The runner's loop had no
+  upper bound at all, so a model/tool feedback cycle could run until an external timeout or a user
+  cancel.
+  - **On the provider profile, not global and not per-call**, because that is the unit spend is
+    denominated in: a local model can afford to grind where a frontier model at 100× the rate cannot,
+    and one deployment runs both. It is a sibling of `model`/`endpoint` and deliberately **not** a
+    member of `parameters`, which is forwarded to the endpoint unmodified — this never leaves matbot.
+  - **In core rather than as a hook**, because a ceiling reached through a plugin is a ceiling that
+    disappears when the plugin fails to load, and because expressing it as a hook turned out to require
+    three non-obvious things of every consumer: deriving the round number, knowing that `rejectTool`
+    does not actually bound the loop (it only feeds an error back — an uncooperative model keeps
+    driving full-history provider calls), and therefore staging a soft nudge ahead of a hard stop. That
+    is a great deal of subtlety for what should be a number.
+  - Validated at the config boundary: a non-integer or `< 1` value is rejected with a clear message
+    rather than clamped, since silently treating `0` as "no turn may do anything" would read as a
+    broken provider. Settable and visible through the `provider` tool's `add`/`list` as well as
+    `matbot.yaml`.
+- **A tool can hand the model something to look at.** New `model-content` `ToolEvent`, carrying
+  `ModelContent[]` (the inline `image` / `document` / `audio` arms of `MessageContent`). The runner pins
+  the media directly after the tool message it answers and splices it into the outgoing copy for the
+  rest of the turn. Previously a tool could return only what the model *reads* — its `result`, serialised
+  as JSON — so an image or a PDF could reach the model by no route at all.
+  - **Wire-only: never persisted.** The transcript records what the tool returned, not the bytes it
+    showed, so a session does not accumulate base64 and there is no exit path that has to remember to
+    strip it. A later turn needing the bytes again calls the tool again — the same pull the model
+    already performed.
+  - **Rest-of-turn, not next-call-only.** Withdrawing content the model has already seen breaks the
+    prompt cache from that point and leaves it referring to something no longer there. The cost
+    corollary: a large document is re-sent on every subsequent round, so hand over the smallest thing
+    that answers the question, and note that `maxRounds` bounds how often it is paid for.
+  - **No new service and no `FileStore` dependency.** Where the tool got the bytes — a `FileStore`, an
+    HTTP fetch, a chart rendered in memory — is the tool's business; core carries them to the wire and
+    drops them. `files` is optional on both `RunSessionOpts` and `ToolContext`, so routing media through
+    it would have made multimodal impossible without one.
+  - Deliberately *not* a `PipelineEvent`: nothing durable backs it, so a frontend that drew it live
+    would show something that vanishes on reload. A tool that wants the user to see it too has `file`
+    and `marker` already.
+- **`document` reaches Anthropic and Gemini natively.** It degraded to a `[Document: name]` text
+  placeholder in every adapter — the block existed in `MessageContent` and no provider ever received
+  one. Anthropic now gets a native `document` block (base64 for `application/pdf`; `text/*` decoded into
+  a plain-text source, which is the shape that surface takes); Gemini gets `inlineData`, which also
+  covers `audio`. Anything Anthropic has no representation for keeps the placeholder. `openai-compat`
+  is unchanged: it fronts DeepSeek, vLLM, ollama and llama.cpp as well as OpenAI, and the file/audio
+  parts are not portable across them.
+
+### Bug fixes
+
+- **`followup` now runs only for a turn that actually committed.** It is documented as post-commit and
+  the code said it was "skipped on abort", but the gate was `!ac.signal.aborted` — which knows about the
+  two signal-driven aborts (a steer, a user cancel) and not the policy ones. A `screen` hook or a
+  `toolcall` hook refusing a turn, and any turn ending in `error`, therefore still got a followup pass
+  over history containing no completed response, where a hook judging "the assistant's answer" was
+  reading the previous turn's. Worse, a `resubmit` from there undoes the stop that just happened: for
+  the new `maxRounds` ceiling it would have handed out a fresh budget, making the limit worth up to
+  `MAX_RESUBMIT_DEPTH` times what was configured. The pump now tracks which terminal event the turn
+  ended on and runs `followup` only for `done`. A hook that wants to observe a failed or interrupted
+  turn should publish on the `Notifier` from wherever the failure arises, which is where that fact
+  actually is.
+- **A `toolcall` hook returning `abort` no longer discards the whole turn.** It was the one terminal
+  path in the runner that returned without persisting, and nothing is written mid-turn — so a hook
+  aborting on a late round threw away every earlier round's assistant message and tool results along
+  with the current response, all of which the frontend had already drawn. A reload showed a bare user
+  message. The turn is now committed before the `aborted` event.
+  - Committing it requires closing the `tool_use`/`tool_result` pairing, since the assistant message
+    carries a `tool-call` block per pending call and an unpaired `tool_use` is rejected by the next
+    submission (Anthropic 400s; nothing downstream reconciles them). An abort is a turn-level stop
+    rather than a verdict on the tools, so the call the hook judged and any later calls in the same
+    round are recorded as not-run.
+  - The judged call now also gets its `tool:end`. Previously `abort` returned between `tool:start` and
+    `tool:end`, leaving a frontend with a tool bubble that never closed.
+- **`complete()` no longer loses the input and cache token counts of an out-of-band completion.** Both
+  hosts accumulated the response's usage by overwriting on each `usage` event rather than folding, but
+  an adapter may report one call's usage in several parts: the anthropic adapter sends input and cache
+  counts on `message_start` and output tokens on `message_delta`. Last-event-wins therefore returned
+  `inputTokens: 0` with no cache figures for every `complete()` / `singleTurn()` against an Anthropic
+  provider — `single_turn`, a classifier, a titling pass, anything a plugin runs off-conversation — and
+  the same zeroes went into the ambient usage sink, so a tool's attributed spend under-reported too. The
+  loop now folds with `addUsage`, exactly as the runner has always folded a turn's usage, so the two
+  accounting paths agree. Adapters that report one cumulative event at end of stream (google, chatjimmy,
+  and OpenAI-compatible endpoints) are unaffected: folding a single event equals overwriting it.
+- **The anthropic adapter no longer emits adjacent same-role messages.** It rendered one wire message
+  per neutral message, so any two neighbours that landed on the same role went out as-is — which the
+  Messages API does not accept. It was reachable before this release (an assistant turn stripped back
+  to text by a thinking-block elision, next to another assistant turn) and is reachable by construction
+  now that tool-supplied media follows a tool message, itself rendered `user`. Adjacent contents fold
+  into the previous message, which is what the google adapter has always done for the same reason.
+
+### Optional
+
+- **storage/filesystem — a document id that isn't filename-safe is escaped, not rejected.**
+  `FilesystemStore` validated ids against `^[\w-]+$` and threw `Invalid store id` for anything else,
+  but a `Store` id is an arbitrary string: a skill keyed `scope:name` and user-scoped state keyed by
+  email address are both unstorable, so every `get`/`set` for them threw at runtime. Anything outside
+  `[A-Za-z0-9_.-]` is now percent-escaped for the filename instead (`.` left readable — it cannot
+  traverse, since a `.json` suffix is always appended, making an id of `..` the file `...json` inside
+  the store directory). The set that was previously allowed escapes to itself, so existing documents
+  keep their filenames and there is no migration; `%` cannot occur in one of those older names, so the
+  two eras cannot collide. Escaping is one-directional — nothing decodes, because `query` reads each
+  document's `id` from its own contents.
+  - **`query` enumerates them too.** Its directory filter was the same narrow `^[\w-]+\.json$`, so an
+    escaped id would have been written but then skipped by every listing — the widened filter still
+    excludes the `<name>.json.tmp` scratch files an atomic write leaves behind.
+  - **A write now invalidates its own parse-cache entry again.** `forget()` built its key from the raw
+    id while `remember()` keys on the on-disk name; for an id that escapes to something else the two
+    diverged, so `set`/`delete` stranded the stale entry and a subsequent `immutable` query served the
+    superseded document.
+
+## 0.3.9
+
+_Provenance stops citing itself, and says which of a claim's terms it actually found. Plus: the
+Anthropic adapter no longer discards a thinking block delivered whole on its opener, and the provider
+tools stop presenting their parameter list as a closed set._
+
+### Optional
+
+- **provenance — a tool can be excluded from the search pool, and `determine_provenance` excludes
+  itself by default.** Its own results are verdicts *about* claims rather than observation of the world,
+  so a second pass over a session it had already judged found its own prior output and cited it as
+  evidence for the very claim that output was a verdict on — circular, and confidently so, since the
+  extract genuinely does contain the claim's every key. The exclusion list resolves at three levels:
+  the `ignoreTools` call parameter, then a pin held by `provenance_config`, then the coded default
+  (`["determine_provenance"]`). An explicit empty array at either settable level means "include
+  everything" and is distinct from omission, which falls through to the next level; the same
+  three-level shape also serves suppressing a verbose tool whose output is noise rather than record.
+  Only tool output is filtered — `USER` messages never are, because a user quoting a tool result is
+  still the user speaking, and the quotation is legitimate provenance for what they were told.
+  `provenance_config` now carries both settings: `set` takes `provider` and/or `ignoreTools` (at least
+  one, each validated independently), `get` reports the current values *and* the coded default so a
+  caller can see what it is overriding, and `clear` resets both.
+- **provenance — a strict-key veto is its own verdict, and every result says which keys were found.**
+  A caller-supplied key appearing nowhere zeroes the search (it always did — material found on the
+  *other* keys would read as corroboration for a term the session does not mention), but the empty
+  result was then indistinguishable from finding nothing at all, and the two mean opposite things:
+  "this specific term isn't here" is a located absence, "nothing bearing on this is here" is a diffuse
+  one. The first is now reported as `vetoed`, skipping both the reader and the cold probe — the veto is
+  about session content, not about the model's prior, so re-asking the model would answer a different
+  question. Alongside it, every verdict carries `keyHits`: per key, whether any spelling of it was seen
+  and which sources it was seen in (`USER`, `TOOL:<name>`). On a composed claim that is the part a
+  verdict alone cannot express — which terms are retrieved and which are fabricated — and a `vetoed`
+  verdict names its offender as the entry with `found: false`. The tool description now asks callers to
+  split composite terms into their discriminating parts, so the veto can pinpoint rather than merely
+  fire.
+- **providers/anthropic — a thinking block delivered whole on its opener is no longer discarded.** The
+  stream handler seeded `{ thinking: '', signature: '' }` on `content_block_start` and filled it from
+  the subsequent deltas, which is what the Anthropic API itself sends; an Anthropic-compatible gateway
+  that puts the entire payload inline on the opener and sends no deltas therefore stored an empty
+  block. The opener's own `thinking` and `signature` are now the seed, so both shapes round-trip.
+- **provider tools — the `PARAMETERS` list is labelled as an example, not a schema.** Both the node
+  `provider` tool and its browser counterpart list `maxTokens` / `temperature` / `topP` under a heading
+  that read as the permitted set, so anything absent from it looked unsupported. `parameters` is passed
+  to the endpoint unmodified and its contents are model- and provider-specific; the heading now says so.
+
+## 0.3.8
+
+_One notification bus replaces every bespoke "something changed" channel. Three private streams are
+deleted outright; the web UI reads one stream; live session/file/skill/share updates now reach a
+second browser. Also: a new `provenance` plugin traces a claim to the tool result or user message it
+came from, and a running turn now owns its session document rather than losing edits to it silently._
+
+### Breaking changes
+
+- **`ToolRegistry.watch()` and `watchPlugins()` removed**, with `ToolRegistryEvent` and
+  `PluginRegistryEvent`. Both registries were broadcasters over the same primitive the new bus is, so
+  keeping them was duplication rather than layering. They publish a `RegistryChange` with
+  `registry: 'tools' | 'plugins'` instead, and consumers subscribe to `services.Notifier`. A `tools`
+  notification carries the registering plugin's name in the advisory `detail`; resolve the name for
+  anything authoritative. `SkillManager.watch()` went the same way.
+- **`FileStore.watch()` removed**, with `FileEvent` and `WatchVisibility.watchFiles`. It existed to
+  detect writes made outside matbot — but matbot writes `.data` and nothing else, and every in-process
+  writer now announces itself, so no first-party feature depended on it. As a core interface it was
+  actively misleading: only the filesystem store implemented it, sqlite re-broadcast its own writes
+  (which the bus already carries), and Drive and OPFS returned a stream that yields nothing — making
+  "this backend cannot watch" indistinguishable from "nothing has changed". Watching arbitrary
+  filesystem activity is a plugin's job: it can watch whatever it likes and publish onto the bus, which
+  every sink already understands. `WatchVisibility` keeps `visible()` — the part that was ever a
+  contract rather than a transport.
+- **The `StoreChange` envelope is removed from `types.ts`.** The self-describing change shape that the
+  partitioned CRUD streams passed around is superseded by `ItemChange` on the bus, which carries the
+  same `namespace`/`id`/`operation`/`detail` plus attribution and ownership. Nothing reads the old
+  envelope any more.
+
+### API gaps filled
+
+- **`Notifier`** — a swappable `MatbotServices` member with an in-process host default:
+  `notify` / `subscribe` / `consume` over one `Notification` envelope. Matbot owns the envelope and the
+  registration surface, not delivery: no persistence, no replay, no delivery guarantee, so a sink
+  re-queries on attach and treats a notification as invalidation. Within a plugin's `setup()` it is
+  scoped, so published notifications carry that plugin's name.
+  - The envelope discriminates on `kind` (the shape — `ItemChange`, `RegistryChange`, or an
+    augmentation of `Notifications`) *and* carries attribution (`instance` / `plugin` / `source`) as
+    separate fields, so a sink can filter on either or both. `principal` is ownership — whose data
+    changed, the input to `WatchVisibility.visible` — and is never conflated with the producer fields.
+    `kind` is **open at runtime**, so a `switch` over it must always have a `default`.
+  - **A `kind` is `<package-name>#<InterfaceName>`** — `'@matatbread/matbot-plugin-api#ItemChange'`,
+    `'@matatbread/matbot-plugin-api#RegistryChange'`. Unlike a type name, a `kind` is globally scoped
+    and an importer cannot rename it out of a collision: two plugins choosing the same bare word is an
+    unfixable declaration-merge conflict in `Notifications`, and across a bridge it is a silent
+    mis-narrowing of one instance's payload into another's shape. The package name, already unique,
+    does the qualifying, and it names the package that *defines* the shape, never the one emitting it
+    (`plugin` is the emitter; four plugins emit `ItemChange`). `ItemChangeKind` and `RegistryChangeKind`
+    are exported from `plugin-api` and re-exported by `core`, so a consumer gets a renameable handle
+    back: `import { ItemChangeKind as Changed }`.
+  - **An arm never declares `kind`.** `NotificationBase` has no such field; `Notification` grafts each
+    arm's `Notifications` key on, so the tag cannot disagree with the key it is registered under. An
+    augmenting plugin declares its interface, registers it under `'<package>#<Name>'`, and is done.
+    `NotifyInput` rejects an unqualified key at the `notify` call site (in the compilation that declared
+    the augmentation, since the mapped type resolves at the use site), and `createNotifier` warns at
+    runtime for the producers TypeScript never sees: a plain-JS plugin, or a bridge injecting a foreign
+    instance's traffic.
+  - **Identity, never value.** An `ItemChange` carries `namespace`/`id`/`operation`; `detail` is
+    advisory (a cosmetic in-place UI update at most). Events are stale the moment a concurrent writer
+    lands, so consumers read through the store. Publish `ItemChange` for any invalidation of an
+    addressable item, whatever holds it — a `Store`, a `FileStore`, a share that passes through neither;
+    define a kind of your own only when you carry something a consumer cannot get by re-reading
+    (progress, a measurement), which `detail` is not the place for.
+  - **Distributed left open, not built.** A registered implementation may forward off-box; it stamps
+    `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
+- **`notifyingStore(store, notifier, namespace, source)`** — wraps a store so every successful write
+  announces itself. For a namespace with one writer an explicit `notify` is clearer; this is for one
+  with many (`sessions` has nine), where it cannot be forgotten by the next writer to arrive.
+- **`StoreQuery.immutable`** — the caller's promise not to mutate the documents a query returns,
+  which frees a backend to hand back shared instances rather than freshly-materialised ones. A pure
+  optimisation hint: a backend may ignore it and nothing changes, so it is never load-bearing for
+  correctness. Set it only where the promise is actually kept — a read-modify-write path (pull a page,
+  edit a document, `cas` it back) must not, since the instance it edits may be one another caller is
+  still reading.
+- **`ComposedCallContext`** — the read-only identity of the call a composed function is running under
+  (`callId`, `sessionId`, `provider`, `workdir`, `signal`), for hosts that inject a calling surface into
+  model-authored code. Deliberately much narrower than `ToolContext`: identity, not capability, so
+  `vault`, `files`, `prompt` and plugin (un)loading stay reachable only through tool contracts. A tool
+  with real source still takes `ToolContext` and needs none of this.
+
+### Bug fixes
+
+- **Changes that had no channel at all now have one.** A session created, renamed, archived or
+  auto-titled in one browser reaches another; a first share or an unshare reaches the recipient's list;
+  a file deletion is representable (`FileEvent` had no operation, and the filesystem watch dropped
+  deletes entirely).
+- **Deleting a shared-in item un-shares it.** The profiles backend routes a `Store.delete` (and a
+  `FileStore.delete`) of an item shared INTO the current partition through its own `unshare` path,
+  rather than relying on the raw unlink happening to spare the owner's file: the shared-in cache is
+  updated and the change announced, where before both were stranded. No API change — a delete is a
+  delete to the caller, which may not have profiles loaded at all; only that layer can tell the two
+  apart.
+
+### Optional
+
+- **function-tools — defined functions move from plugin settings to a `functions` store. Existing
+  definitions are NOT migrated in code and will be lost.** Settings is a key-value bucket for
+  configuration, held as one document per plugin: every `define` read-modify-wrote the plugin's entire
+  settings document to append to an unbounded array (27 KB in one real install), two concurrent defines
+  clobbered each other wholesale, and the set was invisible to the notification bus. Each function is now
+  its own document in the `functions` namespace, keyed by its name — writes are per-function and
+  independent, `list` reads through the store proxy instead of an in-memory snapshot (so it follows a
+  backend swap and the current principal's partition, and sees a second writer), and define/remove
+  announce themselves as `ItemChange` like every other stored thing. The plugin also re-registers its
+  tools when a deferred `StorageBackend` swap lands, which it previously never did — the compiled tools
+  were whichever set the backend held at boot. One behavioural consequence: `settings` is pinned to the
+  base partition and can never be isolated per profile, so defined functions were unavoidably global;
+  `functions` is an ordinary namespace, so a profile can now isolate (or share) its own set. To carry
+  definitions across the upgrade, copy each entry of the old settings `functions` array into
+  `.data/functions/<name>.json` as `{ id: <name>, version: <ms>, definition, description? }`, or
+  re-`define` them.
+- **provenance (new plugin) — `determine_provenance`.** Traces where a claim came from rather than
+  whether it is true. Provenance, unlike truth, is a *closed* question: anything not in the session came
+  from the model's weights or from nowhere, so the session is already the provenance record and the
+  answer is found by searching it — never by asking the model how it knows, which it cannot answer
+  (recall and invention are the same event from the inside). Per claim it returns `retrieved` (a tool
+  result carries it), `given` (the user said it), `derived` (computable from material that is here),
+  `model-prior` (absent here, but the model asserts it cold — measured by re-asking the same model with
+  none of this context), or `unsourced`, with the extracts the verdict rests on quoted verbatim so it can
+  be checked rather than trusted. `unsourced` means NOT SOURCED HERE, never false: training data is a
+  legitimate origin and the policy for an unsourced claim belongs to the caller. Tool results are split
+  into units — one per `items[]` entry, per table row (carrying its header), per bullet — and matched
+  whole-word on the claim's keys, so nothing is ever decided by a positional cap; the single budget sits
+  at the prompt boundary, spent best-ranked-first, and an over-long extract is windowed on its match. The
+  reading runs on the pinned `classifierProvider` or the turn's model; the cold probe always uses the
+  turn's model, since it is that model's prior being measured. `provenance_config` (get/set/clear) pins
+  the reader onto a small/fast model, refusing a provider that is not configured; it deliberately cannot
+  reach the probe. Bundled into the browser artifact (on-demand, not auto-loaded), since the plugin uses
+  no Node primitives.
+- **edit-session — editing the running session is refused instead of silently discarded.** `session_edit`
+  reported success for a `cut`, `split` or `compact` aimed at the session the calling turn was running in,
+  and nothing survived: the runner takes one in-memory copy of the session at turn start and writes it back
+  at turn end, so the tool's committed CAS was overwritten moments later. `split` failed worst — its new
+  session survived while the truncation of the original did not, leaving a dangling half. The three
+  destructive actions now error on the current session, naming why; `fork` still works there (it writes a
+  new document), though it forks the committed state without the turn's uncommitted tail. Editing any other
+  session is unaffected.
+- **function-tools — an apostrophe in a comment no longer breaks `define`.** The scanners locating a
+  definition's parameter list and body tracked string literals but not comments, so a possessive or a
+  contraction in prose (`another conversation's provider`) opened a string that swallowed the rest of the
+  source. The body was then unlocatable and the author was told the *return type* was missing — an error
+  about a line they had written correctly, which `noTypeCheck` could not bypass because it is raised
+  before the type-check. The field report had bisected it down to "comments containing colons or
+  em-dashes", both of which parse fine; a single `'` was the whole cause. All four scanners now skip
+  strings, templates and comments through one helper. Three fixes fall out of the same root: a comment
+  ahead of the definition is trivia rather than "not a function definition" (it also no longer lands
+  between `function` and the name at compile time), a comment inside the parameter list stays out of the
+  parsed parameter type, and an unlocatable body now says so instead of blaming the signature.
+- **function-tools — a quote inside a regex literal no longer loses the whole tool.** The signature
+  scanner skipped strings and comments but read regex literals as code, so the apostrophe in
+  `/[A-Za-z'-]+/` — or the odd third double quote in `/"[^"]+"/` — opened a string that swallowed the
+  rest of the definition. The failure is worse than the comment case it mirrors: `define` blames brace
+  balance, and on reload the tool is simply absent, with nothing logged and no partial registration to
+  notice. Regex literals are now inert like strings and comments, told apart from division by the
+  preceding significant token, with `/` inside a character class not ending the literal.
+- **function-tools — a composition can now be silent.** A composition always yielded a `result`, even
+  when it returned nothing, so `undefined` reached the model as a result rather than as the absence of
+  one. That made the observational-dispatch contract unreachable from userland: the triggers dispatcher
+  fires on a yielded result, so a composition used as a trigger's `invoke` could never be the silent
+  side-effect the contract describes — every fire woke the model, including the ones whose verdict was
+  "nothing to do here". A composition returning `undefined` now yields no `result` event, like any
+  hand-written tool whose work is a side-effect (result-less tools were already expected downstream —
+  the Anthropic converter names one). Declare the return type as `T | undefined` to use it.
+- **function-tools — a composition can read the call it is running under.** `tool` and `toolInContext`
+  carried the calling context *downwards* — every `await tool.x(…)` already inherited the session — but
+  exposed none of it to the body, so a composition could not name the session it was in, and no tool
+  reports it (`session_action` takes an explicit `sessionId`; `whoami` returns a principal). A third
+  injected binding, `context`, now sits beside them, rebuilt per invocation so a `define`d function
+  compiled once still reads the session it is currently running under. It is declared in the generated
+  dts rather than only described in the tool description: that same string backs the type-check gate, so
+  prose alone would have produced bodies that fail the check they were told to write against. A
+  parameter named `tool`, `toolInContext` or `context` is now rejected by `define`/`lambda` — as a
+  duplicate formal it silently shadowed the injection (last binding wins) instead of erroring.
+- **frontend/web — one notification stream.** Replaces `file-changed` / `skill-changed` /
+  `tool-changed` / `plugin-changed`, with matching in-process wiring in the browser transport, and
+  re-lists sessions live. `session-busy` deliberately stays its own event: it replays current state on
+  connect, which the bus does not carry. `GET /events/files/:ns/:name` is removed (no consumer); the
+  multiplexed `/events` stream still carries every file notification.
+- **frontend/web — an interactive prompt answered in another browser.** `prompt-resolved` is emitted
+  from the settle path every answer, cancel and abort funnels through, and the UI retires its dialog on
+  it. The prompt case no longer *awaits* the answer inside the turn's event loop: parking there stalled
+  every later event of that turn in the other browsers — including the `prompt-resolved` that would
+  have retired their dialog.
+- **frontend/web — a shared-in session's `×` unshares** instead of archiving it (an archive is a write,
+  which raised `ReadOnlyError` once shared-in sessions appeared live in the list); rename is withheld
+  there for the same reason.
+- **frontend/web — one session list per change, not one per notice.** Every mutation used to list the
+  sessions twice: the click handler listed immediately, and the change notification that same write
+  published listed again, re-rendering a sidebar that had already settled — new with the bus, since
+  sessions had no live channel before. All triggers (click, fork, split, new session, and the end of
+  every completed turn) now funnel through one trailing-debounced `refreshSessions()`; nothing depends
+  on the notification arriving, so a disconnected stream degrades to the old behaviour rather than a
+  stale list.
+- **frontend/web — a stale tab reloads itself.** Every response carries the running harness version as
+  `x-matbot-version` (exposed via CORS, so a cross-origin page can actually read it), and the HTTP
+  transport compares it against the version the page loaded with — the one already on screen in
+  `#matbot-version`, which app.js fills from `about_matbot` at bootstrap, so there is one version line
+  and nothing extra stamped into the page. On a mismatch the page reloads once. A server restarted on a
+  new build no longer leaves a long-lived tab running UI code against an API it no longer matches.
+  Static assets are served `cache-control: no-cache` so the reload re-fetches them rather than replaying
+  the stale copy that triggered it.
+- **workspace, background — writes and deletes announce themselves**, carrying the content namespace
+  and name so a frontend can update a row in place rather than re-listing.
+- **storage/filesystem + sessions — listing sessions no longer re-parses every conversation.**
+  `Store` has no projection, so `session_action list` read and JSON-parsed every session document
+  whole — every message of every conversation — to produce four summary fields per row: 591ms for
+  52MB across 213 sessions, on every sidebar refresh. `FilesystemStore` now honours
+  `StoreQuery.immutable` with a parse cache validated by a fresh `stat` (mtime + size) on every query,
+  so a document written by another process — a detached background job, an editor — invalidates
+  exactly like a local write, and a stale entry cannot outlive the stat that disagrees with it; writes
+  through the store additionally drop their own entry, closing the same-timestamp window. Bounded at
+  64MB of source bytes, least-recently-used evicted, so a larger store degrades to the previous
+  behaviour for the overflow instead of growing without limit. Warm listing: 6ms.
+- **triggers — a trigger can carry a cool-down.** `Trigger.cooldown` (`{ maxPerTurn?, quietTurns? }`)
+  rate-limits *firing* independently of *matching*, because a rule can be correctly matched turn after
+  turn while acting on it every time is a spin rather than a service. The `retract` kind had a
+  convergence guard; `followup` had nothing, so a critique-style trigger could fire on turn after turn
+  — its own consequence being the very thing its rule matches. Both limits are counted from the durable
+  fire markers already in the session, so a cool-down survives restart, reload and a backend swap with
+  no in-memory state, and only *result-bearing* fires count (a silent side-effect trigger such as
+  `remember_fact` never spends budget). A held-off trigger leaves a `suppressed` marker with cause
+  `cooldown` naming the reason — suppression is never silent. Absent ⇒ unlimited, which stays the
+  default. Settable via `trigger_action` add/update (`null` on update clears every limit), and editable
+  in both of the web frontend's trigger editors.
+- **cognition — the Inner voice trigger ships with `{ maxPerTurn: 2, quietTurns: 1 }`**, backfilled
+  onto installs seeded before the field existed (skipped if the field was since tuned or cleared).
+- **rumsfeld — `find_fact` and `contextual_search` descriptions disambiguated**, so the model stops
+  reaching for one where it wants the other.
+
+## 0.3.7
+
+_A single provider fix: the Anthropic adapter's prompt caching now survives interactive think-time gaps and agentic tool loops._
+
+### Optional
+
+- **providers/anthropic — prompt caching now survives interactive use.** On-disk session usage put this
+  adapter at ~43% cache hit against 91% for a server-auto-cached provider, from two causes. The 5-minute
+  cache TTL expired across ordinary think-time gaps (~81% cold miss at 5-30min, ~100% beyond), and the
+  message breakpoint was only placed when the second-to-last *user* turn ended in a `text` block — so
+  tool-result turns (role `user`, last block a `tool_result`) got no breakpoint at all, leaving agentic
+  tool loops uncached. Both re-processed the whole prefix as fresh input, inflating input-token throughput
+  against the endpoint's rate limit. The adapter now defaults to the 1-hour TTL
+  (`{ type: 'ephemeral', ttl: '1h' }` + the `extended-cache-ttl-2025-04-11` beta), with
+  `parameters.cacheTtl: '5m'` to opt back; the message breakpoint is placed on the last block whatever its
+  type and rolls across the two most-recent messages (advancing the write frontier while keeping the
+  earlier breakpoint inside the 20-block lookback); and the system prompt is sent as a block array with its
+  own breakpoint, anchoring tools + system together even when a long tool turn pushes the message
+  breakpoints out of lookback range. Common case: 4 breakpoints, Anthropic's maximum.
+
+## 0.3.6
+
+_A single core fix: a provider profile that names its adapter by a different specifier than a sibling profile no longer intermittently fails to resolve._
+
+### Bug fixes
+
+- **Two provider profiles naming one adapter by different specifiers no longer knock each other out.**
+  The provider-factory registry is keyed by canonical plugin name, but `instantiateProvider`'s
+  specifier→name fallback only matched the exact literal string a plugin was loaded with. So a profile
+  written as a path (`./plugins/providers/openai-compat`) and one written as the package name
+  (`@matatbread/matbot-provider-openai-compat`) missed each other: whichever was used first loaded the
+  adapter, and the other force-loaded it again and died on "Plugin … is already registered", surfacing
+  as `provider "…" has no loadable adapter`. Which profile broke depended on use order within the
+  process, making it look intermittent. `instantiateProvider` now derives the canonical name through the
+  host `PluginResolver` before force-loading. Stored profiles are still never rewritten.
+
+## 0.3.5
+
+_Two runner-level turn-control features — mid-turn steering (interrupt a running turn and redirect it) and concurrent screen-phase classification (race a verdict against the turn instead of gating the first token on it) — plus the completion of the multi-profile storage work released in 0.3.4: item-grain sharing now spans files as well as documents, a shared item stays live in every viewer's UI, and the tool vocabulary around stored files is disambiguated._
+
+### API gaps filled
+
+- **Mid-turn steering — a submission arriving while a turn runs can now interrupt it.** `SubmitOpenOpts`
+  gains `mode: 'queue' | 'interrupt' | 'auto'` (default `queue`, backward-compatible). `interrupt` stops
+  the running turn — keeping its committed partial work (the agentic loop already commits coherently on
+  abort, so no dangling tool-call) — and runs the new message next with a "keep going, noting the above"
+  nudge, rather than waiting for the turn boundary. The decision is made inside the runner, synchronously
+  against the running state, so an interrupt can never land on a later turn. A new optional
+  `SteeringPolicy` service (`MatbotServices`) drives `mode: 'auto'`: its `classify` (regex / semantic /
+  LLM — not assumed to be an LLM) decides queue vs interrupt and its `nudge` supplies the continuation
+  nudge; absent ⇒ host defaults (`DEFAULT_STEERING_POLICY = 'interrupt'`, built-in nudge). A new
+  `PipelineEvent` variant `steer` announces the interrupt so a frontend places the new bubble and reads
+  the imminent `aborted` (reason `'steer'`) as a yield. A tool that errors while the turn is aborted no
+  longer leaks the raw abort reason into its result — the runner records a neutral "interrupted before
+  completion" message so the continuation turn doesn't reflexively re-run a side-effecting tool.
+
+- **`ScreenResult.deferred` — a raced screen verdict the runner folds in without gating the turn.** A
+  new `DeferredScreen { claim(): DeferredCorrection | undefined }` lets a `screen` hook start expensive
+  work (e.g. a classifier judging the user message) concurrently and return immediately, handing the
+  runner a poll handle instead of blocking. The runner polls `claim()` — synchronously, never awaited —
+  at each turn-loop edge: before each provider call, on every stream event, and just before commit. The
+  first time it returns a correction (the work settled), the runner **discards the uncommitted
+  in-progress response and re-runs the loop with the correction folded in** — an in-situ redo, no store
+  pop and no retraction marker, cheaper than a post-commit retract. Because the mid-stream poll runs
+  before each event is emitted, a verdict faster than time-to-first-token is caught before any token
+  reaches the frontend; a slower one aborts the in-flight provider request (a per-call `AbortController`
+  linked to the turn signal) to stop backend generation. `claim()` is exactly-once — a hook uses that
+  single delivery to coordinate the in-situ path with its own post-commit fallback, so a verdict is
+  never delivered twice.
+
+- **`DeferredCorrection { ephemeral?, durable? }` and `FollowupResult.retractAndRerun.durable`.** A
+  claimed correction — and a post-commit retract — can now carry `durable` blocks folded onto the turn's
+  user message (persisted, marked `origin: 'robo'`, carried live as a `robo-user` event) as well as, or
+  instead of, `ephemeral` tail-fold blocks. This preserves a durable-context correction's persistence
+  even though the verdict now lands mid-turn (in-situ) or post-commit (retract) rather than before
+  generation. `retractAndRerun.context` is correspondingly optional (a durable-only retract).
+
+- **`StoreChange { operation, namespace, id, detail? }` — a self-describing store-change envelope.** A
+  partitioned change now names its own routing namespace and id, so a consumer filters an event without a
+  per-stream namespace constant compiled in. `WatchVisibility.watchFiles` yields `Routed<StoreChange>` in
+  place of `Routed<FileEvent>`, and `visible()` gains an `id` parameter
+  (`visible(viewer, namespace, id, origin)`) so visibility is decided per item rather than per stream —
+  which is what lets one firehose carry every partition's changes, filtered per connection.
+
+### Optional
+
+- **frontend/web: opts into steering.** `POST /sessions/:id/submit` accepts `mode`, defaulting to `auto`
+  (interrupt-by-default with no policy registered). The UI adds a queue↔interrupt toggle beside the
+  provider select, renders the `steer` event as its user bubble live, and no longer re-renders the
+  session from the interrupted turn's `aborted` snapshot (which lacked the not-yet-persisted steer message
+  and wiped the live bubble until a manual refresh). Other frontends are unchanged (runner default `queue`).
+
+- **triggers: the user-phase classifier races the turn instead of blocking the first token.** The
+  `screen` hook kicks off classify+dispatch concurrently and hands the runner a `DeferredScreen` rather
+  than awaiting the verdict; the correction is delivered on whichever path wins — a pre-first-token grace
+  inject, the runner's in-situ restart, or the post-commit `followup` retract. This removes the
+  classifier round-trip (~2.5s) from the critical path of the ~90% of turns where nothing fires, while a
+  fire still corrects the turn: a `contextual` fire folds durably onto the user message, an `ephemeral`
+  fire tail-folds — on all three delivery paths. A result-fire that lands after commit still supersedes
+  the answer via the existing retract-redo. New `classifierGraceMs` setting (default `0`): `0` is a pure
+  race (no added latency); a positive value holds the first token up to that long so a fast classifier
+  injects cleanly before generation rather than racing it — one knob spanning fully-responsive to
+  fully-clean. A raced verdict is traced by a `user-insitu-fired` marker (clean path, no retraction
+  marker exists) or `user-retract-fired` (post-commit).
+
+- **triggers: a followup fire records why it fired.** A `followup`-kind trigger now leaves a durable
+  marker naming the condition that matched, so a resubmitted robo turn is traceable rather than appearing
+  unprompted.
+
+- **storage/profiles: item-grain sharing spans files, and gains `copy`.** `share`/`unshare`/`ownerOf`
+  handle the `files` axis — a file is a data + `.meta.json` PAIR on disk, so sharing links both into the
+  target's file area, reads flow through the symlinks to the owner's live file, and `ownerOf` reports the
+  owning profile. A shared-in file is **read-only**: a `put` under the shared name throws `ReadOnlyError`
+  rather than forking the data and writing through the meta symlink to the owner. A new `copy` action
+  writes an independent duplicate the target fully owns, preserving item ids and dereferencing a shared-in
+  source; skills route through the `SkillManager` (discovered loosely) so the copy is indexed into the
+  KnowledgeIndex, falling back to a structural document copy when skills isn't loaded. `share`, `unshare`
+  and `copy` accept `id: '*'` for a whole namespace, and `owner` with `'*'` returns an owners map so a UI
+  can gate a list in one round-trip instead of one call per item. Share/copy failures now name the
+  intersection of the two profiles' isolated namespaces instead of claiming the target "already reads the
+  shared base data".
+
+- **storage/profiles + frontend/web: a shared item stays live.** An owner's edit to a shared file now
+  reaches every sharee's event stream: the shared-in set is seeded at open (scanning each partition's file
+  area for `.meta.json` symlinks) and feeds both the write-guard and the watch's visibility clause.
+
+- **frontend/web: read-only shared files are legible in the Workspace list.** A file opens as raw bytes in
+  a new tab — a surface that can carry no banner — so the row carries the state: a file shared in from
+  another profile is tinted and stripe-marked and shows an always-visible line naming the owner ("shared
+  by …" / "shared globally") and its read-only status, with the share button withheld and delete
+  relabelled. The file list stays profile-agnostic; ownership comes from one `owner`/`*` call. The sidebar
+  panel is now titled "Workspace".
+
+- **frontend/web + frontend/dom: `url_for_resource` drops its `namespace` parameter.** The parameter asked
+  for a file's *content* namespace (`"workspace"`) while the `share` tool's identically-named parameter
+  takes a storage *isolation axis* (`"files"`) — one name, two levels, contradictory values for the same
+  file, so a model that had learned one binding generalised it to the other and produced calls that could
+  not resolve. The tool now takes `{ name }`, resolves the file by the path it was stored under, and
+  sources the route's namespace segment from the stored handle; minted URLs are unchanged. A file with no
+  stored namespace reports as not viewable rather than minting a URL that would 404.
+
+- **tools/bash: the legacy in-tool docker executor is removed.** `createBashTool(docker?)` had no caller,
+  so the branch was unreachable — and strictly worse than `docker-bash`, which owns the sandboxed
+  implementation (same tool name and input shape, plus a persistent container, read-only project root, an
+  output byte cap and a `bash_config` tool). `DockerConfig` and `createBashTool` are gone; `bashTool` is a
+  plain constant. The tool description, the `cwd` schema and the README no longer describe the working
+  directory as "the session workspace": it is a private scratch area for temporary scripts and
+  intermediate data, and nothing written there is visible to the user, servable, or shareable.
+
+- **tools/workspace: the tool describes itself as matbot's cloud file storage.** The description now
+  frames the store as the user's own files in a managed cloud drive (not the local disk) backing the
+  Workspace panel, and directs the model here — rather than to bash — whenever the user speaks of a file,
+  saving output, uploads, downloads or generated artifacts.
+
+- **providers/chatjimmy: published.** The ChatJimmy adapter is no longer `private` — it publishes as
+  `@matatbread/matbot-provider-chatjimmy`, is a dependency of the CLI, appears in the first-run setup
+  wizard's provider list, and resolves by bare package name from an installed matbot as well as a source
+  checkout. A hosted llama endpoint: keyless, non-streaming, text-only and no tool-calling — useful as a
+  low-latency comparison point rather than a general-purpose provider.
+
+## 0.3.4
+
+_User profiles, profile-specific backend correctness, and cross-profile resource sharing._
+
+### Breaking changes
+
+- **`Subscribable`/`Broadcaster` now wraps every event in a `Routed<T>` envelope** carrying an optional
+  `origin` principal — the partition or actor that produced it. `subscribe()` yields `Routed<T>` instead
+  of bare `T`; `emit()` takes an optional `origin`; `consume()` handlers receive `Routed<T>`. Both
+  `subscribe()` and `consume()` accept an optional `RoutedFilter` for per-subscriber origin filtering.
+  Core's internal watchers (`watchPlugins`, `ToolRegistryImpl.watch()`) unwrap the envelope; any
+  third-party subscriber must do the same (`for await (const { value } of …)`).
+
+- **`Mounted.consume()` renamed to `Mounted.observe()`.** The method name changed so `consume` means
+  exactly one thing repo-wide (the detached `Subscribable` stream drain); signature and semantics are
+  identical. Every plugin that subscribes to a service (re)mount needs a one-word update.
+
+- **`Session` ownership fields removed.** `Session.ownerPrincipalId`, `actorPrincipalId`, and `persona`
+  are removed from the interface. `RunConfig.persona` is removed. `CreateSessionOpts` no longer takes
+  `ownerPrincipal`/`actorPrincipal`/`persona` — `createSession()` now takes no required arguments.
+  These fields were never read: ownership-at-rest is structural (the storage partition), not a stored
+  field. Old persisted data keeps them harmlessly as excess properties.
+
+### API gaps filled
+
+- **Branded `ReadOnlyError` for store writes rejected by principal ownership.** `readOnlyError()` factory
+  and `isReadOnlyError()` guard (brand-based, never `instanceof`) let a `Store` reject a write when the
+  current principal does not own the item — e.g. a session shared read-only from another profile's
+  partition. The turn pump catches it around the persist-at-turn-start write in `SessionRunner`: a
+  read-only rejection is surfaced as a per-turn `error` event and the submission is dropped, instead of
+  escaping the detached pump and crashing the host.
+
+- **`CachingStorageBackend` — read-through, write-through cache decorator**
+  (`@matatbread/matbot-core/storage-base`). Wraps any `StorageBackend` in a per-namespace,
+  cache-aside, write-through cache: reads serve from a full in-memory image warmed lazily, while
+  `set`/`cas`/`delete` go to the backing store first and then update the image. Cross-platform (pure
+  logic, no Node primitives). Compose it below any principal-partitioning router so each partition gets
+  its own cache.
+
+- **Storage consumers now read through the store proxy instead of keeping an in-memory snapshot.**
+  `TriggerManager` and `SkillManager` each held a `Map` loaded once at boot — making reads
+  principal-blind (a profile isolating `triggers`/`skills` still saw the base partition's data) and
+  stale under any second writer. Both now read straight through the store proxy, which follows both the
+  live backend and the current principal's partition.
+
+- **`WatchVisibility` — partition-aware file-watch layer (new optional service).** Registered by a
+  partitioning storage backend, consumed by frontend firehoses. The generic
+  `visible(viewer, namespace, origin)` predicate — `route(viewer, ns) === route(origin, ns)` — is
+  correct for files, skills, and any future namespace uniformly: a viewer sees global/base events for
+  namespaces it does NOT isolate, and only its own partition's events for namespaces it does.
+
+### Bug fixes
+
+- **`FilesystemFileStore.watch()` no longer throws `ENOENT` on a missing directory.** It now ensures
+  the directory first (mirroring `put()`/`list()`), so a registered `StorageBackend` acting as the
+  boot backend no longer crashes the web frontend at startup on a fresh data directory.
+
+- **Forward `thinking`/`reasoning` parameters to the provider API and preserve reasoning blocks on
+  tool-call replay.** Previously these parameters were dropped, so a provider configured with thinking
+  enabled silently fell back to the default.
+
+### Optional
+
+- **Storage profiles — per-principal storage partitions, profile-aware file routing, hot-add, and
+  item-grain sharing.** A new `storage-profiles` plugin partitions every store + file area by
+  principal. Profiles can be created and switched to at runtime — no restart. File storage is
+  profile-aware (`put`/`get`/`list`/`delete`/`watch` all route to the current principal's partition),
+  and served file URLs bake the principal into the path. Items (e.g. a session) can be shared
+  between profiles via symlink (live single source, not a copy), with `share`/`unshare`/`owner`
+  actions. A shared-in session is surfaced as read-only, enforced by `ReadOnlyError` at the store
+  level. The `profile` tool is renamed `profile_action` for consistency. **This plugin demonstrates how a user-specific frontend could be implemented**, although it has no auth/login of its own (the frontend/web UI simply allows you to create new, named profiles).
+
+- **Skills watch fan-out with dynamic partitions.** `SkillManager.watch()` now yields origin-stamped
+  events (`Routed<SkillEvent>`), and the web firehose filters `skill-changed` per connection. A
+  profile that isolates `skills` sees only its own skill CRUD; a profile created mid-session is
+  watched without a restart.
+
+- **Web frontend — profile-aware identity, file URLs, and session sharing.** An `x-matbot-principal`
+  request header overrides per-request identity. A profile selector appears in the header (hidden
+  when no `profile` tool is registered). Served file URLs bake the principal into the path so a plain
+  browser GET works. A share button on the chat header lets the user share the open session into
+  another profile that isolates `sessions`; shared-in sessions show a "read-only · &lt;owner&gt;" badge
+  and hide the share button. The composer is disabled for read-only sessions.
+
+- **Web-bundle — provider profiles resolve by package name, not a build-specific `mbmod:` id.**
+  Adapter package names are added to the import map, and the wizard offers/persists the package name.
+  Boot self-heals older saved configs — a still-known synthetic id is repaired to its package name.
+
+## 0.3.3
+
+### Breaking changes
+
+- **`MatbotRuntime` gains a required `TypeScriptStripper` member.** Type-stripping is now a first-class,
+  always-present host capability rather than something each consumer reinvents: `services.TypeScriptStripper
+  .strip(source)` erases TypeScript types from a source string and returns runnable JS (may be async). It is
+  provided per platform by the host — `apps/cli` wires node's built-in `stripTypeScriptTypes` (erasable-only),
+  `apps/web-bundle` lazy-loads sucrase on first use — and is *not* a registry/swap key (it lives on the fixed
+  runtime, not `MatbotServices`). Impact: anyone who *constructs* a `MatbotMachine` (a custom host or test
+  harness) must now supply a `TypeScriptStripper`; a plugin that merely reads services is unaffected. Consumers
+  that compile source at runtime should call `services.TypeScriptStripper` instead of importing a
+  platform-specific stripper (this is what makes `function-tools` cross-platform with no stripper of its own).
+
+- **`MatbotRuntime.providers` is now a `ProviderRegistry`, not a `ReadonlyMap`.** *Reading is
+  source-compatible* — `ProviderRegistry extends ReadonlyMap<string, ProviderConfig>`, so every existing
+  consumer (`services.providers.get`/`has`/`keys`/`values`/iteration) is untouched; a plugin that only
+  reads `services.providers` needs **no change**. Two things can bite:
+  1. **Anyone who *constructs* a `MatbotMachine`** (a custom host, a test harness) must now supply a
+     `ProviderRegistry` for the `providers` member — a bare `Map`/`ReadonlyMap` no longer satisfies it, as
+     it lacks `register`/`remove`/`revert`. Use the new `ProviderRegistryImpl` (exported from
+     `@matatbread/matbot-core`).
+  2. **Profile `module` values are no longer canonicalised to the plugin name.** Previously the host
+     rewrote each profile's `module` to the loaded adapter plugin's canonical name at boot; now the stored
+     `module` is left exactly as configured (a yaml path stays a yaml path). So `services.providers.get(x)
+     .module` returns the source specifier, not the resolved plugin name — code that relied on the
+     canonical name must map it with `getPluginNameForSpecifier(module)`. Resolution itself is unaffected:
+     `instantiateProvider` accepts either form.
+
+- **`MatbotServices` split into a registry bucket + `MatbotRuntime`, joined as `MatbotMachine`.** What a
+  plugin's `setup(services)` receives is now `MatbotMachine` (the full object). `MatbotServices` itself
+  shrank to only the *registerable* services — `StorageBackend?`, `Vault`, `KnowledgeIndex`, plus
+  whatever plugins augment in — making it the precise `keyof` domain of `register`/`get`, so
+  `register('hooks', …)` (registering a runtime handle that was never swappable) is now a compile error.
+  The fixed plumbing (hooks, tools, complete, settings, sessions, createStore, and the registry API
+  itself) moved to the new `MatbotRuntime`. Migration is mechanical and the *public* surface is
+  unchanged: the `register`/`get` signatures still read `keyof MatbotServices` (now correctly scoped),
+  and the `declare module '@matatbread/matbot-plugin-api' { interface MatbotServices { … } }`
+  augmentation idiom is untouched — only annotations of the *full* services object move `MatbotServices`
+  → `MatbotMachine`. A plugin that relies on `setup`'s inferred parameter type needs no change.
+
+- **`vault`/`Vault` collapsed to a single member.** The lowercase `services.vault` read accessor is
+  removed; the vault is now both read and registered through one `services.Vault` member (non-optional,
+  capture-safe proxy), consistent with `KnowledgeIndex`/`StorageBackend` — the previously write-only
+  `Vault` register key is now also the read surface. Migration: `services.vault` → `services.Vault`. The
+  tool-context field `ctx.vault` is a separate surface and is unchanged.
+
+### API gaps filled
+
+- **`CachingStorageBackend` — read-through cache decorator (`@matatbread/matbot-core/storage-base`).**
+  Wraps any `StorageBackend` in a per-namespace, cache-aside, **write-through** cache: reads serve from
+  a full in-memory image of the namespace (warmed lazily by one `backing.query({})`), while every
+  `set`/`cas`/`delete` goes to the backing store first (system of record — CAS and durability unchanged)
+  and then updates the image. Coherence is honest: always coherent with the wrapper's own writes; foreign
+  writes only as sharp as the optional `ttlMs` tier (a bounded-staleness ceiling — unset ⇒ warm once,
+  never expire). Cross-platform (pure logic + `Map` + `executeQuery`, no Node primitives). Compose it
+  *below* any principal-partitioning router so each partition gets its own cache. Purpose: stop slow
+  backends re-reading whole namespaces every turn; the correctness half (consumer-side caches → read-
+  through) shipped earlier this release. A `stats()` method exposes per-namespace counters
+  (`CacheNamespaceStats`: docs / reads / hits / loads / lastLoadMs) for confirming the cache is serving
+  reads rather than re-reading the backend.
+
+- **Augmentable per-tool-call round-trip metadata (`ProviderMeta` + `tool-call` `meta?`).** The
+  `tool-call` variant of both `CompletionEvent` and `MessageContent` gains an optional `meta?:
+  ProviderMeta` — opaque, provider-specific round-trip state captured from a completion and re-sent
+  verbatim when the call is replayed in history. `ProviderMeta` is an empty, augmentable interface (same
+  idiom as `MatbotServices`/`MarkerData`/`ToolContracts`): a provider package declares its OWN slice
+  from its own module (namespaced by provider family, e.g. `interface ProviderMeta { google?: {
+  thoughtSignature?: string } }`), so adding a provider that needs round-trip state touches **no** core
+  code. It's an open, additive union (interface augmentation), not a generic parameter, because a single
+  session interleaves tool-calls from many providers. The runner persists `meta` on the stored
+  `tool-call` and threads it back through `pendingCalls`, never interpreting it — so a provider that
+  requires such a token (Gemini 3 "thought signatures", mandatory on every historical `functionCall`)
+  round-trips its own history losslessly, while any adapter is free to elide a call whose `meta` it
+  doesn't trust when rendering cross-provider history.
+
+- **`ToolProxy` gains a trailing catch-all overload per tool (params union → result union).** A bare
+  overload set is precise at call sites but unsound at the meta-type level: `ReturnType<typeof tool.x>`
+  resolved to whichever arm happened to be declared last — a real-world codegen trap (a model
+  pre-declaring a result variable that way produced a baffling TS2739 it could not repair in three
+  passes). Call sites are unchanged (overload resolution is first-match, so well-formed calls still
+  narrow to their arm and malformed calls still error — with *better* messages, since the "last
+  overload" tsc reports against is now the full params union, which enumerates the valid actions and
+  triggers "Did you mean…" suggestions). Two things become expressible: `ReturnType` degrades to the
+  sound result union instead of an arbitrary arm, and a params value typed as a union of arms (dynamic
+  multi-action dispatch) is now callable, returning the result union.
+
+- **Plugin load failures are recorded, not swallowed (`getFailedPlugins`).** A plugin the loader skips —
+  an incompatible `matbotRuntime`, an import that rejects, a module that isn't plugin-shaped, or a `setup()`
+  that throws — still fails *gracefully* (the boot batch skips it and continues; only an explicit single load
+  throws), but no longer *silently*. The loader records `{ specifier, name?, error }` on the registry at each
+  skip point; a subsequent successful (re)load of the same specifier clears its entry. New core accessors:
+  `getFailedPlugins()`, `recordFailedPlugin(entry)`, `clearFailedPlugin(specifier)`. The `plugin` tool's
+  `list` result gains an optional `failed` array, and the web plugins panel renders the failed set (with the
+  reason and retry/remove actions) so a mis-configured plugin is visible instead of vanishing into a console line.
+
+- **`Tool.toolContract` — the call contract as TypeScript text, for tools with no scannable source.** A tool
+  whose name and/or shape are built at runtime (a `function-tools` function; the `tool-store` per-namespace
+  CRUD tool) can't carry a static `ToolContracts` augmentation, so it declares its contract as a single
+  `toolContract` string on the `Tool` — identical in shape to an augmentation arm (`'ToolContract<Result,
+  Args>'`, or a `|`-union of arms). `ToolTypeIndex` splices it into the generated dts's `ToolContracts` (bare
+  `ToolContract` rewritten to an inline `import(...)` for self-containment) and derives the wire text from it,
+  exactly as it does a source tool's arms. `function-tools` populates it from each defined function's
+  signature (`ToolContract<return, { …params }>`). A tool WITH source declares an augmentation instead and omits
+  this; a foreign tool (MCP proxy) with neither keeps only its loose `inputSchema`. The wire `params`/`result`
+  text is no longer authored on the `Tool` (the retired `paramsType`/`resultType`) nor rendered by a
+  `toolWireDescription` helper — it is derived from the one contract and folded into the tool description at
+  the dispatch edge (see below).
+
+- **`MatbotServices.ToolPresenter` (optional) — per-call tool advertisement.** A plugin may register a
+  `ToolPresenter` whose `present(tools, { session, provider })` chooses which tools are advertised to the model
+  on each provider call. The runner consults it before *every* call, so a presenter may advertise a subset
+  (deferring a large library behind a search tool) and grow it mid-turn as the model discovers tools. Absent ⇒
+  the whole turn snapshot is advertised, byte-identical to before. Presentation is orthogonal to the
+  `ToolRegistry`: a withheld tool still resolves by name at execution, so this only changes what the model is
+  *told about*, never what it can call.
+
+- **`MatbotServices.ToolTypeIndex` (optional, node-only).** A new registerable service for typing what
+  tool calls resolve to: `dts()` returns a self-contained `.d.ts` of the loaded tools' result/service types —
+  the source-derived augmentations (from compiling each plugin's `declare module` block) merged with the
+  `toolContract` string a source-less tool declares on itself, read off the live registry, for tools
+  the source scan can't reach (a `function-tools` function; a name already covered by the source scan is
+  skipped so it isn't declared twice). The scan is driven off the **loaded plugins' `resolvedUrl`s** — the
+  real source each tool was loaded from, so builtin, compiled, and installed plugins are covered uniformly —
+  unioned with a monorepo `plugins/` glob that catches app-embedded builtins (`plugin`/`provider`) which are
+  constructed by the host and so carry no `resolvedUrl`; in a real deployment there is no `plugins/` tree, so
+  the scan is purely `resolvedUrl`-driven. `dts()` declares the
+  injected proxy as `declare const tool: ToolProxy` — the new `ToolProxy` mapped type turns each tool's
+  `ToolContracts` arms into call-signature **overloads**, so `await tool.name(params)` narrows its result by
+  the params passed. `check(snippet)` grades the snippet against exactly that `dts()` (what a generator is
+  shown ≡ what it is graded against), returning snippet-scoped diagnostics. `wireContracts()` returns each
+  source-scanned tool's flat `params`/`result` text flattened back from its arms. Lets tool-call code
+  generators/composers type — and verify — what `tool.x()` returns and how to call it instead of guessing.
+  Optional and absent where no TypeScript program can run (the browser today), so consumers must degrade.
+  Provided by the new `tool-types` plugin.
+
+- **The `ToolContracts` augmentation is the single contract source for every source tool; `paramsType`/
+  `resultType` are retired.** Each `ToolContract<Result, Params>` arm carries the **full** params for that
+  action (the discriminant lives *inside* the params, not as a separate pattern), so one authored declaration
+  drives everything: the executor binding (`ToolExecutor<ToolResultOf<'name'>>`), `invokeTool`/`toolResult`
+  narrowing (`ToolResultFor`), the overloaded `tool` proxy (`ToolProxy`, above), and the flat wire
+  `params`/`result` text — derived from the arms by `ToolTypeIndex.wireContracts()` and folded into the
+  outgoing tool descriptions at the turn's dispatch edge (`session-runner`, wired via the new optional
+  `SessionRunnerDeps.toolTypeIndex`). This holds for **single-action tools too**: each declares one arm
+  (`name: ToolContract<Result, Params>`), never a bare `name: Result` — the bare form yields no callable
+  `ToolProxy` signature. Tools with no scannable source carry a `toolContract` string instead (above); the
+  `Tool.paramsType`/`resultType` fields are gone entirely. Motivated by a model probe: an overloaded proxy
+  generates reliable tool-call code first-try across model tiers where the earlier single-signature/union
+  proxy was model-fragile and could even produce a silently-broken tool that still type-checked.
+
+- **Removing a vault secret.** `Vault.writeSecret(name, '')` now removes the key rather than storing an
+  empty value — there is no meaningful empty secret, so the empty string is the removal signal (idempotent
+  across `VaultImpl`, `EnvFileVault`, `WebCryptoVault`, `LocalStorageVault`, `DriveVault`). No new interface
+  method or tool action: the LLM removes a secret through the existing `plugin` `store-key` action by
+  leaving the out-of-band value prompt blank.
+
+- **Contributing provider profiles live** (see also the `MatbotRuntime.providers` contract change under
+  Breaking changes). The registry adds `register(config)`/`remove(name)`/`revert(name)`, so a plugin can
+  now contribute named provider profiles — the sibling of contributing tools via `ToolRegistry` — letting a
+  storage backend replay provider definitions from its own medium, not just plugins. `revert(name)` restores
+  the boot profile (or deletes if there was none), so a contributed — possibly shadowing — profile is undone
+  on unload; `remove` stays a true delete. New core exports: `ProviderRegistryImpl`,
+  `tryResolveProviderFactory(module)` (non-throwing lookup), and `instantiateProvider(services, config)` —
+  config → adapter that force-loads the adapter module on demand (warning and returning `null` rather than
+  throwing if it can't be found), so a profile whose adapter plugin isn't loaded yet resolves itself on first
+  use instead of aborting the turn (removing the need for the boot-time provider pre-scan). The reusable
+  browser provider tool (`createBrowserProviderTool` + `ProviderAdmin`) moved to `@matatbread/matbot-browser`
+  so a storage-backend plugin can back the same tool with its own persistence.
+
+- **`KnowledgeIndex.remove(id)`.** The index gained a retraction primitive — idempotent, keyed by the
+  entry `id` (the index's sole primary key, the same key `index` replaces on). The index stays
+  source-blind: it never inspects an entry's opaque `source` to decide visibility; the party that
+  indexed an entry owns retracting it. Implemented by both backends (`LookupKnowledgeIndex`,
+  `persist-ki-bge`) and forwarded transparently by the swap proxy. Breaking only for a third-party
+  `KnowledgeIndex` implementation, which must now provide `remove`.
+
+- **`MatbotPlugin.resolvedUrl`.** The loader now retains the stable URL it actually imported (minus any
+  reload cache-bust stamp) on each loaded plugin, instead of computing and discarding it. This lets a
+  consumer map a loaded plugin back to its on-disk source without re-running specifier resolution — used
+  by `skills_compiler` to build a types program over the live plugin set. Optional (absent only on hosts
+  that hand-construct `MatbotPlugin`); the `plugin` tool's `list` reports it.
+
+- **Typed tool results: `ToolContracts` registry + `toolResult` reader.** A tool's result type is now
+  recoverable at the call site. `ToolContracts` is an augmentable interface (same pattern as `MarkerData`)
+  mapping a tool's `name` → the type of the `value` it yields; `invokeTool` is generic over the name, so
+  `invokeTool(machine, 'find_fact', …)` is typed `AsyncIterable<ToolEvent<string[] | null>>`. The new
+  `toolResult(events)` drains the stream to that typed `result` value (the structured counterpart to
+  `toolText`, which collapses to a string). Unregistered tool names resolve to `unknown`, forcing the
+  caller to narrow. `ToolContracts`, `ToolResultOf`, and `toolResult` are exported from
+  `@matatbread/matbot-plugin-api`; `ask-user` and `rumsfeld` register their tools' result types.
+
+- **`ToolExecutor<R = unknown>` / `Tool<R = unknown>` carry the result type at the source.** The
+  producer side is now typed too: `ToolExecutor.execute` returns `AsyncIterable<ToolEvent<R>>`, so a
+  tool declares the type of the `value` it yields once, where it's written. Binding the executor to its
+  registry entry — `ToolExecutor<ToolResultOf<'my_tool'>>` (or `Tool<ToolResultOf<'my_tool'>>` on the
+  tool object) — makes the `ToolContracts` augmentation the single source of truth: the executor's yields
+  and the registry entry can no longer silently drift, since the compiler checks the yields against it.
+  The `unknown` default keeps every untyped executor compiling untouched, and covariance means a
+  narrower `ToolExecutor<X>` still satisfies the heterogeneous `Tool[]` registry boundary. Most built-in
+  tools with a well-defined structured result now declare it (`whoami`, `session_action`, `session_edit`,
+  `compact_sessions`, `bash`, `bash_config`, `workspace_action`, `dream_time`, `ask_inner_voice`,
+  `cognition_config`, `skill_action`, `skills_config`, `trigger_action`, `triggers_config`, `provider`,
+  `plugin`, `mcp_action`, `store_action`, `background`, `every_action`, `single_turn`, the `url_for_resource`
+  / telegram tools); tools whose result is genuinely `unknown` (`http`, the MCP proxy, the runtime-named
+  store tool) keep the default and remain unregistered, forcing the caller to narrow.
+
+- **Per-call result discrimination for multi-action tools (`ToolContract<Result, Args>`).** A multi-action
+  tool is a weird overloaded function — it returns different shapes depending on its params. Its
+  `ToolContracts` entry can now be a union of `ToolContract<Result, Args>` *arms*, each pairing a result with
+  the discriminating params *pattern* that selects it; `invokeTool` is generic over the params (`const P`)
+  and narrows the result to the matching arm. `invokeTool(machine, 'session_action', { action: 'get', … })`
+  is now typed to yield `Session`, not the union of every action's result. The discriminant is *any*
+  field(s), not just `action` (e.g. `background` keys on `interval`'s presence: `ToolContract<…, { interval:
+  string }>`); the pattern is the discriminant only, not the full input, so a call carrying just that field
+  still matches. When no arm matches (a non-literal discriminant, or an absence-discriminant the positive
+  patterns can't express) the result falls back to the union of all arms — always sound, just less narrow.
+  `ToolResultOf<K>` unwraps an arm-based entry to that union, so executors still bind unchanged
+  (`ToolExecutor<ToolResultOf<'my_tool'>>` must cover every arm). `ToolContract` and `ToolResultFor` are
+  exported from `@matatbread/matbot-plugin-api`. Every built-in multi-action tool adopts the arm form:
+  `session_action`, `session_edit`, `workspace_action`, `background`, `every_action`, `skill_action`,
+  `skills_config`, `cognition_config`, `trigger_action`, `triggers_config`, `provider`, `plugin`,
+  `mcp_action`, `store_action`, and `bash_config`. Behaviour is unchanged — type-level only.
+
+- **`invokeTool` opts are now a named `InvokeToolOptions` type derived from `ToolContext`.** A tool
+  forwarding a call to another tool can pass its own `ctx` straight through as the 4th argument —
+  `session`, `signal`, `prompt` and crucially `provider` all propagate, so a callee that needs an LLM
+  (e.g. `find_fact`, or anything using `singleTurn`) inherits the turn's provider instead of failing
+  with "no provider". Previously the opts were an inline literal type, which invited callers to
+  hand-pick `{ session, signal }` and silently drop `provider`. Runtime behaviour is unchanged (the
+  function always threaded `opts.provider`); this makes the correct, complete forwarding the obvious
+  typed path. `InvokeToolOptions` is exported from `@matatbread/matbot-plugin-api`.
+
+- **Tool `progress` events now reach frontends.** A tool's `{ type: 'progress', pct, message? }`
+  `ToolEvent` was matched and dropped by the runner — the only `ToolEvent` variant that went nowhere.
+  The runner now forwards it as a new `tool:progress` `PipelineEvent` (`{ callId, pct, message?,
+  traceId }`), so it streams to every frontend like `tool:stdout`. The CLI prints `[pct%] message`;
+  the web frontend inverts the leading `pct`% of the tool block as a left→right wipe (cleared on
+  `tool:end`). Producers that already emitted progress (`edit-session` compaction, `skills_compiler`)
+  now surface it with no change.
+
+- **`invokeTool`/`toolText` — call a tool by name programmatically.** Two helpers exported from
+  `@matatbread/matbot-plugin-api` formalise the resolve-then-drain pattern that callers (the triggers
+  dispatcher) were hand-rolling. `invokeTool(machine, name, params, opts)` resolves the tool off
+  `machine.tools` (throws if unregistered), builds a full `ToolContext` from the machine (vault, plugin
+  load/unload, workdir/configPath/files), and returns its `AsyncIterable<ToolEvent>`; the caller
+  supplies only the host-bound bits via `opts` (`session`, `signal`, optional `prompt`/`provider`/
+  `callId`) — no `prompt` runs non-interactively (a prompt attempt rejects as a normal tool error).
+  `toolText(events)` drains that stream to its result string (throws on the first `error` event or if
+  no `result` was yielded), rendering as the model would see it (string verbatim, `{ content: string }`
+  by `content`, else JSON).
+
+- **Token/cost usage is now persisted on the session.** Two new fields carry per-call accounting that
+  was previously emitted live and dropped: `Message.usage?: Usage` records the provider call that
+  produced an assistant turn (billed provider is the message's `providerName`), and a `tool-result`
+  block gains `usage?: UsageRecord[]` for completions a tool runs itself (`single_turn`,
+  `ask_inner_voice`, each of `dream_time`'s ranker/merger calls), one provider-tagged entry per call.
+  Both are pure accounting — elided from provider submission (adapters serialise only
+  `id`/`result`/`isError`), so they never reach the model. Capture is automatic via a new ambient
+  **usage carrier** (`installUsageCarrier`/`recordUsage`/`currentUsageSink`/`withUsageScope`,
+  mirroring the principal carrier; node ALS-backed, browser serial): a tool reaches an LLM only
+  through `complete`/`singleTurn`, so reporting at that one choke point attributes every tool's spend
+  to its call with zero per-tool code. `single_turn`/`ask_inner_voice` no longer return usage in their
+  result (it was leaking accounting data to the model). `CompletionResponse.usage` widened from
+  `{ inputTokens, outputTokens }` to the full `Usage` (adds optional `costUsd`, cache token counts).
+  A session's total cost is now computable from its stored messages (an aggregation tool is a follow-up).
+
+- **`screen` hooks can now inject *durable* context, the persisted twin of `ephemeral`.** A new
+  `ScreenResult.durable?: MessageContent[]`: where `ephemeral` informs only the turn about to run,
+  `durable` is folded onto that turn's user message (the runner appends the blocks to the last
+  `role: 'user'` message, so they persist into history and ride every subsequent provider call) AND
+  carried live on the turn's event stream as the previously-unused `robo-user` event — so a live draw
+  and a reload render the same thing. Callers mark the blocks `origin: 'robo'` so frontends present
+  them agent-side (the web `appendUserTurn` already splits a user turn's robo blocks into their own
+  bubble; the live `robo-user` handler now draws that same bubble, and the CLI labels the content
+  `[context]` rather than `you:`). Lets a `screen` hook produce context that genuinely updates the
+  conversation, not just a one-shot corrective.
+
+- **`followup` hooks can now `retractAndRerun` a committed turn.** A new
+  `FollowupResult.retractAndRerun?: { context }` capability alongside the existing
+  `resubmit`: instead of appending a robo turn *after* the response, the pump pops the
+  just-committed turn back to (and excluding) the last user message into a durable
+  retraction marker (creator `matbot-retraction`; `data.retracted` holds the popped
+  messages and `data.injected` the ephemeral context fed to the redo — the pair fully
+  traces the swap for a strike-through render and post-mortem, LLM-elided like any marker),
+  then re-runs that same user turn with `context` injected ephemerally. Filled by:
+  `runFollowup` collecting a merged `retract`; a `redo?: { ephemeral }` field on the
+  pump's queue item that skips the persist-at-turn-start user append and forwards the
+  context to `runSession` via a new `RunSessionOpts.injectedEphemeral` (merged ahead of
+  `screen`'s ephemeral, sharing the identical tail-fold path). `resubmitDepth` caps a
+  non-self-terminating chain. Also fixed: ephemeral now tail-folds onto the last
+  *non-marker* message, so a trailing marker (e.g. the retraction marker) doesn't
+  swallow the injected context.
+
+- **Registry observation: `ToolRegistry.watch()` and `watchPlugins()`.** Two read-only
+  `AsyncIterable` streams over registry CRUD — `ToolRegistry.watch(signal?)` yielding
+  `ToolRegistryEvent` (`registered`/`removed`, one per tool — `removeByPlugin` emits per match)
+  and the module-level `watchPlugins(signal?)` yielding `PluginRegistryEvent`
+  (`loaded`/`unloaded`) — both fed by one shared multi-subscriber broadcaster. Read-only:
+  observers can't veto a registration (interception is a separate, deliberately unbuilt concern).
+  Lets consumers react to a registry changing *out of band* — e.g. a storage backend restoring a
+  plugin set during its own `setup()`, after a frontend's one-shot load. `watch()` is a **required**
+  `ToolRegistry` method (breaking for any external implementer): the two host bootstraps that
+  hand-rolled their own registry literal were consolidated onto the exported `ToolRegistryImpl`,
+  which now emits on register/remove/removeByPlugin and takes an optional seed-tools constructor.
+
+- **`services.mounted` — a keyed mount table for reacting to a registry service (re)mounting or
+  unloading.** `MatbotRuntime.mounted: Mounted` exposes one method,
+  `consume({ key, replay?, signal?, onUnmount? }, handler)`, keyed on the `MatbotServices` interface a
+  plugin depends on. The host batches notifications to the quiescent edge and **multicasts** each key's
+  net presence transition to that key's subscribers: a reload (unregister+register before the edge)
+  collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**,
+  delivered to `onUnmount`. The handler receives the (per-plugin scoped) machine with `key` narrowed
+  present (`MountedMachine<K>`). `replay: true` is the deferred-dependency latch — fire on the next
+  microtask against the current machine if the key is present now, then on each remount (so a consumer
+  whose dependency may load *after* it is seeded with no resident poll-hook). The contract guarantees
+  only eventual, ordered delivery per key — **timing is unspecified** (a register is not observably
+  inline nor pinned to a turn boundary). `StorageBackend`'s deferred swap still lands at the edge; other
+  keys repoint immediately but notify at the edge. Use it only when `setup()` reads another service's
+  current state to build cached/derived state; a pure map resolves its dependency per-invocation and
+  subscribes to nothing. (`createMountTable` is the shared host helper; the `Subscribable`/`Broadcaster`
+  broadcaster split it was prototyped on stays for the `watch` streams.)
+
+- **`contextSwitch` / `onContextQuiesce` — quiescent-edge machine flush, layered over the principal
+  carrier.** `contextSwitch(principal, fn)` runs `fn` under `principal` (like `runAs`) and additionally
+  runs host-registered flushers (`onContextQuiesce(flush)`) whenever no scope is active (depth 0). The
+  principal carrier stays a pure identity primitive; this is the host's hook to *land deferred machine
+  mutations* — currently the `StorageBackend` swap — at a boundary where no turn is mid-flight. The pump
+  turn now switches context; web/telegram entry points stay `runAs` (their scope spans a long-lived SSE
+  stream, so they must not register as a busy edge). Re-exported from `@matatbread/matbot-core`.
+
+- **`NotAPluginError` — a typed "this module is a library, not a plugin" load failure.** The loader's
+  three shape checks (no `plugin` export, a `plugin` without `apiVersion`, a non-function lifecycle
+  member) now throw this instead of a bare `Error`, carrying the `specifier` and the precise `reason`.
+  It is the post-import sibling of `IncompatibleRuntimeError`: both mean *permanent for this specifier*,
+  letting the `plugin add` flow roll the entry back out of config rather than persisting something that
+  can never activate. Import-rejection failures (a bad path, a syntax error) stay a plain `Error` — they
+  may be a fixable typo. Exported from `@matatbread/matbot-plugin-api` and re-exported from
+  `@matatbread/matbot-core`.
+
+### Bug fixes
+
+- **A store query with an unknown top-level key is now rejected instead of silently matching
+  everything.** `validateQuery` only checked the values inside `where`/`sort`/`limit`, and
+  `executeQuery` validated the *projected* query — which keeps only those three keys — so a clause
+  placed under any other key (e.g. `{ filter: { … } }`, an SQL-ism LLMs reach for despite the grammar
+  in every tool-store description) was dropped before validation ran. The query degraded to
+  match-everything and the author got a plausible full result with no error. `validateQuery` now
+  rejects a non-object query and any unknown top-level key (`MALFORMED`, naming the bad key and the
+  valid set: `where`, `sort`, `limit`, `cursor`), and `executeQuery` validates the caller's raw query
+  before projecting it (a decoded cursor is still validated as before). The generated `tool-store`
+  CRUD tools catch the resulting `StoreQueryError` and frame it for the model, pointing back at the
+  `query` grammar in the tool's own description.
+
+- **Deleting a skill no longer orphans its knowledge-index entry.** `skill_action(delete)` removed the
+  skill from its store but never retracted the `KnowledgeIndex` entry, so the deleted skill stayed
+  discoverable by `contextual_search` / `find_fact` indefinitely (durably so under the persistent
+  `persist-ki-bge` backend; until restart under the in-memory default). `delete` now also calls
+  `KnowledgeIndex.remove`, closing the leak in both backends.
+
+- **`LookupKnowledgeIndex` (the default in-memory index) now scores against curated metadata, not just
+  raw content.** It previously counted query-term occurrences in `entry.content` alone — ignoring the
+  LLM-derived `entities`, `tags`, and `summary` entirely — so a long, wordy entry could out-score a
+  short one whose curated entities named the term outright. Search now weights an exact entity match
+  highest, then fuzzy-entity / tags / summary / content headings, with raw body occurrences saturated
+  (`tf/(tf+k)`) to remove the length bias. Free-text matching is word-boundary (so "matt" no longer
+  matches "matter", "owl" not "fowl"); curated entity/tag matching stays fuzzy-substring (so "matt"
+  still finds the entity "Matthew Woolf"). The returned window also guarantees a few alternatives
+  (min 3, max 10) rather than only the single coverage winner. (The reranking `persist-ki-bge` backend
+  already used metadata; this brings the zero-config default in line.)
+
+- **`session.updatedAt` now tracks conversational activity, not structural/metadata edits.** It is the
+  timestamp of the session's last message (its `createdAt`), or the session's own `createdAt` when empty —
+  a materialised field upholding a single invariant (new helper `lastActivityAt(session)`), not a fresh
+  `now()` stamped at each write. Previously `session_edit` (`compact`/`cut`/`split`), `fork`, and
+  `session` `rename`/`hide` each stamped `now()`, so compacting or renaming a session floated it to the
+  top of a recency-sorted list despite no new conversation. All session writers now derive `updatedAt`
+  from the final message via `lastActivityAt`; `appendMessage` uses the appended message's `createdAt`.
+  Kept as a stored field (not a getter): `Session` round-trips as plain JSON and is sorted on `updatedAt`
+  as a stored column.
+
+- **A bad `matbot.yaml` plugin entry no longer aborts startup.** `loadPlugins` only honoured its
+  `skip`/`throw` mode (renamed `onIncompatibleRuntime` → `onLoadError`) for the runtime-compat gate;
+  an import that rejected or a module that was not plugin-shaped (no `plugin` export, no `apiVersion`,
+  a non-function lifecycle member) threw unconditionally — out of the startup batch, exiting the
+  process. Under a supervisor that restarts on exit (e.g. systemd `Restart=always`), a single
+  mistaken entry — a bare library mistaken for a plugin (a module that imports cleanly but exports no
+  `plugin`) — became an unbreakable crash loop fixable only by hand-editing the config. The startup
+  batch now logs and skips every such failure; only an explicit, user-initiated load (the
+  `plugin`/`provider` tools, which pass `throw`) still surfaces the error. Regression-tested in
+  `apps/cli` (`pnpm test`).
+
+- **Unloading a plugin that provided a swap-key core service no longer leaves a dangling reference.**
+  `services.unregister` is now symmetric with `register` for the three swap-members (`StorageBackend`,
+  `Vault`, `KnowledgeIndex`): when the providing plugin is unloaded, the member **reverts to the host's
+  captured boot default** (and the displaced backend is `close()`d) instead of leaving `services.X`
+  pointing at the now-unloaded plugin's impl. Previously `unregister` only deleted from the plain
+  service map — which the three swap-keys bypass on `register` — so the call was a no-op for them, and
+  e.g. removing the SQLite backend left every store silently bound to the orphaned (and, had teardown
+  closed it, dead) database. The boot default is whatever the app constructed at startup (the CLI:
+  filesystem or in-memory per `--session`; the browser: OPFS), so the registry remembers and restores
+  the app's base services rather than hardcoding a fallback. Fixed in both hosts (`apps/cli`,
+  `apps/web-bundle`) via a shared `swapStorage`/`swapKnowledge` helper driving both register and the
+  unregister revert.
+
+- **Hot-swapping the `StorageBackend` at runtime is now coherent — stale caches and split
+  compare-and-swaps are gone.** Three defects compounded when a backend was registered/unregistered
+  while the system was live (e.g. switching the default filesystem store for SQLite without a restart):
+  the swap fired *mid-turn*, so a single turn's compare-and-swap could straddle two backends; in-memory
+  caches (skills, triggers) kept serving the *old* backend's documents, so the frontend "claimed
+  filesystem but showed SQL"; and a backend opened by the boot pre-scan was captured *as* the host base
+  and recorded no owning plugin, so unloading it neither reverted nor closed it. Now: `register/
+  unregister('StorageBackend')` stage a last-write-wins pending swap that lands at the next **quiescent
+  edge** (`onContextQuiesce`, reached when no turn/request/message is in flight — the pump turn switches
+  context to mark that edge); the host then emits `services.mounted`, on which the cachers re-read the
+  new backend (`SkillManager`/`TriggerManager` gained a re-runnable `load()` that clears and reloads,
+  subscribed for the life of the plugin); and the boot base is captured *before* the pre-scan, with the
+  pre-scanned backend recorded as plugin-owned so its unload reverts to that base and closes it. Fixed
+  in both hosts (`apps/cli`, `apps/web-bundle`).
+
+- **`plugin remove` no longer offers to `pnpm remove` a plugin that was never installed by the
+  package manager.** The "Also uninstall the npm package?" prompt fired unconditionally, even for
+  local-path plugins (referenced in place) and cached remote http/github plugins (materialized into
+  `.plugins/`) — for which the package-manager command was, at best, a no-op run against a path or
+  URL. It is now gated on the plugin's canonical name being a recorded dependency (mirroring the
+  `add` path, which only shells out for npm / tarball-or-git specifiers), and the uninstall addresses
+  the package by name rather than by the matbot.yaml entry.
+
+- **`plugin discover_local` no longer offers a non-plugin library, and `plugin add` no longer strands
+  a dead config entry when one is forced.** Discovery qualified a directory as installable purely from
+  its `package.json` depending on `@matatbread/matbot-plugin-api` — but a *library* may import the API
+  for its types alone (e.g. `Store<T>`) while exporting no `plugin`, so the bare
+  `@matatbread/matbot-storage-filesystem` store showed up as installable and then failed at load. The
+  scan now matches the loader's actual contract: a candidate qualifies only if its entry module truly
+  exports a `plugin` (the dependency is just a cheap pre-filter). And if a non-plugin is added anyway
+  (e.g. by hand), the loader's shape failures now throw the typed `NotAPluginError`, which the `add`
+  flow treats like `IncompatibleRuntimeError` — permanent, so it **rolls the specifier back out of
+  matbot.yaml** and reports a terminal "not a matbot plugin" message instead of the previous "added to
+  config but activation failed" (which left a dead entry and echoed the loader's `Expected: export
+  const plugin` text — a code-fix instruction an LLM would try to act on). Transient setup() failures
+  (a missing secret) are still left in config to retry.
+
+### Optional
+
+- **web-bundle — provider profiles now persist and resolve by package name, not a build-specific
+  `mbmod:` id.** Since the provider-registry refactor moved adapter loading from a boot pre-scan to
+  on-demand (and stopped canonicalising modules at boot), a profile's persisted `module` must be
+  *directly importable at use time*. Two gaps combined to break that: (1) the assembler baked each wizard
+  adapter's `availableProviders[].module` as the synthetic `mbmod:<id>` graph-root specifier, which the
+  wizard wrote verbatim into `localStorage`/Drive — build-specific, so a profile saved by one bundle went
+  dead on the next rebuild (a stale one imports as an unknown-scheme URL → `mbmod:` CORS/`ERR_FAILED`);
+  and (2) provider adapters were pulled into the graph only as roots, never by bare-name import, so their
+  package names were absent from `packageEntries` (the import map) — the durable, rebuild-stable form
+  didn't resolve either. Fixed both, mirroring how bundled plugins already work: adapter package names
+  are added to the import map, and the wizard offers/persists the package name. Boot also self-heals
+  older saved configs — a still-known synthetic id is repaired to its package name, a stale-across-builds
+  one is skipped with a notice instead of throwing.
+
+- **storage/google-drive — wraps its backend in `CachingStorageBackend` before registering.** Drive
+  reads are slow and the harness re-reads whole namespaces (triggers, skills, providers) every turn;
+  the cache serves reads locally while writes stay write-through to Drive. The browser bundle is single-
+  user per session, so its own writes stay coherent with no foreign-write invalidation configured (the
+  only divergence case is the same user in two browsers at once, and the Drive token expires within the
+  hour); a `drive.changes.watch()` feed is noted in-code as a possible future sharpening. The `setup()`
+  idempotency guard now duck-types through the wrapper (`.inner`) instead of an `instanceof` on the
+  registered backend. Exposes `globalThis.__mbCache()` in the browser as a console handle onto the
+  wrapper's `stats()`.
+
+- **providers/google — native Gemini adapter (new `@matatbread/matbot-provider-google`).** One
+  `module:`, two wire formats, chosen by the endpoint **path** (not host — a proxy/gateway may rewrite
+  the host but keeps the path): a bare base or `…/models/{model}:generateContent` selects the native
+  `generateContent` adapter; a `…/chat/completions` / `…/openai/…` path falls back to the shared
+  OpenAI-compat adapter in `gemini` mode. The native adapter round-trips Gemini 3 thought signatures as
+  the sibling `thoughtSignature` on each part (carried in the tool-call's `meta.google.thoughtSignature`
+  — see `ProviderMeta` above), maps tool results into `user`-role `functionResponse` parts, lifts the
+  system prompt to `systemInstruction`, and sanitizes tool schemas to Gemini's strict OpenAPI-subset
+  (dropping `additionalProperties`/`$schema`/`$ref`…, normalising `type:[…,"null"]`→`nullable`,
+  `const`→`enum`, `oneOf`/`allOf`→`anyOf`, and injecting `items` on loose arrays). The model and API key
+  come from the profile's own `model:`/`credentials.apiKey` — the model is interpolated into the URL
+  path, the key sent as `x-goog-api-key` (never the query string). Cross-provider replay is handled by a
+  **provider-origin trust rule**: a signature is replayed only when the message that produced it came
+  from the current provider — so a foreign tool-call (no Gemini signature) is elided with its paired
+  `functionResponse`, and a foreign *thinking* signature (e.g. Anthropic's, which is NOT a valid Gemini
+  thought signature) is dropped rather than replayed into `thoughtSignature`, which Gemini would reject
+  as "Corrupted thought signature".
+
+- **providers/openai-compat — `gemini` mode.** An opt-in mode (set by the google variant, or
+  `parameters.gemini: true`) that round-trips Gemini 3 thought signatures over the OpenAI-compat wire
+  (`extra_content.google.thought_signature`, stored in the tool-call's `meta.google.thoughtSignature`)
+  and elides signature-less tool-call/result pairs from foreign history, so Gemini's OpenAI-compatible
+  endpoint works with tools and tolerates mixed-provider sessions. Homes the `ProviderMeta.google`
+  augmentation (the native `google` adapter depends on this package and sees it transitively). Off by
+  default — a plain OpenAI/DeepSeek/ollama endpoint is unaffected.
+
+- **tool-router — working set now grows append-only (better prompt-cache hits).** The windowed working
+  set was ordered by registry (boot-load) order, so discovering a tool that loaded early inserted it
+  mid-block and shifted the tail, invalidating the cached tools prefix every turn. It's now ordered by
+  **adoption** (first reference in the transcript — a call, or the search that revealed it), so a newly
+  discovered tool appends and the already-presented prefix stays byte-stable and keeps caching. No
+  change to *which* tools are presented, only their stable wire order.
+
+- **skills_compiler — codegen now sees the tool contracts it typechecks against, and demonstrations
+  can prompt the user.** The derived `matbot-tools.d.ts` (live-registry tool/service contracts) was
+  written to disk for `tsc` only; the generation prompts merely asserted it existed, so a model wrote
+  tool calls from the skill prose and converged on the real signatures only via the typecheck-repair
+  loop. The dts is now derived before codegen and embedded verbatim in all three prompts (initial,
+  iterate, repair), so hallucinating a tool or signature contradicts text that is in context. The
+  demonstration session now inherits the calling turn's interactive prompt channel (`ctx.prompt` →
+  `run.open`), so a skill whose procedure asks the user works end-to-end when compiled interactively
+  — previously every `ask_user` without a declared default failed as "Non-interactive context" and the
+  demonstration stalled before the real procedure. The environment spec handed to codegen also gains
+  rules that each removed an observed run-to-run divergence: progress `pct` is 0–100 (a model emitted
+  0–1 fractions), an LLM step with no explicit provider is `tool.single_turn` with `provider` omitted
+  (models fabricated `''`/`'default'` for `services.singleTurn`), a cancelled `ask_user` throws (a
+  model let the throw abort a loop the skill said continues), and never pre-declare a variable as
+  `ReturnType<typeof tool.x>` (on an overload set it resolves to the last overload alone — one model
+  burned all three repair passes on the resulting misleading TS2739). Three further fixes from a
+  14-round/7-provider test campaign: a distilled method returned as a JSON *array* of steps was
+  silently discarded in favour of the raw demonstration transcript (arrays now accepted; all terminal
+  results carry a `distilled` flag, and a genuine fallback is labelled as a RAW trace in the prompt
+  instead of claiming to be distilled); a declined install confirmation (a "Cancelled." *result*, not
+  a throw) was reported as `installed` and hid the source skill (the compiler now verifies the tool
+  actually resolved before claiming success, and hides only on verified install); and the distiller
+  now prefers spec-named neutral mechanisms over persona tools the demonstration happened to use
+  (`ask_inner_voice` was leaking into compiled tools) and types enumerable result fields as literal
+  unions rather than `string`. The typecheck step now runs the TypeScript compiler API in a worker
+  thread (the shared checker in `@matatbread/matbot-tool-types`), replacing the shelled `tsc`
+  subprocess outright — the inputs are fully determined (the compiler's own scaffold and tsconfig,
+  the same resolved typescript module), so a checker failure is a plumbing bug that must surface as
+  the compile's error, not be absorbed by a quieter fallback path. Structured diagnostics become
+  repair feedback with the
+  offending source frame caret-anchored under each error, full elaboration chains and
+  related-information locations (e.g. which contract arm an expected type came from), directed HINT
+  lines for the recurring strict-mode idioms (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
+  `import type`, tool-contract arm mismatches), and cascade capping ("fix the first error first") —
+  models repair from anchored snippets in one pass where bare `file(line,col)` references had them
+  guessing.
+
+- **tool-types — the checker gains a structural cast gate.** `tsc` accepts type assertions
+  unconditionally, so generated code could re-assert a shape onto a value the tool proxy had already
+  typed precisely — one `as any` and a hallucinated field compiles, then fails silently at runtime.
+  The worker now walks the checked source and reports three patterns as `CAST-GATE` diagnostics
+  through the same annotated/repair pipeline as type errors: `as any` (always), `as unknown as T`
+  double assertions, and — verified against the live `TypeChecker` — widening an already-typed value
+  to a loosening target (`Record<…>`, `object`, `unknown`, index-signature-only literals). Assertions
+  on genuinely-unknown sources (the executor's `input`, `await resp.json()`, catch variables),
+  narrowing assertions, and `as const` all pass. A dry run over the 24 previously compiled test
+  sources failed 12 of them (1–3 findings each) — the prose-only rule this replaces had roughly
+  coin-flip compliance.
+
+- **tool-types — `ToolTypeIndex.check` moves off the main thread and returns annotated diagnostics.**
+  The lambda type-check previously built a `ts.createProgram` synchronously on the main thread, so
+  every `tool_function` define/lambda froze the event loop — and every frontend — for the duration.
+  The check now runs in the same worker-hosted checker the skills compiler uses (one checker, two
+  entry modes, both exported: `checkProjectDir` for a compiled plugin's build dir,
+  `checkSnippetAgainst` for a virtual ambient-dts-plus-snippet module), and each diagnostic comes
+  back as an annotated block — caret-anchored source frame with snippet-relative positions,
+  related-information locations (which contract arm an expected type came from), and directed HINT
+  lines — instead of a bare `line N: message` string.
+
+- **function-tools — lambda's one-argument convention is enforced, not just documented.** A lambda
+  declaring more than one parameter typechecked (the check grades the function against its own
+  signature, not the calling convention) and then silently ran as `(paramsObject, undefined, …)` —
+  `(a: number, b: number)` invoked with `{a:2,b:3}` returned `"[object Object]undefined"`. The head
+  is now parsed unconditionally and a multi-param lambda is rejected up front with a corrective
+  example, before anything runs.
+
+- **cli — a provider referenced by bare package name now resolves in a source checkout (first-run
+  regression fix).** `resolvePluginSpecifiers` resolved npm/scoped specifiers only against the config
+  directory, but the bundled provider adapters are dependencies of the CLI, not of an arbitrary config
+  dir, so a checkout never symlinks them into `<configDir>/node_modules`. The first-run setup wizard
+  writes the bare package name (`@matatbread/matbot-provider-anthropic`) as the portable form, so the
+  first turn failed with `ERR_MODULE_NOT_FOUND` → "Unknown provider" (surfaced lazily, on first use,
+  once the boot provider pre-scan was disabled). Resolution now falls back to the CLI's own install —
+  the same anchor `discoverProviders` already uses — so a bare package name resolves whether matbot is
+  installed or run from a checkout. A package the user installed in their own project still wins (config
+  dir is tried first); a local, unpublished adapter is unaffected (still referenced by path).
+
+- **tool-plugin — the `provider` tool now writes and advertises the canonical package name when it
+  resolves, not a path.** Reconciles the tool with the setup wizard on the location-independent form:
+  `provider add` writes `@matatbread/matbot-provider-…` (and `list`/the tool description advertise it)
+  whenever that name resolves, falling back to the yaml path only for a local, unpublished adapter whose
+  name resolves nowhere. Whether a name resolves is a host decision (only the CLI knows its own install
+  can reach a bundled adapter), so the host passes a `nameResolves` predicate to `createProviderTool`.
+
+- **function-tools — `lambda` is now type-checked, and both actions accept `noTypeCheck` to opt out.**
+  `define` already type-checked a function body against the live tool types (via `ToolTypeIndex`) before
+  registering it; `lambda` now does the same before running (syntax is still gated first by the
+  type-stripper, so an unparseable head simply skips the check). A `lambda` may omit its return annotation —
+  TypeScript infers it, still checking the body and its `tool` calls. Both `define` and `lambda` take an
+  optional `noTypeCheck: boolean` (default false) to bypass the check for the rare spurious error (e.g.
+  composing a tool whose result type is `unknown`); the `define` result notes when the check was skipped.
+  No behavioural change where no type-checker is available (the browser: `check()` is a no-op, so
+  composition still compiles and runs — `noTypeCheck` just makes that graceful degradation explicit).
+
+- **tool-router — windowed presentation of a large tool library (cross-platform).** A new plugin that keeps
+  selection sharp as the tool set grows past the ~30–50 where models start mis-picking. It registers a
+  `ToolPresenter` that advertises only `tool_search` plus a bounded *working set* — the tools called this
+  session ∪ the latest search's candidates — pulling full specs (description + folded TS contract) from the
+  live registry so the model always selects and calls from complete definitions, never a bare summary.
+  `tool_search` ranks the whole library (BM25 over name/description/params, plus a per-tool noun + "width"
+  derivation) and returns a lean discovery record; the presenter promotes the matches into the working set on
+  the next loop iteration, where they become natively callable. A turn-distance *cull* bounds the working set,
+  and parallel `tool_search` calls in one turn are unioned so a strict (first-party) provider can call every
+  surfaced tool.
+
+- **browser / web-bundle — browser tools now carry their real TypeScript wire contracts (params AND result),
+  not just a call shape.** The browser `ToolTypeIndex` previously emitted a wire contract only for tools with a
+  runtime `toolContract` string, so every source-augmented native tool reached the model with its base
+  description and `inputSchema` alone — no TS — because a `ToolContracts` augmentation is type-only and is
+  stripped from the baked bundle (the model was left guessing parameter shapes). Contracts are now recovered by
+  a compiler-free source scan (`extractToolContracts`): node's extraction is purely textual (read the
+  `ToolContract<Result, Params>` type-argument text; the compiler is only needed to *merge* declarations), so
+  the browser does the same. The assembler bakes contracts for the built-in graph into the artifact
+  (`payload.toolContracts`, from the raw pre-strip sources), and http-loaded plugins are scanned at load time
+  (`loadRemote` returns each module's raw source; `loadPlugin` merges via `ToolTypeIndex.addContracts`) — so a
+  remotely-loaded plugin's tools get real TS too. `wireContracts()`/`dts()` now prefer a baked/loaded contract,
+  then a `toolContract` string, then schema-derived params. The node runtime is unchanged.
+
+- **frontend-web — every tool row in the sidebar now has a trigger (⚡) icon that manages that tool's
+  triggers.** The icon is blue when the tool has one or more triggers and grey/translucent when it has none
+  (always clickable — that's how you add the first one); per-tool counts come from a single
+  `trigger_action { action: 'list' }` grouped by `invoke.tool` (absent triggers plugin ⇒ no icons). Clicking
+  opens a new popup listing the triggers whose `invoke.tool` is that tool (`query`), one card each: an Enabled
+  toggle, a **Parameters (JSON)** field (params are tool-specific, so free-form JSON rather than a per-tool
+  form), and the OR-ed condition rows reused from the skill editor. Save reconciles against what was loaded —
+  `add`/`update` cards with conditions, `remove` any deleted card — and always passes `tool` on `update` so
+  clearing the params field clears the stored params. This is the general trigger-management surface for every
+  tool; the skill editor's Triggers tab remains the skill-specific path (both edit the same store).
+
+- **sessions — `session_action` gains a `query` action that searches session *contents*.** Previously the tool
+  could only `list` sessions (returning a `preview` — just the first user message truncated to 60 chars), so a
+  model hunting for a past conversation had to eyeball previews or `get` sessions one by one; the description now
+  also states plainly that `preview` is a display label, not a summary. `query` exposes two *synthesized* string
+  fields to the existing store-query grammar — `user` (everything the user said) and `assistant` (everything the
+  assistant said), each the concatenation of that role's `type:'text'` blocks with tool calls/results, thinking,
+  images and markers dropped as noise — so e.g. `{ where: { op: 'stringContains', field: 'user', value: 'invoice'
+  } }` finds sessions where the user mentioned invoices, and the two fields OR/AND freely with each other and with
+  the real stored fields (`status`, `title`, `createdAt`, `updatedAt`). Matching on the synthesized fields is
+  case-insensitive (they are lowercased and the tool lowercases `stringContains` operands aimed at them, recursing
+  through `and`/`or`/`not`). Optional `sort` (stored fields only), `limit`, and an opaque `cursor` paginate; a low
+  `limit` **early-exits** — the search stops synthesizing/scanning the moment the page is full, so "find the 3
+  sessions mentioning X" over hundreds of sessions never searches the tail. Adds a `@matatbread/matbot-core`
+  dependency (the plugin now reuses `compileFilter`/`applySort`/`validateQuery` from `./storage-base`).
+
+- **mcp — persisted servers now reconnect in the background instead of blocking boot.** `setup()` used to
+  `await` reconnecting every persisted MCP server (each a full `initialize` + `tools/list` handshake — an
+  `npx` cold-spawn for a local, an HTTP round-trip for a remote) before returning, so one slow or unreachable
+  server stalled the *entire* startup sequence (measured: a single-digit-ms boot dominated by ~6.4s of MCP
+  reconnects). It now registers `mcp_action` synchronously and fires the reconnect without awaiting it; each
+  server's proxy tools appear as it comes online (the tool registry and the web `/tools` gate tolerate
+  late-arriving tools). The background task is dispose-aware — teardown/unload sets a flag it checks after
+  every await, closing any client and unregistering any tools it connected after teardown ran, so an
+  in-flight reconnect can't outlive the plugin. `teardown` now also unregisters local proxy tools (previously
+  it closed the clients but left the tools registered).
+
+- **frontend-web — the `/tools/:name` HTTP endpoints no longer 404 a tool that is merely late to register
+  at boot.** The web server starts listening inside frontend-web's `setup()`, which runs before the plugins
+  configured after it (and before the core tools registered once loading finishes) have populated the tool
+  registry. A page refresh during that window fired its bootstrap calls (`session_action`, `provider`,
+  `about_matbot`, `skill_action`, …) ahead of those tools' registration, so they 404'd as if unloaded; a
+  later refresh worked. Both `POST /tools/:name` and `POST /stream/tools/:name` now resolve against the live
+  registry and, if the name is absent within a grace window from server start, wait for its `registered`
+  event (subscribing before re-checking, so a registration in the gap can't be missed) rather than 404. After
+  the window an unknown name is still an immediate 404, and a client disconnect aborts the wait. Resolution is
+  unchanged otherwise — this is a race guard on the registry, never the `ToolPresenter` (which only culls what
+  the *model* is shown; HTTP references tools by name).
+
+- **tool-plugin / browser — `plugin add` no longer skips the config write on a prefix-sibling, and `remove`
+  clears a failed-load record.** Two fixes to the plugin-management tools, both surfaced by the new
+  failed-plugin recording: (1) `addPlugin` matched the specifier as a *substring* (`text.includes('- ' +
+  specifier)`), so adding `./plugins/tool-router` while `./plugins/tool-routerx` was already configured was
+  treated as already-present — the plugin loaded (active in-memory) but was never persisted to `matbot.yaml`,
+  vanishing on restart. It now matches the specifier as a whole list item (anchored, end-of-line). (2)
+  `remove` (node + browser) now calls `clearFailedPlugin(specifier)` after dropping the config/extras entry,
+  so removing a plugin that never loaded (a bad path, an incompatible runtime, a `setup()` throw) also clears
+  its `failed` record instead of leaving a ghost in `plugin list` / the web panel.
+
+- **Every built-in tool declares its TypeScript contract as a `ToolContracts` arm (or `toolContract`).** Every
+  built-in tool across the plugin suite — `plugin`/`provider`, `session_edit`/`compact_sessions`,
+  `session_action`, `skill_action`/`skills_config`, `skill_compiler`, `trigger_action`/`triggers_config`,
+  `store_action` (+ the dynamic per-store tool), `remember_fact`/`dream_time`/`ask_inner_voice`/
+  `cognition_config`, `bash`/`bash_config`, `http`, `workspace_action`, `background`/`every_action`,
+  `whoami`, `ask_user`, `mcp_action`, `tool_function`, `single_turn`, `about_matbot`, and the
+  browser/frontend tools — now declares one `ToolContract<Result, Params>` arm per action (single-action tools
+  get a single arm), and the redundant `type XAction`/`SHAPE` blocks were removed from descriptions. The
+  contract is the augmentation alone: the wire `params`/`result` text is derived from the arms and folded
+  into the description at the dispatch edge, and read off the live registry by `ToolTypeIndex` — one source
+  of truth instead of a hand-maintained duplicate in prose. The two genuinely source-less tools (the
+  `tool-store` per-namespace CRUD tool, whose name and shape are per-store; a `function-tools` function)
+  carry a `toolContract` string instead. Documentation blocks that were not mere param restatements were
+  kept (the `plugin` specifier grammar, `ask_user`'s field examples, `store_action`'s `StoreQuery` grammar,
+  `cognition_config`'s field-range interface). Net effect: leaner descriptions, one typed contract per tool.
+
+- **triggers** — `trigger_action` gains first-class **`disable`**/**`enable`** actions (both take `id`,
+  return the updated trigger). A disabled trigger is kept but excluded from evaluation entirely, so it stops
+  firing without losing its conditions and invocation — the "less aggressive than `remove`" option for a
+  trigger that fires too eagerly; `enable` restores it exactly. This surfaces the existing `enabled` flag
+  (already honoured by `evaluate`) as discoverable intent rather than a param on `update`.
+
+- **tool-types** (new plugin, node-only) — provides the `ToolTypeIndex` service (see API gaps filled): it
+  derives and caches a `.d.ts` of the loaded tools' result/service types, invalidating on any tool-registry
+  change (`tools.watch()`). The scan is driven off the loaded plugins' `resolvedUrl`s (via `getRegisteredPlugins`,
+  hence a `matbot-core` dependency) so compiled (`compiled-plugins/`) and installed (`.plugins/`) plugins are
+  read from their real source, unioned with a monorepo `plugins/` glob for host-constructed builtins. A
+  source-less tool's `toolContract` string is appended, referencing `ToolContract` bare against the dts's own
+  top-level import (no per-entry inline `import(...)`). The tool-result-type derivation (`buildMatbotToolsDts`)
+  moved here from `skills_compiler`, which now consumes it as a dependency (still falls back to its static DTS
+  when the derivation yields nothing).
+
+- **browser** — a registry-driven `ToolTypeIndex` (`createBrowserToolTypeIndex`), the browser counterpart to
+  the node-only `tool-types` plugin. With no TypeScript compiler or filesystem in the browser, it derives the
+  `.d.ts` from the **live registry alone**: a source-less tool's `toolContract` verbatim, and for every other
+  tool a params type synthesised from its `inputSchema` (result stays `unknown`) — so `tool_function`'s `types`
+  action returns real declarations instead of an empty dts. `check()` is a no-op (`[]`) since there's nothing
+  to compile against, and `wireContracts()` flattens each `toolContract` for the dispatch-edge fold. Wired into
+  `web-bundle` and passed to the session runner.
+
+- **web-bundle** — the sucrase type-stripper now runs with `disableESTransforms` + `keepUnusedImports`, i.e.
+  it strips types and nothing else: `??`/`?.` stay native (previously sucrase rewrote them to
+  `_nullishCoalesce`/`_optionalChain` helpers) and imports are kept verbatim, matching node's stripper and the
+  evergreen target the bundle assumes. Fixes a `_nullishCoalesce is not defined` crash when `tool_function`
+  compiled a user function containing `??`/`?.`: the wrapping `return (async function …)(…)` turned sucrase's
+  injected top-level helper declarations into named function *expressions*, out of scope for the body's calls.
+
+- **function-tools** (new plugin, cross-platform) — a single `tool_function` tool that lets the model author
+  and run small TypeScript functions which orchestrate other tools in one pass, so several tool calls can
+  be composed (filter, count, reshape) without routing each intermediate result back through the model.
+  Inside a function, `await tool.<name>(params)` runs any registered tool through an injected `tool` proxy
+  and resolves to its structured result. `define` persists a **named** function and registers it as a new
+  tool of the same name (parameters derived from the signature; optional `description` documents the tool;
+  survives restart; re-defining recompiles);
+  `lambda` compiles and runs an **anonymous** one-argument function once against given `params`; plus
+  `list` / `remove`. Types are erased by the host's `TypeScriptStripper` (node's native stripper; the
+  browser bundle's sucrase), so the plugin is cross-platform with no stripper of its own, and the body is
+  compiled via the async function constructor as an immediately-invoked expression, so tool calls (and
+  recursion) are awaited; each sub-call is echoed to stdout for an observable trace.
+  When the `ToolTypeIndex` service is present (node), the plugin is type-aware end-to-end: a `types` action
+  returns the `.d.ts` of what the available tools return (so the model composes against real types instead
+  of guessing); `define` **type-checks the function body** against those types before registering, rejecting
+  it with diagnostics on error; and a defined function carries its own result/param types on its registered
+  tool, so later functions compose it with real types too. Where the service is absent (the
+  browser), the pre-registration type-check is skipped and the function still compiles and executes.
+  Bundled into the browser artifact (`web-bundle`), backed there by `@matatbread/matbot-browser`'s
+  registry-driven `ToolTypeIndex` (below): `types` returns real declarations derived from live tools'
+  `toolContract`/`inputSchema`, so composition is type-aware even in the browser — only `check()` is a no-op
+  (no compiler), leaving `define` permissive.
+
+- **skills_compiler** — a compiled plugin now **declares its tool's contract as a `ToolContracts`
+  augmentation** in its generated `src/index.ts`: `${toolName}: ToolContract<Result, Params>`, where `Params`
+  mirrors the generated `inputSchema` (accurate by construction) and `Result` is the distiller's reading of
+  the value actually observed in the demonstration trace (kept self-contained). Because a compiled plugin has
+  real source on disk, that augmentation IS its single contract — the same form every built-in tool uses —
+  so another tool composing `await tool.<name>(…)` gets real types once the compiled plugin's source is
+  scanned. The generated executor binds `ToolExecutor<ToolResultOf<'${toolName}'>>`, so the existing
+  typecheck **verifies the implementation actually yields that shape** — the declared type is checked, not
+  merely claimed (uniform whether the result is concrete or `unknown`). The distiller is told to include
+  every observed field, so the verified type is complete; because its type and the generated implementation
+  both derive from the same demonstration run, this does not cost extra repair passes in practice. The
+  consumer `.d.ts` baked alongside the plugin excludes any prior compiled version of the same tool, so its
+  fresh augmentation is the sole declarant of its own name.
+
+- **skills_compiler** — the compiled plugin's **package name and tool name are now configurable**, and
+  recompiling to the same destination **bumps the version**. `skill_compiler` takes optional
+  `packageNamePrefix` (default `@local/compiled-`, changed from `@matatbread/matbot-compiled-`) and
+  `toolName` (default the skill's safe name, e.g. `Send To Telegram` → `send_to_telegram`); the package
+  name is `<prefix><toolName>` and the on-disk directory follows the tool name, so a given skill compiles
+  to a stable, predictable destination. A recompile reads the version already on disk and bumps its patch
+  (first compile: `0.1.0`) rather than silently rewriting the same version. The distiller is no longer
+  asked to name the tool — naming is now deterministic, which is what makes the stable destination (and
+  thus the version bump) meaningful.
+
+- **mcp / mcp-http** — the `mcp__<server>__` proxy-tool-name prefix is now **overridable per server**.
+  `mcp_action add` takes an optional `proxyToolName` — the prefix each of a server's tools is registered
+  under, replacing the default `mcp__<name>__` — persisted on the connection config (`MCPRemoteConfig` /
+  `MCPServerConfigLocal`) so `list`, `remove`, and reconnect all recompute the same names. Absent ⇒ the
+  previous default, so existing connections are unchanged.
+
+- **frontend/telegram** — fixed a boot crash (`No provider registered for module "…". Available: none`)
+  that unloaded the plugin at startup. It called the removed `resolveProviderFactory(config.module)` from
+  `setup()` to eagerly build an adapter, but with the provider pre-scan disabled no factory is registered
+  yet, and the factory registry is keyed by plugin name rather than the profile's module specifier. The
+  frontend now holds only the active provider **name** (validated against `services.providers`) and lets
+  the runner resolve the adapter per turn via `complete()` → `instantiateProvider` — the eagerly-built
+  adapter was never used. Also removed the now-dead `resolveProviderFactory` export from `core`.
+
+- **storage/google-drive** — provider profiles now **sync to Drive**, mirroring the existing plugin sync.
+  `setup()` shadows the `provider` tool with one backed by a Drive `provider-manifest` store (the same
+  `createBrowserProviderTool`, now backed by a Drive `ProviderAdmin`), so `add`/`remove` write across
+  machines; the API key goes to the already-swapped DriveVault while the profile stores a `${NAME}`
+  placeholder. Stored profiles are replayed into `services.providers` on boot and reverted on unload,
+  restoring any boot profile they shadowed.
+
+- **provider-store-test** (new; demonstration/reference) — a node plugin that contributes provider
+  profiles from its own store and reverts them on unload. It has no real use in a node environment (it
+  just clones a configured provider); it exists as a runnable proof of the provider-contribution path and
+  as a template for centralising provider config in a shared resource (a database, a config service, …).
+
+- **mcp-http** — remote HTTP MCP connections now **self-configure the `MCP-Protocol-Version` header**.
+  Browsers preflight that header, and servers that don't allow it rejected every request outright (a CORS
+  failure from a `github.io`-style origin). The client now probes on first connect: it tries **without**
+  the header (which satisfies the narrower preflight, so those servers work) and adds it back only for a
+  *reachable* server that rejects the header-less request with a non-ok HTTP status — never on an opaque
+  fetch/CORS throw, where a header can't help. When the header is needed, it carries the version the
+  server negotiated in `initialize` (previously a hardcoded constant), so servers on different protocol
+  versions get the right one. The resolved policy is cached on the client and persisted to the connection
+  store (`MCPRemoteConfig.protocolVersion`: a version string to send, or `null` to omit), so later
+  reconnects skip the probe. No new tool or add-time option: existing connections re-probe once on next
+  reconnect.
+
+- **skills / skills_compiler / frontend/web** — a skill can now be **hidden**: withheld from the model
+  (retracted from the knowledge index, so `contextual_search` / `find_fact` can't surface it, and
+  excluded from the system-prompt catalogue) while staying fully manageable. New `SkillDoc.hidden` flag,
+  set/cleared only by two new `skill_action` actions — `hide` / `unhide` — and **never touched by
+  `save`**, so a content edit preserves it; the manager retracts the index entry on hide (awaited, so a
+  racing search can't still surface it) and re-indexes on unhide. `skill_action list` and `metadata` now
+  report the `hidden` state. The **skill compiler** uses this to complete the retirement of a compiled
+  skill: after moving its firing triggers onto the new tool, it hides the source skill (kept as the
+  compiler's source), so the deterministic tool answers the condition instead of the skill prose being
+  injected or searched. The **web skills panel** lists hidden skills below the visible ones in the same
+  paler grey as inactive plugins, with a hide/unhide toggle on each row.
+
+- **skills / skills_compiler** — a skill's procedural/informational split is now derived once by the
+  skills metadata analysis pass and cached on `SkillDoc.knowledge.classification` (two independent 0–1
+  confidences, `{ procedural, informational }`), instead of being re-classified by the skill compiler on
+  every run. `skill_action metadata` surfaces it. The compiler reads the cached scores: it compiles a
+  skill only when `procedural > informational`, and returns `no_metadata` (no longer self-classifies)
+  when the analysis pass hasn't run yet — re-saving the skill regenerates the metadata. Existing skills
+  pick up the field on their next content change.
+
+- **skills_compiler** — compiled plugins are now written with `node:fs` to a dedicated, gitignored
+  `compiled-plugins/` directory (a module-level `COMPILED_PLUGINS_DIR` constant, relative to the project
+  root) and installed from there, instead of being routed through `workspace_action` into
+  `.data/files/`. That removed a hidden runtime dependency on the workspace plugin (the compile failed
+  if it wasn't loaded) and a false assumption that the file store materialises on the local filesystem;
+  it also drops the `.meta.json` sidecars the file store left in the build dir. The location is
+  deliberately neither `.data/` (the LLM's read-write space) nor `.plugins/` (the re-fetchable remote
+  cache — a compiled plugin has no upstream, so a cache clear would lose it). Install is now a *soft*
+  dependency on the `plugin` tool: if it isn't loaded, the plugin is fully built on disk and the result
+  is `compiled_not_installed` with the specifier, rather than a hard failure.
+
+- **skills_compiler** — typechecks the generated plugin by running the real `tsc` binary (resolved from
+  the `typescript` dependency — no `npx`) as an **awaited async subprocess**, rather than a blocking
+  `execSync`/in-process compile. Synchronous typechecking pinned the event loop and froze the web UI for
+  its whole duration; the async child process keeps the loop free. `typescript` is now a real
+  `dependency` (it was a devDependency despite being needed at runtime).
+
+- **skills_compiler** — typecheck failures now self-repair instead of being terminal. The
+  generate→write→`tsc --noEmit` step is a loop (up to 3 passes): on failure the tsc errors and the
+  current `src/index.ts` are fed back to the code generator, which returns a corrected whole file, and
+  it re-checks. The repair loop owns the broken file, so the calling LLM no longer has to hunt for and
+  hand-patch it. Only after the passes are exhausted does it return `status: 'typecheck_failed'` (now
+  with `passes`); the success result reports how many passes it took.
+
+- **skills_compiler** — generated code now reads tool results through the typed `toolResult` (not
+  `toolText` + `JSON.parse`/regex), and the compiler ships a `matbot-tools.d.ts` alongside the plugin so
+  its separate compilation sees the common tools' result types (`ask_user`, `find_fact`,
+  `contextual_search`) — so a wrong-shape access is a compile error the repair loop catches rather than a
+  silent runtime failure. Codegen is also now told to implement every branch the skill describes (each
+  arm of a conditional), not just the path the worked example happened to exercise.
+
+- **skills_compiler** — the `matbot-tools.d.ts` shipped to each generated plugin is now **derived from the
+  live type graph** instead of a hardcoded three-tool list. At compile time the compiler builds a TS
+  program over the workspace's tool/service packages, reads the merged `ToolContracts` **and**
+  `MatbotServices`, and emits a self-contained `declare module` — **bundling** each referenced
+  package-private interface/type-alias into the DTS (recursively), importing plugin-api types, and
+  replacing any `node_modules`/class/enum/unresolved *leaf* in place with `unknown /* … */` (so a
+  signature like `(req: unknown /* IncomingMessage */) => …` stays usable rather than collapsing). The
+  result: a generated plugin gets correct `toolResult` types (with per-action narrowing for multi-action
+  tools) for **all** built-in tools, plus typed registry services on `services.*` (`SkillManager`,
+  `Triggers`, …). The program roots are the **live loaded-plugin set** — each plugin's `resolvedUrl`
+  (obtained via the `plugin` tool's `list`, so it's replaceable and matches what the LLM sees), so
+  coverage follows the actually-loaded plugins (npm / `.plugins/` / local), not just the monorepo tree —
+  falling back to a monorepo `plugins/` glob, then to the static list, when neither is available. The
+  derivation runs in-process (briefly blocks the event loop); a build cache is a possible follow-up.
+
+- **skills** — `SkillManager` is now an **interface** (implemented by `SkillManagerImpl`) rather than a
+  class, so the registry key carries an interface like every other service (and the type is bundlable
+  into the generated-plugin DTS). Consumers are unaffected (all used `import type { SkillManager }`).
+
+- **skills_compiler** — code-generation guidance now forbids extracting a value from another tool's
+  natural-language output with a regex / fixed-phrase match (a brittle anti-pattern that silently fails
+  when the wording differs), and directs single-fact lookups to the structured `find_fact` tool instead
+  of `contextual_search` + string-parsing — translating the spec's tool choice when it names
+  `contextual_search` for what is really a single-datum lookup. The machine-API surface handed to codegen
+  now documents `find_fact`'s structured shape. Generated code is also now told to forward the whole
+  `ctx` to `invokeTool` (4th arg) rather than a hand-picked `{ session, signal }` subset, so a callee
+  that needs an LLM inherits the turn's provider — fixing compiled tools failing with "no provider".
+
+- **rumsfeld** — new `find_fact` tool: a granular companion to `contextual_search`. Where
+  `contextual_search` returns the single best-matching knowledge *document* to read (right for "load me
+  this skill/context"), `find_fact` is for retrieving one specific *datum* (a city, URL, date). It
+  searches the `KnowledgeIndex`, reads across the top matches (so a fact in a lower-ranked entry isn't
+  lost the way `contextual_search`'s top-entry-only return loses it), extracts the answer via the turn's
+  provider, and returns `{ found: true, fact, source? }` or `{ found: false }` — never a guess. Falls
+  back to a configured provider when the caller doesn't thread one, so it degrades gracefully rather
+  than hard-failing.
+
+- **rumsfeld** — sharpened the `contextual_search` tool description: terms must be specific
+  identifiers (proper nouns, named systems, personal identifiers), not bare generic nouns that collide
+  with any document merely discussing the topic, and deictic/self-referential queries ("here", "where
+  am I?", "my location") should resolve to the *user* (search their identifier/profile) rather than the
+  common noun. Addresses the term-quality root cause of generic searches returning topically-adjacent
+  skills instead of the fact being sought.
+
+- **frontend/web** — a tool's live progress `message` is now shown as a floating pill in the top-right
+  of its `tool-block` (previously only a hover `title`), so step-by-step progress (e.g. the skill
+  compiler's "repairing (pass 2/3)…") is visible at a glance. The pill is removed on `tool:end`.
+
+- **frontend/web** — the skill editor's metadata pane now shows the procedural/informational
+  classification as two labelled 0–1 bars, alongside the existing summary/entities/tags.
+
+- **tool-plugin** — `plugin reload` now re-downloads a changed remote (github/http) plugin instead of
+  silently re-importing stale code. The `.plugins/` cache is write-once (skip-if-present), and reload's
+  cache-bust only re-*evaluated* the already-cached bytes, so a changed remote source could never reach
+  a running matbot short of manually deleting its `.plugins/` subtree. Reload now evicts the plugin's
+  cached subtree (and its `node_modules/<name>` self-link) and clears the in-memory manifest memo before
+  re-materialising. It is governed by a new optional `refresh` parameter on the `reload` action
+  (default **true** — reloading a remote plugin means "pick up the latest upstream source", the
+  cross-source analog of how a local reload always reflects on-disk edits); pass `refresh: false` to
+  re-run `setup()` against the cached copy without a network round-trip (reset state, or work offline).
+  The capability is threaded through the runtime as a new optional `refresh` arg on
+  `MatbotRuntime.loadPlugin` / `ToolContext.loadPlugin` (default **false** — a programmatic load stays
+  cache-first). Boot and `plugin add` are unchanged.
+
+- **frontend/web** — new `web_user_environment` tool: the LLM evaluates a JavaScript expression in the
+  user's attached browser and gets the JSON-serialisable result back. It runs in a sandboxed Web Worker
+  (built from a blob URL, so it works from the `file://` bundle too) with no DOM, storage, cookies, or
+  permission-gated sensors — read-only introspection of the standard web platform for ambient facts like
+  timezone, locale, and user-agent, leaning on the model's own knowledge of browser APIs rather than a
+  per-capability tool. Round-trips over the session SSE stream (a new `web-env-eval` event answered via
+  `POST /sessions/:id/env-result`), registered identically in both UIs (the Node server and the
+  in-process browser bundle) from one shared tool definition — only the transport differs.
+
+- **frontend/web** — fixed a regression that broke the **browser bundle entirely**: `browser.js`
+  imported the removed `PromptCancelledError` class as a value (it is now a type-only export plus the
+  `promptCancelledError()` factory), so the in-process transport failed to link and the whole UI never
+  mounted. Now uses the factory, mirroring the Node server.
+
+- **edit-session** — new `compact_sessions` tool: applies the compaction policy across the *whole*
+  session store, in two tiers — **full compact** (archived or >28 days idle: strips all tool calls,
+  tool results, and thinking blocks) and **partial compact** (active sessions with >20 messages,
+  keeping the last 10 intact). Never touches the current session and is idempotent, so it is safe to
+  run on a schedule or as a background task; it should always be user-initiated, not model-invoked
+  mid-turn. Per-session compaction stays `session_edit({ action: 'compact' })`.
+
+- **apps/cli** — sub-agent status is now shown at startup.
+
+- **cognition** — the inner-voice (`ask_inner_voice`) tool now emits an empty output chunk so its
+  result reliably renders in the UI; and `dream_time`'s merge length-guard gains a 20-character buffer,
+  so trailing-whitespace edits the merger makes no longer trip a false truncation failure.
+
+- **apps/cli & frontend/web** — per-turn token usage is now reported **broken down by provider**,
+  computed from the persisted session at turn end (so it includes spend by tools that ran their own
+  completions — `single_turn`, `ask_inner_voice`, `dream_time`) rather than from the live main-turn
+  `usage` stream (now legacy). Zero counts are elided. The CLI prints one line per provider; the web
+  client's `tokens` block lists a row per provider. Backed by the new core helper `usageByProvider`.
+
+- **providers/openai-compat** — opt-in prompt caching. With `parameters.promptCache: true`,
+  the adapter sends Anthropic-style `cache_control: {type:'ephemeral'}` breakpoints on the system
+  prefix, the tool defs, and the second-to-last user turn (mirroring the native anthropic adapter),
+  and reads `usage.prompt_tokens_details.cached_tokens` back as `cacheReadTokens`. Unlocks prompt
+  caching for Anthropic/Gemini/Qwen routed via OpenRouter (and surfaces OpenAI/DeepSeek automatic
+  caching). Default off — a plain OpenAI or local (ollama/vLLM) endpoint never receives
+  `cache_control`, so the flat OpenAI wire shape is unchanged.
+
+- **web-bundle** — insecure-context Web Crypto shims, consolidated in the bundle loader
+  (`apps/web-bundle/src/loader.js`), so the single-file bundle works over plain HTTP on a non-localhost
+  origin. A non-secure browsing context withholds `crypto.randomUUID` and `crypto.subtle` (only
+  `crypto.getRandomValues` survives); since the bundle runs the whole runtime — core, every plugin,
+  the bootstrap — in one page, that previously crashed plugin load (`crypto.randomUUID is not a
+  function`, called in 20+ packages) and skill reindexing (`crypto.subtle.digest` of undefined). The
+  loader now installs a `getRandomValues`-based `randomUUID` and a SHA-256-only `crypto.subtle.digest`
+  (verified byte-for-byte against SubtleCrypto; the bundle's default vault is plaintext, so no AES-GCM
+  shim is needed) before importing any module. Each installs only when missing, so secure contexts are
+  untouched. The previous partial polyfill in the web frontend's `app.js` (which ran too late to help
+  the bundle) is removed.
+
+- **triggers** — a fourth trigger `kind`, **`contextual`**, and a rename of the user-surface kind
+  `augment` → **`ephemeral`** (forming an ephemeral/durable pair on the user surface). `contextual`
+  judges the user message in the `screen` hook like `ephemeral`, but folds the fired tool's output
+  *durably* onto the user turn (via the new `ScreenResult.durable`) instead of injecting it for one
+  turn — for when a match means "this should become part of the session", not "use this for this
+  answer". Within a single trigger `contextual` dominates `ephemeral` (a durable fold is also sent on
+  the firing turn, so it loses nothing — mirroring retract-over-followup on the agent surface). The
+  ephemeral injection is traced by a `durable-inject` marker recording only the firing sources (the
+  text itself now persists in the user message). Stored triggers and built-in cognition seeds are
+  migrated `augment` → `ephemeral` idempotently on plugin load (trigger docs live in `.data/`, outside
+  source), and the retract-redo suppression cause is renamed `augment-redo` → `user-redo`. The
+  `trigger_action` tool guidance/schema and the web skill-editor kind picker list all four kinds.
+
+- **storage-google-drive** (`@matatbread/matbot-storage-google-drive`, browser) — a
+  `StorageBackend` that persists all documents and file blobs to a folder in the user's
+  Google Drive, so chats, settings, skills, files and secrets follow them between browsers and
+  machines. Layout mirrors the filesystem backend: `<root>/<namespace>/<id>.json` documents
+  (read into memory once, write-through, per-store mutex) and `<root>/__files/` blob+meta pairs.
+  In-browser auth via Google Identity Services — the non-sensitive `drive.file` scope (only files
+  matbot creates), a public client ID, no server or secret. Sign-in is driven from the setup
+  overlay's **Connect** button (the user gesture Chrome requires to open the consent popup — a
+  boot-time popup is blocked), and the overlay walks through the one-time Google console setup
+  (create OAuth client, enable the Drive API, add a test user). Connectivity is probed before the
+  backend is swapped in, so a misconfigured project (e.g. Drive API not enabled) leaves the
+  session on local storage with a clear message instead of erroring on every operation. It also
+  **re-points the vault at Drive** (secrets sync, migrating any held in localStorage) and
+  **shadows the built-in `plugin` tool** with a Drive-backed one — same name, so there's no
+  ambiguous second tool — so installs sync across machines: `add` → Drive; `remove`/`reload` →
+  Drive if synced, else delegated to the local tool; `list` marks each plugin Drive-synced or
+  local-only. Opt-in: baked into the web bundle, activated with `plugin add`. Web-bundle only
+  (the node-served runtime keeps its filesystem/SQLite backend).
+
+- **storage-filesystem** (`@matatbread/matbot-storage-filesystem`, node) — now also an installable
+  `StorageBackend` plugin, not only a bare `FilesystemStore` library. The package keeps exporting
+  `FilesystemStore` for the host to wire as its zero-plugin boot base (apps/cli is unchanged), and adds
+  a `plugin` export (`FilesystemStorageBackend`: `<dotData>/<namespace>/<id>.json` documents +
+  `<dotData>/files` blobs, the exact layout the node host already falls back to) with a `storageBackend.
+  open` boot hook and a `setup()` that registers it — mirroring the SQLite/Drive backends. The point is
+  to make the node default *nameable*: `plugin add @matatbread/matbot-storage-filesystem` asserts it to
+  override another backend, instead of only reaching it implicitly by unregistering whatever is in
+  force. (Pairs with the discovery/`add` fix above: it now appears in `discover_local` because it is a
+  real plugin, rather than a library that fails on install.)
+
+- **web-bundle / browser** — supporting changes for the above: the browser realm now honours
+  `register('Vault', impl)` (a capture-safe `forwardingProxy` over the active vault, mirroring the
+  CLI's swap), so a plugin can replace the secret store at runtime; and the browser defaults plugin
+  now persists its auto-load list to the *concrete* boot backend (captured at setup) rather than
+  through the swappable store proxy, so a plugin that swaps the `StorageBackend` during its own load
+  (e.g. storage-google-drive) reliably records itself in the list instead of writing into the
+  just-swapped-in backend (which boot would never read) — this also repairs the mirror bug on
+  `remove`.
+
+- **triggers** (`@matatbread/matbot-triggers`, cross-runtime) — a data-driven
+  hooks subsystem. A `Trigger` is a stored
+  `{ conditions: { kind: 'augment'|'retract'|'followup'; rule }[]; invoke: { tool; params? } }`
+  document; when an LLM classifier judges any condition matched against the current turn,
+  the named tool is invoked. A condition's `kind` is a single discriminator fixing the
+  surface judged, the hook, and how the tool's *output* reaches the model:
+  `augment` (judge the user message in `screen`; inject the output ephemerally into the
+  turn about to run), `retract` (judge the assistant response in `followup`; the response
+  is *wrong*, so discard it and re-run the user turn with the output injected —
+  `retractAndRerun`), `followup` (judge the assistant response; it *stands* but needs a
+  steer, so keep it and resubmit the output as a robo turn — e.g. Inner Voice / Verify
+  Assumptions, which need the response in context). A tool that yields no result runs as a
+  silent side-effect. Injected payloads are fenced as system-supplied context (so the
+  model doesn't read them as the user speaking), and an `augment` injection (otherwise
+  never persisted) leaves a diagnostic `triggers` marker (`data.event:
+  'ephemeral-inject'`) recording what was fed in, for post-mortem tracing. Two re-fire
+  guards keep an agent-phase retract from amplifying: a retract *redo* re-runs the same
+  user turn, so user-phase (augment) triggers are **held off** on a redo (else their side
+  effects — e.g. `remember_fact`'s store write — double-apply), and a retract rule that was
+  *active* on the previous turn (fired **or** itself held off) and is still matching is held
+  off as non-converging — so it stays suppressed turn after turn while it keeps matching
+  (each suppression re-arms the guard) rather than oscillating fire/suppress, and un-sticks
+  only when the rule genuinely stops matching (a well-behaved rule self-terminates and never
+  hits this). Both hold-offs are recorded with a `data.event: 'suppressed'` marker (a machine
+  `cause` + human `reason`) — suppression is never silent, so a later "why didn't it fire?"
+  is answerable from the session. The surface a condition is judged on (user message vs
+  assistant response) is *derived* from `kind` (`surfaceOfKind`), not a stored field. This
+  generalises skill-firing — "fire skill X" is just `invoke: skill_action({ action: 'use' })`,
+  no longer special-cased (`use` applies the skill as a directive; `load` returns raw content
+  and is not for firing). Exposes a `Triggers` service (CRUD + `importIfAbsent`, idempotent
+  by invocation) and a `trigger_action` tool (`list`/`query`/`get`/`add`/`update`/`remove`;
+  `query` filters by invoke target). An absent target tool degrades soft (does nothing
+  until present). (See `docs/TRIGGERS-RATIONALE.md` for the *why*.)
+
+- **skills** — a skill can be flagged a **system skill** (`SkillDoc.catalogue: boolean`): when set,
+  it's advertised in the always-on system-prompt catalogue, using its generated `knowledge.summary`
+  (or the optional hand-written `catalogSummary` override, when present). `skill_action(save)` takes
+  an optional `catalogue` boolean (omit to leave unchanged) and `metadata` returns the current flag;
+  the always-on contributor now advertises only `catalogue === true` skills (skipping any without a
+  summary yet). The web skill editor's metadata pane gains a "This is a system skill" checkbox,
+  persisted on save (the summary itself isn't hand-editable yet — the generated one fills the blank).
+  This is how the former `system`-phase trigger's catalogue role lives on, as data rather than a trigger.
+
+- **skills** — trigger ownership moved out to `@matatbread/matbot-triggers`. Removed the
+  `skill_triggers` tool, the embedded `SkillDoc.triggers` array, and the two
+  trigger-evaluation hooks. The former `system`-phase trigger (the system-prompt skills
+  catalogue) is now a `SkillDoc.catalogSummary` field. Skills are content + catalogue
+  only; firing on a condition is a trigger whose `invoke` is `skill_action(use)`.
+  Breaking for skills-*package* consumers: dropped exports `SkillTrigger`,
+  `TriggerPhase`, `createSkillTriggersTool`. (Existing installs: embedded `triggers`
+  arrays in stored skill docs go dormant; a one-off offline migration moves them into
+  the triggers store and `catalogSummary`.)
+
+- **cognition** — seeds its built-in skills' triggers into the `Triggers` service (one
+  use-trigger per skill, conditions grouped) instead of embedding them, discovering
+  `Triggers` off the registry the same way it discovers `SkillManager`.
+
+- **cognition** — the "Remember this" skill is **retired**: it was compiled by hand into the
+  `remember_fact` tool, so the prose `SkillDoc` is gone and its conditions now live as data
+  (`REMEMBER_CONDITIONS`) firing the tool. `remember_fact` now captures from **whichever message
+  fired it** — the latest non-robo user *or assistant* message (an `augment` condition fires
+  pre-response so the tail is the user message; a `followup` condition fires post-commit so the
+  tail is the assistant response, e.g. promising to remember / owning a mistake) — fixing the
+  prior bug where an agent-phase fire read the user message instead. De-duplication is deliberately
+  not done (a repeated fact is an importance signal; consolidation is dream-time's concern).
+
+- **cognition** — `dream_time`'s ranker and merger now resolve their OWN provider pins
+  independently (`dreamRankerProvider` / `dreamMergerProvider`, `cognition_config`) rather than
+  inheriting the calling turn's provider; unpinned, each still falls back to the turn's own model,
+  so nothing needs configuring to get started. Matters most for the merger, which sees a whole
+  skill's prose plus the fact and so can truncate/fail on a small-context provider that ranks fine
+  (ranking only ever sees short summaries). A durable merge failure (unparseable response,
+  truncation, the merger's own length-guard) now quarantines the culprit fact via a new
+  `DREAM_SKILL_ERROR` sentinel rather than leaving it stuck for an automatic retry that would just
+  fail identically. A fact that scores `none` gets one extra provenance-enriched re-rank — up to 3
+  preceding session messages prepended for disambiguation — before being retired permanently (a
+  bare atomic fact can under-score in isolation but route cleanly once the conversation that
+  produced it is visible); `DreamRun.enriched` records when this happened. A fact that scores only
+  `weak` is now **deferred** rather than retired: a new `RememberedFact.ignoreUntil` timestamp
+  (governed by `DreamSettings.weakDeferralMs`, default 36 hours) excludes it from selection without
+  marking it terminal, since the skill landscape can still change (a skill grows into a fit, or a
+  new one is minted from a cluster of similarly-homeless facts).
+
+- **cognition** — `cognition_config` now also exposes dream-time's tunable thresholds
+  (`strongThreshold`, `weakThreshold`, `maxClusterSize`, `blocklist`, `weakDeferralMs` — previously
+  only reachable via a direct, non-tool `services.settings().set('dream-time', …)` call) alongside
+  the three existing provider pins, as one consolidated `CognitionConfig` type. `get` returns the
+  effective settings — defaults already merged in for every key — so a single call teaches the
+  object's shape as well as its current values. `set` takes a flat partial patch instead of one
+  setting per call: an omitted key is left unchanged, a key given as `null` resets it to default
+  (or unpins a provider); validation runs over the whole patch before anything is written, so an
+  invalid combination (e.g. `weakThreshold` > `strongThreshold`, an unconfigured provider name)
+  rejects the call without persisting a partial change. `clear` now takes no parameters and resets
+  every setting to its default in one call.
+
+- **frontend/web** — skill editor's Triggers tab rewired to the triggers store: it finds
+  the skill's use-trigger via `trigger_action query` and edits that trigger's conditions
+  (a wholesale replace on save). Each condition is a `kind` (`augment`/`retract`/`followup`)
+  + rule, defaulting new rows to `augment` (the user-message routing case). The tab also
+  has a **Suspend** toggle that keeps the trigger and its conditions but stops it firing —
+  applied on save via the new `trigger_action` `disable`/`enable` actions. It reflects the
+  trigger's `enabled` state on open (suspended only when every matching trigger is disabled).
+
+- **frontend/web** — a `matbot-retraction` marker now drops the superseded assistant
+  response from the live thread (matching the post-refresh state, where it's popped from
+  the session) and renders as a collapsed, thinking-styled "Retraction" block holding
+  only the final text of the retracted turn (no thinking/tool blocks). Assistant response
+  wraps are tagged with their `traceId` so the live removal can target the right one.
+
+- **frontend/web** — the **skills and plugins panels now update live**. Two new SSE streams —
+  `GET /events/tools` (tool-registry CRUD) and `GET /events/plugins` (plugin load/unload),
+  surfaced on both transports as `toolEvents()`/`pluginEvents()` — drive the client to refresh
+  skills on `tool-changed` and plugins on `plugin-changed`. Fixes panels going stale when a plugin
+  loads out of band (e.g. the Google Drive backend restoring its synced plugin set at boot, after
+  the UI's one-shot loads). The plugin stream also catches tool-less plugins (pure
+  provider/hook/storage) the tool stream can't see, **retiring the old poll-on-`plugin`-tool-success
+  refresh** (which also fired on no-op `list`/`discover_local` calls). **All SSE endpoints moved
+  under a `/events/` prefix** (`/events/sessions`, `/events/sessions/:id`, `/events/files`,
+  `/events/files/:ns/:name`, `/events/tools`, `/events/plugins`) so no author-controlled path
+  segment can shadow a route — a tool named `events` no longer collides with `POST /tools/:name`.
+
+- **providers/openai-compat** — assistant messages with tool calls but no text are now sent
+  with `content` **omitted** rather than `content: null` (the spec makes `content` optional
+  once `tool_calls` is present, and stricter validators — e.g. gpt-5.x — reject
+  `"content": null` with "expected a string, got null"). A tool result whose tool yielded no
+  value (e.g. `remember_fact`, which yields only a marker) now serializes as `"null"` rather
+  than `JSON.stringify(undefined)` → `undefined`. Both surface when the model invokes a
+  no-result tool (a bare tool-call turn plus an empty tool result).
+
+- **providers/anthropic** — a tool result whose tool yielded no value now serializes as
+  `"null"` rather than `undefined` (a `tool_result` block must carry content). The assistant
+  null-content case does not arise here (tool calls are `tool_use` content blocks, and an
+  empty-content message is dropped).
