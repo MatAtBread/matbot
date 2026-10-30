@@ -744,7 +744,7 @@ built-in list of matbot's own ids would also be stale the moment a plugin contri
 so there is none; the enumerable set is what the policy has written, and naming a gate explicitly is
 how you reach one an installation configured (settings have no key listing). `__matbot_core__.overwriteToolsOnCollision` is **not** migrated — the standing
 answer is re-offered the first time that collision comes round again, so adopt-once machinery would
-exist to save one keystroke; an install still authoring it is warned, naming where it went.
+exist to save one keystroke. (0.4.x warned an install still authoring it; 0.5.0 does not.)
 
 **Honest statement of the property, and its limit.** The gate makes a privileged operation *pass
 through a decision*; it does not put that decision out of the model's reach. The default policy keeps
@@ -834,8 +834,8 @@ Within that, three parts, and only the first two enforce anything:
    package and touches nothing else. Its two settings are its own (`timeout_ms`, `permit_imports`, under
    `default_settings:` keyed by its package name); they were `function_timeout_ms` and `function_imports`
    in the host's config, which could not work — the default runner has no way to implement either, so the
-   host was parsing a question only a plugin can answer. `apps/cli` now recognises the retired spellings
-   in the config TEXT and says where they went, rather than core carrying fields nothing reads.
+   host was parsing a question only a plugin can answer. 0.4.x warned about the retired spellings in the
+   config text; since 0.5.0 they are simply unread, like any other unknown key.
 
    **Its settings are reached the ordinary way, which means a tool** — `function_runner_config`
    (`get`/`set`/`clear`), because a plugin's settings are the plugin's to expose and the alternative was a

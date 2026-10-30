@@ -27,6 +27,10 @@ churn and less likely to affect a consumer who doesn't use them.
   one without importing it. core, plugin-api, the apps and the library packages `default-gate`, `files`
   and `tool-plugin` no longer declare it, since they are not plugins. A host whose `PluginResolver` has no
   `runtimes` has nothing to check, and imports as before.
+- **Two migration warnings are removed.** `default_settings.__matbot_core__.overwriteToolsOnCollision` (moved
+  to `'@matatbread/matbot-default-gate': { 'tools.overwrite': … }` in 0.4.14) and the CLI's top-level
+  `function_timeout_ms` / `function_imports` (moved to `@matatbread/matbot-function-runner-node`'s
+  `timeout_ms` / `permit_imports` in 0.4.20) were already unread; they are now unread silently.
 
 ### API gaps filled
 
@@ -66,6 +70,8 @@ churn and less likely to affect a consumer who doesn't use them.
   `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.
 - **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
+  Nor is the Inner Voice trigger's cool-down backfilled onto one seeded before 0.3.8; set it with
+  `trigger_action` if that trigger fires repeatedly.
 - **`function-tools`** exports its source scanner as `@matatbread/matbot-function-tools/scan`
   (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
   line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow
