@@ -168,7 +168,7 @@ And a **Status**:
 | | `chatjimmy` | Example | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
 | | `customer-services` | Example | Mock LLM: always helpful, never useful. No API key needed |
 | | `webllm` | Example | Open-weight models (Qwen3 by default) on the GPU in the page via WebLLM, loaded from a CDN on first use — browser only, keyless. `webllm_models` lists and removes models |
-| | `provider-store-test` | Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
+| | `provider-store-test` | Example | Test/reference: contributes provider profiles from its own store and reverts them on unload. In the repo only; not published |
 | **storage** | `storage/filesystem` | Functional | Filesystem backend (Node; the CLI's default store) |
 | | `storage/sqlite` | Functional | SQLite backend (Node) |
 | | `storage/google-drive` | Functional | Google Drive backend (browser) |

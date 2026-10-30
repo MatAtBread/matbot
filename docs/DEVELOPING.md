@@ -1368,7 +1368,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
-Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin, in the repo only and not published) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
 
 | Package | Tools / Kind | Description |
 |---|---|---|
@@ -1403,7 +1403,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-tool-ts-validation` | `validate` hook · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Sits beside `json-validation` with no reference to it: a call either refuses is refused, in any load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
-| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
+| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload. In the repo only; not published |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
 | `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |

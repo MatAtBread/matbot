@@ -26,6 +26,8 @@ churn and less likely to affect a consumer who doesn't use them.
   (the `"legacy": true` rows, and `cancel`'s `legacy` field). A warning at startup still counts any that
   are left; re-create each with `background_job` and delete the old row. To list and cancel them with a
   tool, run 0.4.x once.
+- **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
+  stays in the repository, typechecked with the rest. The versions already on npm are left there.
 
 ## 0.4.25
 
