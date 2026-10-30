@@ -19,6 +19,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`turnActivity` / `usageEntries` / `usageByProvider` no longer read the pre-0.4.3 usage shapes** — an
   assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
   report no usage for those turns.
+
+### Optional
+
 - **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):
   - `storage-sqlite` no longer renames a table named under the pre-0.4.4 scheme (`a-b` stored as
@@ -26,9 +29,6 @@ churn and less likely to affect a consumer who doesn't use them.
     0.5.0, an affected namespace looks empty and the old table is left in the file.
   - `files` and `storage-profiles` no longer read an unnamed file's sidecar written before 0.2.4 (an `id`
     field and no `dataFile`). No version rewrites these; add `"dataFile": "<id>.data"` to keep one.
-
-### Optional
-
 - **`tool-background` is removed** (`@matatbread/matbot-tool-background`: `background`, `every_action`),
   superseded by `background-jobs` / `background-jobs-node` since 0.4.18. An installation still listing it
   under `plugins:` fails to load it. Its schedules, in the `schedules` store, are not run by anything.
