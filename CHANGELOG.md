@@ -38,7 +38,7 @@ churn and less likely to affect a consumer who doesn't use them.
   `ToolContract<…>` string flattened to the wire's `params`/`result` text without a compiler. Both
   `ToolTypeIndex` implementations had a copy, neither of which knew a string literal or an arrow, so
   `'a|b'` split an arm and the `>` of `=>` closed a bracket. A `toolContract` that mixes arms with a bare
-  type now reads as `unknown` on node too, as it did in the browser.
+  type keeps its arms in the browser too, as it did on node; the browser used to read it as `unknown`.
 - **`describePlugins`, `storeSecret`** (core) — `plugin list`'s report from the registries, and `plugin
   store-key`. Both hosts' `plugin` tools use them; `list` now carries `resolvedUrl` in the browser when
   the loader recorded one.

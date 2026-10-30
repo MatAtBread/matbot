@@ -71,27 +71,34 @@ export function splitTypeText(s: string, seps: string): string[] {
   return parts;
 }
 
-/**
- * The `params`/`result` union text of a `ToolContract<Result, Params>` type, or a `|`-union of such arms —
- * the flat form the wire carries. `null` unless EVERY arm is a `ToolContract`, which is what a contract is:
- * a bare type there names no call.
- */
-export function parseContractArms(type: string): { params: string; result: string } | null {
+function armTexts(type: string): { results: string[]; params: string[]; bare: boolean } {
   const results: string[] = [], params: string[] = [];
+  let bare = false;
   for (const armText of splitTypeText(type, '|')) {
     const t = armText.trim();
     if (t === '') continue;                          // the leading `|` of a multi-line union
     const m = t.match(/^ToolContract\s*<([\s\S]*)>$/);
-    if (!m) return null;
+    if (!m) { bare = true; continue; }
     const inner = splitTypeText(m[1]!, ',');
     results.push((inner[0] ?? 'unknown').trim());
     params.push((inner[1] ?? 'unknown').trim());
   }
-  return results.length ? { result: results.join(' | '), params: params.join(' | ') } : null;
+  return { results, params, bare };
 }
 
-/** {@link parseContractArms} for a tool's `toolContract` string, which is always meant as one: anything
- *  else reads as `unknown` both ways rather than as no contract. */
+/**
+ * The `params`/`result` union text of a `ToolContract<Result, Params>` type, or a `|`-union of such arms —
+ * the flat form the wire carries. `null` unless EVERY arm is a `ToolContract`, which is what a source
+ * augmentation's entry must be to be a contract at all: a bare type there names no call.
+ */
+export function parseContractArms(type: string): { params: string; result: string } | null {
+  const { results, params, bare } = armTexts(type);
+  return results.length && !bare ? { result: results.join(' | '), params: params.join(' | ') } : null;
+}
+
+/** The same for a tool's `toolContract` string, which is always meant as one: a bare type beside the arms
+ *  is dropped and the arms kept, since each still names a call; with no arm at all, `unknown` both ways. */
 export function splitContract(contract: string): { params: string; result: string } {
-  return parseContractArms(contract) ?? { result: 'unknown', params: 'unknown' };
+  const { results, params } = armTexts(contract);
+  return { result: results.join(' | ') || 'unknown', params: params.join(' | ') || 'unknown' };
 }
