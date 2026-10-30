@@ -4,7 +4,7 @@ import type {
   Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
 import { buildAsyncFn, buildBodyFn, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
-import { parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
+import { DEFINITION_INVALID, DefinitionError, parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
 import { Lineage, carriedNote } from './lineage.js';
@@ -150,7 +150,7 @@ function paramsTypeText(params: ParsedParam[]): string {
 function assertNoInjectedClash(params: ParsedParam[]): void {
   const clash = params.find(p => (INJECTED as readonly string[]).includes(p.name));
   if (clash === undefined) return;
-  throw new Error(`parameter "${clash.name}" collides with an injected binding (${INJECTED.join(', ')}) — inside the body it would shadow it. Rename the parameter.`);
+  throw new DefinitionError(`parameter "${clash.name}" collides with an injected binding (${INJECTED.join(', ')}) — inside the body it would shadow it. Rename the parameter.`);
 }
 
 /** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
@@ -187,7 +187,7 @@ function exportSchemas(report: ToolCheckReport, parsed: ParsedPackage): Record<s
     if (got === undefined || got.length !== 1 || e.param === undefined) continue;
     const schema = got[0]!.schema;
     if (schema['type'] !== undefined && schema['type'] !== 'object') {
-      throw new Error(`exported function "${e.name}" takes a ${JSON.stringify(schema['type'])} — a tool's parameter must be an object, e.g. \`${e.name}(args: { value: ${e.param.type ?? 'string'} })\`.`);
+      throw new DefinitionError(`exported function "${e.name}" takes a ${JSON.stringify(schema['type'])} — a tool's parameter must be an object, e.g. \`${e.name}(args: { value: ${e.param.type ?? 'string'} })\`.`);
     }
     out[e.name] = { ...schema, type: 'object' };
   }
@@ -199,10 +199,10 @@ type DefinedSignature = ParsedSignature & { name: string; returnType: string };
 /** What every `define` requires of its source, whichever scope it is going to. */
 function parseDefinition(definition: string): DefinedSignature {
   const sig = parseSignature(definition);
-  if (sig.name === undefined) throw new Error('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
-  if (sig.name === TOOL_NAME) throw new Error(`"${TOOL_NAME}" is reserved.`);
+  if (sig.name === undefined) throw new DefinitionError('define requires a NAMED function, e.g. `weather(city: string): string { … }`.');
+  if (sig.name === TOOL_NAME) throw new DefinitionError(`"${TOOL_NAME}" is reserved.`);
   assertNoInjectedClash(sig.params);
-  if (sig.returnType === undefined) throw new Error('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
+  if (sig.returnType === undefined) throw new DefinitionError('define requires an explicit return type — it is verified against the body and becomes the tool\'s result contract, e.g. `weather(city: string): string { … }`. Use `: void` for a side-effect-only tool, or `: unknown` if the result is genuinely dynamic.');
   return { ...sig, name: sig.name, returnType: sig.returnType };
 }
 
@@ -258,7 +258,7 @@ function definedTool(
       execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
         const obj = (input ?? {}) as Record<string, unknown>;
         const bad = extra?.check?.(obj);
-        if (bad !== undefined) return (async function* () { yield { type: 'error', message: bad } satisfies ToolEvent; })();
+        if (bad !== undefined) return (async function* () { yield { type: 'error', message: bad, code: DEFINITION_INVALID } satisfies ToolEvent; })();
         return runFunction(machine, ctx, fn, paramNames.map(p => obj[p]), { tool: rec.name, source: rec.definition, resolve: lineage.resolve });
       },
     },
@@ -368,7 +368,7 @@ class FunctionStore {
     let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig), { parametersOf: ['__fn'] });
-      if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
+      if (!report.ok) throw new DefinitionError(globalTypeError(report, sessionNames));
       // An index that cannot check says so, and a clean report from one proves nothing. The browser
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
       // verified when nothing had read them.
@@ -422,7 +422,7 @@ class FunctionStore {
       ({ items: docs } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true }));
     } else {
       const doc = await this.store.get(name);
-      if (doc === null) throw new Error(`No function named "${name}" was defined here.`);
+      if (doc === null) throw new DefinitionError(`No function named "${name}" was defined here.`);
       docs = [doc];
     }
 
@@ -467,7 +467,7 @@ class FunctionStore {
   private holderOf(name: string): string | undefined { return foreignHolder(this.machine, this.registered, name); }
 
   private assertFree(name: string): void {
-    if (this.holderOf(name) !== undefined) throw new Error(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
+    if (this.holderOf(name) !== undefined) throw new DefinitionError(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
   }
 
   private async build(rec: FunctionRecord, deferCompile = false, inputSchema?: JSONSchema): Promise<Tool> {
@@ -552,7 +552,7 @@ class PackageStore {
     let inputSchemas: Record<string, JSONSchema> | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(definition, { parametersOf: parsed.exports.map(e => e.name) });
-      if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
+      if (!report.ok) throw new DefinitionError(globalTypeError(report, sessionNames));
       checked = report.checked;
       checkedAgainst = report.environment;
       inputSchemas = exportSchemas(report, parsed);
@@ -586,7 +586,7 @@ class PackageStore {
       ({ items: docs } = await this.store.query({ sort: [{ field: 'id', dir: 'asc' }], immutable: true }));
     } else {
       const doc = await this.store.get(name);
-      if (doc === null) throw new Error(`No package named "${name}" was defined here.`);
+      if (doc === null) throw new DefinitionError(`No package named "${name}" was defined here.`);
       docs = [doc];
     }
     const results: CheckResult[] = [];
@@ -636,7 +636,7 @@ class PackageStore {
     const mine = this.owned.get(name);
     for (const e of parsed.exports) {
       if (foreignHolder(this.machine, mine, e.toolName) !== undefined) {
-        throw new Error(`A tool named "${e.toolName}" already exists and wasn't defined by package "${name}" — rename the package or the function. Nothing was registered.`);
+        throw new DefinitionError(`A tool named "${e.toolName}" already exists and wasn't defined by package "${name}" — rename the package or the function. Nothing was registered.`);
       }
     }
     const machine = this.machine;
@@ -721,14 +721,14 @@ class SessionFunctions {
    */
   async define(ctx: ToolContext, definition: string, description?: string, noTypeCheck = false): Promise<{ marker: SessionFunctionMarker; name: string; parameters: ParsedParam[]; carried: 'kept' | 'reset' | undefined }> {
     const sig = parseDefinition(definition);
-    if (this.machine.tools.resolve(sig.name) !== null) throw new Error(shadowMessage(sig.name));
+    if (this.machine.tools.resolve(sig.name) !== null) throw new DefinitionError(shadowMessage(sig.name));
     const index = this.machine.ToolTypeIndex;
     let checked = false;
     let checkedAgainst: string | undefined;
     let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
       const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }), { parametersOf: ['__fn'] });
-      if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
+      if (!report.ok) throw new DefinitionError(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
       checked = report.checked;
       checkedAgainst = report.environment;
       inputSchema = checkedSchema(report, sig.params);
@@ -1005,7 +1005,10 @@ for). On node a body may also import platform modules, with the user's permissio
 Do NOT wrap a single tool call whose result you are not reducing — call the tool directly.
 `;
 
-const errorEvent = (message: string): ToolEvent => ({ type: 'error', message });
+const invalid = (message: string): ToolEvent => ({ type: 'error', message, code: DEFINITION_INVALID });
+const caught  = (e: unknown): ToolEvent => e instanceof DefinitionError
+  ? invalid(e.message)
+  : { type: 'error', message: e instanceof Error ? e.message : String(e) };
 
 function functionTool(machine: MatbotMachine, store: FunctionStore, packages: PackageStore, sessions: SessionFunctions): Tool<ToolResultOf<'tool_function'>> {
   return {
@@ -1017,8 +1020,8 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
         const act = (input ?? {}) as ToolFunctionAction;
         switch (act.action) {
           case 'define': {
-            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('define requires a "definition" (a named function).'); return; }
-            if (act.scope !== undefined && act.scope !== 'global' && act.scope !== 'session') { yield errorEvent('define: "scope" must be "global" or "session".'); return; }
+            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield invalid('define requires a "definition" (a named function).'); return; }
+            if (act.scope !== undefined && act.scope !== 'global' && act.scope !== 'session') { yield invalid('define: "scope" must be "global" or "session".'); return; }
             const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
             const mine = sessionFunctions(ctx.session);
             try {
@@ -1036,14 +1039,14 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               if (promoted) yield sessionMarker({ op: 'remove', name });
               const params = parameters.map(p => p.name).join(', ');
               yield { type: 'result', value: { message: `Defined tool "${name}"${params ? ` (${params})` : ''}.${note}${promoted ? ' It replaces the session function of that name.' : ''}${carriedNote(carried)} Call it directly to run.`, tool: name, parameters } };
-            } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
+            } catch (e) { yield caught(e); }
             return;
           }
           case 'execute': {
-            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('execute requires a "definition" — the body, between braces.'); return; }
+            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield invalid('execute requires a "definition" — the body, between braces.'); return; }
             let fn: CompiledFn;
             try { fn = await buildBodyFn(machine, act.definition); }
-            catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); return; }
+            catch (e) { yield caught(e); return; }
             // Type-check the body against the live tool types before running (node only; opt out with
             // noTypeCheck). The snippet is the same wrap the runner compiles — an empty head around the
             // author's own block — so what is graded is exactly what runs, and there is no signature to
@@ -1051,24 +1054,24 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true) {
               const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools));
-              if (!report.ok) { yield errorEvent(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
+              if (!report.ok) { yield invalid(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [], { tool: `${TOOL_NAME} execute`, source: act.definition, gateSubject: EXECUTE_SUBJECT });
             return;
           }
           case 'package': {
-            if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('package requires a "name" (the package name).'); return; }
-            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield errorEvent('package requires a "definition" (the module source).'); return; }
+            if (typeof act.name !== 'string' || act.name === '') { yield invalid('package requires a "name" (the package name).'); return; }
+            if (typeof act.definition !== 'string' || act.definition.trim() === '') { yield invalid('package requires a "definition" (the module source).'); return; }
             try {
               const { tools, carried } = await packages.define(ctx, act.name, act.definition, act.noTypeCheck === true, sessionFunctions(ctx.session).keys());
               const note = act.noTypeCheck === true ? ' (type-check skipped)' : '';
               yield { type: 'result', value: { message: `Defined package "${act.name}" exporting ${tools.map(t => `"${t}"`).join(', ')}.${note}${carriedNote(carried)} Call them by those names.`, package: act.name, tools } };
-            } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
+            } catch (e) { yield caught(e); }
             return;
           }
           case 'check': {
             if (act.name !== undefined && (typeof act.name !== 'string' || act.name === '')) {
-              yield errorEvent('check: "name" must be the name of a defined function — omit it to check every one.');
+              yield invalid('check: "name" must be the name of a defined function — omit it to check every one.');
               return;
             }
             try {
@@ -1092,7 +1095,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
                 checked: results.every(r => r.checked),
                 results,
               } };
-            } catch (e) { yield errorEvent(e instanceof Error ? e.message : String(e)); }
+            } catch (e) { yield caught(e); }
             return;
           }
           case 'list': {
@@ -1120,7 +1123,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               yield { type: 'result', value: { message: ok ? `Removed package "${act.package}" and its tools.` : `No package named "${act.package}" was defined here.` } };
               return;
             }
-            if (typeof act.name !== 'string' || act.name === '') { yield errorEvent('remove requires a "name" (a function) or a "package".'); return; }
+            if (typeof act.name !== 'string' || act.name === '') { yield invalid('remove requires a "name" (a function) or a "package".'); return; }
             // A global one first: in the rare case both exist, the session one is already shadowed, and a
             // person saying "remove the X tool" means the one they can see everywhere.
             if (!await store.has(act.name) && sessionFunctions(ctx.session).has(act.name)) {
@@ -1138,7 +1141,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             return;
           }
           default:
-            yield errorEvent(`Unknown ${TOOL_NAME} action "${String((act as { action?: unknown }).action)}".`);
+            yield invalid(`Unknown ${TOOL_NAME} action "${String((act as { action?: unknown }).action)}".`);
         }
       },
     },

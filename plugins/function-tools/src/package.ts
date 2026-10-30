@@ -1,7 +1,7 @@
 import type { FunctionCall, JSONSchema } from '@matatbread/matbot-plugin-api';
 import { INJECTED, compileUnder, erase, type CompileHost, type CompiledFn } from './compile.js';
 import { inertEnd, matchBrace, matchParen } from './scan.js';
-import { parseSignature, tsTypeToSchema, unwrapPromise, type LocalTypes, type ParsedParam } from './signature.js';
+import { DefinitionError, parseSignature, tsTypeToSchema, unwrapPromise, type LocalTypes, type ParsedParam } from './signature.js';
 
 /** The separator between a package name and an export's name in the registered tool name. Not `.`, which
  *  Anthropic and OpenAI reject in a tool name, and not `-`, which is not an identifier character: the name
@@ -62,9 +62,9 @@ function assertStatement(source: string, at: number): void {
   const head = (source.slice(at, at + 80).split('\n')[0] ?? '').trim();
   const word = /^[A-Za-z_$][\w$]*/.exec(head)?.[0];
   const reason = word !== undefined ? REFUSED[word] : undefined;
-  if (reason !== undefined) throw new Error(`\`${head}\` is not allowed in a package: ${reason}. Only ${ALLOWED} may appear at the top level. ${STATELESS}`);
+  if (reason !== undefined) throw new DefinitionError(`\`${head}\` is not allowed in a package: ${reason}. Only ${ALLOWED} may appear at the top level. ${STATELESS}`);
   if (DECLARATION.test(head)) return;
-  throw new Error(`top-level statement \`${head}\` is not allowed in a package — it would run again on every tool call, not once. Only ${ALLOWED} may appear at the top level. ${STATELESS}`);
+  throw new DefinitionError(`top-level statement \`${head}\` is not allowed in a package — it would run again on every tool call, not once. Only ${ALLOWED} may appear at the top level. ${STATELESS}`);
 }
 
 /**
@@ -149,7 +149,7 @@ function declarationEnd(s: string, at: number): number {
   const end = /^(?:async\s+)?function\b/.test(rest) ? functionDeclarationEnd(s, head)
     : /^interface\b/.test(rest) ? interfaceEnd(s, head)
     : initializerEnd(s, head, /^type\b/.test(rest));
-  if (end === -1) throw new Error(`could not find the end of \`${headLine(s, at)}\` — check that its brackets balance.`);
+  if (end === -1) throw new DefinitionError(`could not find the end of \`${headLine(s, at)}\` — check that its brackets balance.`);
   return end;
 }
 
@@ -230,7 +230,7 @@ function initializerEnd(s: string, head: number, isType: boolean): number {
       if (broke && ended && !continuesLine(s, i)) return last;
       if (c === ';') return i;
       if (!arrow && /^await\b/.test(s.slice(i, i + 6)) && !IDENT_CHAR.test(s[i - 1] ?? '')) {
-        throw new Error(`top-level \`await\` is not allowed in a package (\`${headLine(s, i)}\`) — it would repeat on every tool call rather than load once. Await inside the function that needs the value. ${STATELESS}`);
+        throw new DefinitionError(`top-level \`await\` is not allowed in a package (\`${headLine(s, i)}\`) — it would repeat on every tool call rather than load once. Await inside the function that needs the value. ${STATELESS}`);
       }
     }
     broke = false;
@@ -261,7 +261,7 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 export function assertPackageName(name: string): void {
   // No `__` inside and no trailing `_`, so `<package>__<export>` splits back one way only.
   if (!/^[A-Za-z_]\w*$/.test(name) || name.includes(PACKAGE_SEPARATOR) || name.endsWith('_')) {
-    throw new Error(`package name "${name}" must be an identifier of letters, digits and single underscores, not ending in "_" (it prefixes each tool name as "${name}${PACKAGE_SEPARATOR}<function>").`);
+    throw new DefinitionError(`package name "${name}" must be an identifier of letters, digits and single underscores, not ending in "_" (it prefixes each tool name as "${name}${PACKAGE_SEPARATOR}<function>").`);
   }
 }
 
@@ -349,26 +349,26 @@ export function parsePackage(packageName: string, source: string): ParsedPackage
     const head = source.slice(i + 6).match(/^\s+((?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*)([(<])/);
     if (head === null) {
       const what = source.slice(i, i + 40).split('\n')[0];
-      throw new Error(`only functions can be exported from a package — found \`${what}\`. Types, constants and helpers are private to the package; drop their \`export\`.`);
+      throw new DefinitionError(`only functions can be exported from a package — found \`${what}\`. Types, constants and helpers are private to the package; drop their \`export\`.`);
     }
-    if (/\*/.test(head[1] as string)) throw new Error(`exported function "${head[2]}" is a generator — a tool returns one result.`);
+    if (/\*/.test(head[1] as string)) throw new DefinitionError(`exported function "${head[2]}" is a generator — a tool returns one result.`);
     if (head[3] === '<') {
-      throw new Error(`exported function "${head[2]}" is generic — a tool's input and result contracts must be concrete types. Keep the generic function private (drop its \`export\`) and export a non-generic wrapper that calls it.`);
+      throw new DefinitionError(`exported function "${head[2]}" is generic — a tool's input and result contracts must be concrete types. Keep the generic function private (drop its \`export\`) and export a non-generic wrapper that calls it.`);
     }
     const fnStart = i + 6 + (head[0].length - head[1]!.length - 1);
     const open    = i + 6 + head[0].length - 1;
     const end     = functionEnd(source, open);
-    if (end === -1) throw new Error(`could not find the body of exported function "${head[2]}" — check that its braces balance.`);
+    if (end === -1) throw new DefinitionError(`could not find the body of exported function "${head[2]}" — check that its braces balance.`);
     const fnSource = source.slice(fnStart, end + 1);
     exports.push(deriveExport(packageName, head[2] as string, fnSource, leadingComment(source, i), types));
     exportAt.push(i);
     i = end;
   }
 
-  if (exports.length === 0) throw new Error('a package must export at least one function — each exported function becomes a tool.');
+  if (exports.length === 0) throw new DefinitionError('a package must export at least one function — each exported function becomes a tool.');
   const names = new Set<string>();
   for (const e of exports) {
-    if (names.has(e.name)) throw new Error(`function "${e.name}" is exported twice.`);
+    if (names.has(e.name)) throw new DefinitionError(`function "${e.name}" is exported twice.`);
     names.add(e.name);
   }
   return { exports, exportAt };
@@ -376,22 +376,22 @@ export function parsePackage(packageName: string, source: string): ParsedPackage
 
 function deriveExport(packageName: string, name: string, fnSource: string, description: string | undefined, types: readonly TypeDeclaration[]): PackageExport {
   if (!/^[A-Za-z]\w*$/.test(name) || name.includes(PACKAGE_SEPARATOR)) {
-    throw new Error(`exported function "${name}" must start with a letter and contain no "${PACKAGE_SEPARATOR}" — its tool name is "${packageName}${PACKAGE_SEPARATOR}${name}", which must read back one way.`);
+    throw new DefinitionError(`exported function "${name}" must start with a letter and contain no "${PACKAGE_SEPARATOR}" — its tool name is "${packageName}${PACKAGE_SEPARATOR}${name}", which must read back one way.`);
   }
   const toolName = `${packageName}${PACKAGE_SEPARATOR}${name}`;
-  if (toolName.length > MAX_TOOL_NAME) throw new Error(`tool name "${toolName}" is longer than ${MAX_TOOL_NAME} characters, which providers reject — shorten the package or function name.`);
+  if (toolName.length > MAX_TOOL_NAME) throw new DefinitionError(`tool name "${toolName}" is longer than ${MAX_TOOL_NAME} characters, which providers reject — shorten the package or function name.`);
 
   const sig = parseSignature(fnSource);
   // One object parameter (or none) — the single-argument convention, so a call to it from inside the package and
   // `tool.<package>__<name>(…)` from outside take the same argument.
-  if (sig.params.length > 1) throw new Error(`exported function "${name}" takes ${sig.params.length} parameters — a tool takes ONE object parameter, e.g. \`${name}(args: { a: string; b: number })\`.`);
+  if (sig.params.length > 1) throw new DefinitionError(`exported function "${name}" takes ${sig.params.length} parameters — a tool takes ONE object parameter, e.g. \`${name}(args: { a: string; b: number })\`.`);
   const param = sig.params[0];
-  if (param !== undefined && param.type === undefined) throw new Error(`exported function "${name}" must declare its parameter's type — it becomes the tool's input contract.`);
-  if (sig.returnType === undefined) throw new Error(`exported function "${name}" must declare a return type — it becomes the tool's result contract (\`Promise<void>\` for a side effect).`);
+  if (param !== undefined && param.type === undefined) throw new DefinitionError(`exported function "${name}" must declare its parameter's type — it becomes the tool's input contract.`);
+  if (sig.returnType === undefined) throw new DefinitionError(`exported function "${name}" must declare a return type — it becomes the tool's result contract (\`Promise<void>\` for a side effect).`);
 
   const schema = param === undefined ? { properties: {} } : tsTypeToSchema(param.type, 0, localTypes(types));
   if (schema.type !== undefined && schema.type !== 'object') {
-    throw new Error(`exported function "${name}" takes a ${String(schema.type)} — a tool's parameter must be an object, e.g. \`${name}(args: { value: ${param?.type ?? 'string'} })\`.`);
+    throw new DefinitionError(`exported function "${name}" takes a ${String(schema.type)} — a tool's parameter must be an object, e.g. \`${name}(args: { value: ${param?.type ?? 'string'} })\`.`);
   }
   const resultType = unwrapPromise(sig.returnType);
   const toolContract = `ToolContract<${resultType}, ${param?.type ?? '{}'}>`;

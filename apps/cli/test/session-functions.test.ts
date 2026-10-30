@@ -314,6 +314,17 @@ test('execute takes a bare body, and an arrow definition is refused rather than 
   const retired = await call({ action: 'lambda', definition: 'x' });
   assert.equal(retired.at(-1)?.type, 'error');
   assert.match(errOf(retired), /[Uu]nknown tool_function action/);
+
+  // Every one of those is the caller's to fix, so each carries the validator's 422 and a transport does not
+  // answer it as a server fault. A body that throws while it RUNS is not one: that is the function's error.
+  const codeOf = (evs: ToolEvent[]): unknown => (evs.at(-1) as { code?: number }).code;
+  for (const evs of [arrow, retired, await call({ action: 'execute', definition: noSuchField }),
+                     await call({ action: 'define', definition: 'nameless(): number { return 1; }x' })]) {
+    assert.equal(codeOf(evs), 422, errOf(evs));
+  }
+  const thrown = await call({ action: 'execute', definition: `{ throw new Error('boom'); }` });
+  assert.match(errOf(thrown), /boom/);
+  assert.equal(codeOf(thrown), undefined);
 });
 
 // On node a defined tool's inputSchema is the checker's: the text path sees `Opts` as an unknown name and

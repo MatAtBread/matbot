@@ -1,5 +1,5 @@
 import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
-import { stripLeadingTrivia } from './signature.js';
+import { DefinitionError, stripLeadingTrivia } from './signature.js';
 import { gatedNetwork, type Asker } from './network.js';
 import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
@@ -82,7 +82,7 @@ export function onFirstCall<A extends unknown[]>(build: () => Promise<(...args: 
 export async function buildBodyFn(host: CompileHost, definition: string): Promise<CompiledFn> {
   const src = stripLeadingTrivia(definition);
   if (!src.startsWith('{')) {
-    throw new Error(
+    throw new DefinitionError(
       'execute takes a bare BODY, not a function: write the statements between braces, e.g. ' +
       "`{ const xs = await tool.x({}); return xs.length; }`" +
       '. There is no function head, no parameter list and no `=>` — an arrow form would compile and then return nothing at all.',
@@ -103,7 +103,7 @@ export interface Definition { ts: string; js: string }
 
 export async function erase(host: CompileHost, ts: string): Promise<Definition> {
   try { return { ts, js: await host.TypeScriptStripper.strip(ts) }; }
-  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
+  catch (e) { throw new DefinitionError(`not valid TypeScript (${msg(e)})`); }
 }
 
 export function compileUnder(

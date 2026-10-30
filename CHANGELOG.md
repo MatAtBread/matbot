@@ -64,6 +64,10 @@ churn and less likely to affect a consumer who doesn't use them.
   text-derived schema. A package export whose parameter only an alias showed to be a non-object is now
   refused, as a visibly non-object one already was.
 - **`tool-types`** — implements `parametersOf`.
+- **`function-tools`** — a `tool_function` call the caller must fix (a definition that does not parse,
+  type-check or fit a tool's shape, a name it cannot use, an unknown action) is reported with code 422,
+  as a validator's refusal is, so `POST /tools/tool_function` answers 422 instead of 500. A body that
+  throws while running, a store failure, or no type-checker being available stays a server error.
 
 - **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):

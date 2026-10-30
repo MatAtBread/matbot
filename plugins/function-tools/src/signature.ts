@@ -1,6 +1,12 @@
 import type { JSONSchema } from '@matatbread/matbot-plugin-api';
 import { inertEnd, matchBrace, matchParen, withoutComments } from './scan.js';
 
+/** A request `tool_function` cannot act on as written: a definition that does not parse, type-check or fit
+ *  a tool's shape, or a name it cannot use. The caller's to fix, so it is reported with the code a
+ *  validator's refusal carries (core's `TOOL_INPUT_INVALID`), and a transport answers 422, not 500. */
+export class DefinitionError extends Error {}
+export const DEFINITION_INVALID = 422;
+
 export interface ParsedParam {
   name:      string;
   optional:  boolean;
@@ -150,7 +156,7 @@ function parseParam(seg: string): ParsedParam | null {
   const s = withoutComments(seg).trim();   // `a: string /* the city */` must yield the type `string`
   if (s === '') return null;
   const m = s.match(/^(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)\s*(\?)?\s*(?::\s*([\s\S]+?))?\s*(?:=\s*[\s\S]+)?$/);
-  if (m === null) throw new Error(`can't parse parameter "${s}" — use simple named params, e.g. \`name: string\`.`);
+  if (m === null) throw new DefinitionError(`can't parse parameter "${s}" — use simple named params, e.g. \`name: string\`.`);
   const type = m[3]?.trim();
   return {
     name:     m[1] as string,
@@ -164,11 +170,11 @@ function parseParam(seg: string): ParsedParam | null {
 export function parseSignature(source: string): ParsedSignature {
   const src  = stripLeadingTrivia(source);
   const head = src.match(/^\s*(?:async\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)?\s*\(/);
-  if (head === null) throw new Error('not a function definition — expected `name(params) { … }`.');
+  if (head === null) throw new DefinitionError('not a function definition — expected `name(params) { … }`.');
   const name    = head[1];
   const openIdx = (head.index ?? 0) + head[0].length - 1;
   const closeIdx = matchParen(src, openIdx);
-  if (closeIdx === -1) throw new Error('unbalanced parentheses in the parameter list.');
+  if (closeIdx === -1) throw new DefinitionError('unbalanced parentheses in the parameter list.');
 
   const params = splitTopLevel(src.slice(openIdx + 1, closeIdx))
     .map(parseParam)
@@ -180,7 +186,7 @@ export function parseSignature(source: string): ParsedSignature {
   // Say so, rather than falling through to `{}` and letting the caller report the *return type* as missing:
   // an unlocatable body is what an unbalanced brace looks like from here, and blaming the signature sends
   // the author to edit a line that was already correct.
-  if (bodyOpen < 0) throw new Error('could not find the function body — check the braces balance and that the definition ends with the body\'s `}`.');
+  if (bodyOpen < 0) throw new DefinitionError('could not find the function body — check the braces balance and that the definition ends with the body\'s `}`.');
   const between    = src.slice(closeIdx + 1, bodyOpen).trim();
   const returnType = between.startsWith(':') ? between.slice(1).trim() : '';
 
