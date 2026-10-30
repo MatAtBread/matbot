@@ -101,8 +101,12 @@ export interface SessionRunner {
    *  place of the reply — the submission was made, and dropping it would lose that. A no-op if no
    *  parallel turn of the session carries this traceId. Deliberately its own method rather than an
    *  optional argument to `abort`: an implementation that ignored the argument would silently stop
-   *  everything, which is the opposite of what the caller asked. */
-  abortParallel(sessionId: string, traceId: string): void;
+   *  everything, which is the opposite of what the caller asked.
+   *
+   *  Returns whether a parallel turn carried the traceId. A parallel turn shares its session's id, so a
+   *  caller holding only a traceId — the turn a prompt came from — cannot otherwise tell whether giving
+   *  up on it means this or `cancelTurn`, and guessing the latter stops the running turn beside it. */
+  abortParallel(sessionId: string, traceId: string): boolean;
   /** Abandon the running turn (if any) WITHOUT touching the queue — `pump` advances to the next
    *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
    *  `abort`, which also clears the queue. A no-op if nothing is running. */

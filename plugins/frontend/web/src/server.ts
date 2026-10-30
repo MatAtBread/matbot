@@ -221,7 +221,9 @@ function corsHeaders(origin: string): Record<string, string> {
 // interactively — a known, deliberate blind spot. Any UI flow that needs to ask the user
 // something must drive the tool through `/submit` instead. This fallback makes that boundary
 // explicit: take the default if one was offered, otherwise fail loudly rather than hang.
-const nonInteractivePrompt: PromptFn = ((p: string | FormField, def?: string) => {
+interface ParkedPrompt { traceId: string; event: string; resolve: (answer: string) => void; cancel: () => void }
+
+const nonInteractivePrompt: PromptFn =((p: string | FormField, def?: string) => {
   const fallback = typeof p === 'string' ? def : p.default;
   return fallback !== undefined
     ? Promise.resolve(fallback)
@@ -278,15 +280,30 @@ export function createWebServer(deps: WebServerDeps) {
   // Sessions with a live server-owned busy tracker (see the submit handler). One transient tracker
   // per busy period drives the idle broadcast independently of any client events stream.
   const busyTrackers = new Set<string>();
-  // session ID → the parked prompt. `resolve` delivers an answer (applying the default fallback);
-  // `cancel` rejects it with PromptCancelledError — the "give up" path.
+  // session ID → its parked prompts, by prompt id, oldest first. `resolve` delivers an answer (applying
+  // the default fallback); `cancel` rejects it with PromptCancelledError — the "give up" path.
   //
   // `event` is the serialised `prompt` frame, kept so the prompt can be RE-SENT to a stream that
   // arrives later. Raising a prompt is one fire-and-forget write, and a stream can be absent (the user
   // is on another conversation) or dead-but-unreaped; either way the write reached nobody, nothing
   // replayed it, and the turn parked forever with no prompt anywhere on screen. The prompt is state,
   // not an event: it stays true until answered, so every new viewer of the session is told about it.
-  const pendingPrompts = new Map<string, { resolve: (answer: string) => void; cancel: () => void; event: string }>();
+  //
+  // A QUEUE per session, by prompt id, oldest first, of which only the head is shown. Turns are
+  // serialised but a turn is not — a body awaiting two gated `fetch`es at once, parallel tool calls and
+  // a parallel turn all ask concurrently. This was one slot per session, so the second prompt
+  // overwrote the first, whose promise then never settled, and the turn waited on it for ever.
+  //
+  // Queued rather than shown together, so a client sees one question at a time — which keeps the
+  // frontend contract what it always was (SSE-CLIENTS.md) and the screen quiet. The id is what makes
+  // that safe: an answer names the prompt it answers, and an answer for any but the head is refused.
+  // Without it, a second browser's late answer to a settled prompt would land on the next one — a
+  // different question, given an answer nobody gave to it.
+  const pendingPrompts = new Map<string, Map<string, ParkedPrompt>>();
+  // Newest first, so cancelling them in this order never promotes one only to cancel it.
+  const parkedIn = (sessionId: string, traceId?: string): ParkedPrompt[] =>
+    [...pendingPrompts.get(sessionId)?.values() ?? []].filter(p => traceId === undefined || p.traceId === traceId).reverse();
+  const shownIn = (sessionId: string): ParkedPrompt | undefined => pendingPrompts.get(sessionId)?.values().next().value;
 
   // Neither end of an SSE stream can tell quiet from dead without traffic on it. A socket killed by
   // sleep, a network change, a proxy's idle timeout or a frozen background tab stays `writable` here
@@ -705,34 +722,49 @@ export function createWebServer(deps: WebServerDeps) {
 
       // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
       // reach the client over its persistent GET /events/sessions/:id stream, not this request.
-      // Answered via POST /sessions/:id/prompt. (Only one prompt is outstanding per session, since
-      // turns are serialised.)
+      // Answered via POST /sessions/:id/prompt, naming the prompt by its `promptId`.
       const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
         new Promise<string>((resolve, reject) => {
           const def = typeof p === 'string' ? defaultValue : p.default;
+          const promptId = crypto.randomUUID();
           // Every settle path funnels through these two, so announcing here covers all of them: an answer
           // from any viewer, an abort, and the no-viewers-left release. The dialog is drawn in EVERY
           // browser attached to the session but can only be answered once — without this the other
-          // browsers would sit on a dead prompt forever.
-          const settled = (): void => {
-            pendingPrompts.delete(targetId);
-            sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId }));
+          // browsers would sit on a dead prompt forever. False when already settled, so a second answer
+          // racing the first is not announced twice.
+          // Only the shown prompt was ever drawn, so only it is retired — and the next in the queue is
+          // shown in its place.
+          const settled = (): boolean => {
+            const parked = pendingPrompts.get(targetId);
+            const shown  = shownIn(targetId) === parked?.get(promptId);
+            if (parked?.delete(promptId) !== true) return false;
+            if (shown) {
+              sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId, promptId }));
+              const next = shownIn(targetId);
+              if (next !== undefined) sendToSession(targetId, next.event);
+            }
+            if (parked.size === 0) pendingPrompts.delete(targetId);
             updateBusy(targetId);
+            return true;
           };
           // Built once and kept, so a stream that connects later is told about it (see pendingPrompts).
           const event = sseEvent('prompt', {
             type: 'prompt',
             traceId,
+            promptId,
             question: typeof p === 'string' ? p : p.label,
             ...(def !== undefined ? { defaultValue: def } : {}),
             ...(typeof p === 'string' ? {} : { field: p }),
           });
-          pendingPrompts.set(targetId, {
+          let parked = pendingPrompts.get(targetId);
+          if (parked === undefined) { parked = new Map(); pendingPrompts.set(targetId, parked); }
+          parked.set(promptId, {
+            traceId,
             event,
-            resolve: answer => { settled(); resolve(answer || def || ''); },
-            cancel:  ()     => { settled(); reject(promptCancelledError()); },
+            resolve: answer => { if (settled()) resolve(answer || def || ''); },
+            cancel:  ()     => { if (settled()) reject(promptCancelledError()); },
           });
-          sendToSession(targetId, event);
+          if (parked.size === 1) sendToSession(targetId, event);
           updateBusy(targetId);
         })) as PromptFn;
 
@@ -768,12 +800,23 @@ export function createWebServer(deps: WebServerDeps) {
           void (async () => {
             try {
               for await (const ev of view.events) {
+                // A turn that has ended waits on nothing, so its prompts are released at its terminal.
+                // A turn cannot end while a tool awaits a prompt, but a tool or a body can ask without
+                // awaiting (a `fetch` nobody awaits), and its question then outlives the turn — at the
+                // head of the queue, holding every later turn's prompts behind it for good.
+                if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') {
+                  for (const parked of parkedIn(targetId, ev.traceId)) parked.cancel();
+                }
                 updateBusy(targetId);
                 // Tear down only on a *genuine* idle. `idle` fires after `running` flips false, so
                 // status() is authoritative here: if a back-to-back submit has already re-armed the
                 // session (running again, or freshly queued), keep tracking — this same view stays
-                // subscribed across pump restarts and will see the next idle.
-                if (ev.type === 'idle' && !deps.run.status(targetId).busy) break;
+                // subscribed across pump restarts and will see the next idle. Nothing runs then, so a
+                // prompt still parked has nobody waiting on it.
+                if (ev.type === 'idle' && !deps.run.status(targetId).busy) {
+                  for (const parked of parkedIn(targetId)) parked.cancel();
+                  break;
+                }
               }
             } catch { /* stream torn down */ }
             finally { busyTrackers.delete(targetId); trackAc.abort(); }
@@ -827,7 +870,7 @@ export function createWebServer(deps: WebServerDeps) {
       // running turn's user message is already in the committed history the client renders before
       // connecting — so the wrap lands after that bubble whichever event arrives first. Order *within*
       // the wrap is cosmetic and only differs on a resumed stream.
-      const parked = pendingPrompts.get(sId);
+      const parked = shownIn(sId);
       if (parked !== undefined) res.write(parked.event);
 
       const ac = new AbortController();
@@ -873,19 +916,15 @@ export function createWebServer(deps: WebServerDeps) {
       // rather than hang, then drop the queue + abort the running turn. Cancel, not resolve('') —
       // giving up is the one thing the user unambiguously did, and PromptCancelledError is how a tool
       // is told so; resolving would hand it the field's default as though it had been chosen.
-      // A traceId names ONE parallel turn: stop that and nothing else. No prompt cancel on this path —
-      // `pendingPrompts` is keyed by session, so cancelling would take the running turn's prompt down
-      // with it, and the parallel turn's own stop is what its nested runner observes.
+      // A traceId names ONE parallel turn: stop that and nothing else, its prompts included — each
+      // prompt carries the trace that raised it, so the running turn's are left standing.
       // An empty body is the ordinary "stop everything" abort, so a parse failure is not an error here.
       let abortBody: { traceId?: unknown } = {};
       try { abortBody = JSON.parse(await readBody(req)) as { traceId?: unknown }; } catch { /* no body */ }
       const traceId = typeof abortBody.traceId === 'string' ? abortBody.traceId : undefined;
-      if (traceId !== undefined) {
-        deps.run.abortParallel(sId, traceId);
-      } else {
-        pendingPrompts.get(sId)?.cancel();
-        deps.run.abort(sId);
-      }
+      for (const parked of parkedIn(sId, traceId)) parked.cancel();
+      if (traceId !== undefined) deps.run.abortParallel(sId, traceId);
+      else                       deps.run.abort(sId);
       updateBusy(sId);
       json(res, 200, { ok: true });
       return;
@@ -987,16 +1026,24 @@ export function createWebServer(deps: WebServerDeps) {
     const promptMatch = /^\/sessions\/([^/]+)\/prompt$/.exec(url);
     if (method === 'POST' && promptMatch) {
       const sId = promptMatch[1]!;
-      let body: { answer?: string; cancel?: boolean };
-      try { body = JSON.parse(await readBody(req)) as { answer?: string; cancel?: boolean }; }
+      let body: { promptId?: string; answer?: string; cancel?: boolean };
+      try { body = JSON.parse(await readBody(req)) as { promptId?: string; answer?: string; cancel?: boolean }; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
-      const entry = pendingPrompts.get(sId);
-      if (!entry) { json(res, 409, { error: 'No pending prompt for this session' }); return; }
+      // The shown prompt, and only if it is the one named. A client that names none (one from before
+      // prompts had ids) answers what is shown, as it always did.
+      const entry = shownIn(sId);
+      if (!entry || (body.promptId !== undefined && pendingPrompts.get(sId)?.get(body.promptId) !== entry)) {
+        json(res, 409, { error: 'That prompt is no longer pending for this session' });
+        return;
+      }
       if (body.cancel) {
         // Give up: reject the prompt (the tool closes its call with an error result) and abandon the
-        // turn without disturbing the queue — pump advances to the next submission or idles.
-        entry.cancel();
-        deps.run.cancelTurn(sId);
+        // turn without disturbing the queue — pump advances to the next submission or idles. The turn's
+        // other prompts go with it: it is being abandoned, and a tool still parked on one would hold it.
+        // A parallel turn's prompt abandons that turn alone: it shares the session, and `cancelTurn`
+        // would stop the running turn it was asked beside.
+        for (const parked of parkedIn(sId, entry.traceId)) parked.cancel();
+        if (!deps.run.abortParallel(sId, entry.traceId)) deps.run.cancelTurn(sId);
       } else {
         entry.resolve(body.answer ?? '');
       }
@@ -1116,7 +1163,7 @@ export function createWebServer(deps: WebServerDeps) {
 
     // Settle all pending prompts so callers don't hang. Cancelled, not defaulted: the server going
     // away is not an answer, and a tool reports a cancel as an error rather than acting on it.
-    for (const entry of pendingPrompts.values()) entry.cancel();
+    for (const sessionId of [...pendingPrompts.keys()]) for (const entry of parkedIn(sessionId)) entry.cancel();
     pendingPrompts.clear();
 
     // Reject any in-flight environment round-trips so their tool calls close with an error.

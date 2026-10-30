@@ -114,8 +114,17 @@ void showDialog(ev.field).then(answer => answerPrompt(sid, { answer }));
 The frame that retires your dialog when *another* viewer answers (`prompt-resolved`) arrives on the same
 stream you just stopped reading. Await the dialog and you can never receive it.
 
-**One prompt per session at a time** — turns are serialised, so there is never a second outstanding
-question to queue.
+**One prompt per session at a time, and answer it by its id.** A turn can ask several things at once (a
+body awaiting two gated `fetch`es, parallel tool calls, a parallel turn), so the server queues them and
+shows one: the next `prompt` frame arrives after the `prompt-resolved` that retires the current one. Each
+`prompt` frame carries a `promptId`, and so does its `prompt-resolved`; send it back on
+`POST /sessions/:id/prompt` (`{ promptId, answer }` or `{ promptId, cancel: true }`). An answer naming
+anything but the prompt being shown gets a 409 and changes nothing — which is the point: two viewers
+answering the same question, the second answer arriving after the first settled it, would otherwise be
+applied to the *next* question, one nobody answered. A body with no `promptId` answers the prompt being
+shown, which is what a client written before ids did. Retire a dialog only on the `prompt-resolved` for
+its own `promptId`. Cancelling a prompt abandons its turn, so the turn's queued prompts are cancelled
+with it and never shown.
 
 ---
 

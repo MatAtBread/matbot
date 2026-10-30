@@ -292,7 +292,7 @@ test('a parallel turn can be stopped on its own, leaving the running turn alone'
   const par = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
   assert.equal(runner.status(sid).parallel, 1);
 
-  runner.abortParallel(sid, par.traceId!);
+  assert.equal(runner.abortParallel(sid, par.traceId!), true);
   while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
 
   assert.equal(runner.status(sid).running, true, 'the turn it ran beside is untouched');
@@ -318,8 +318,8 @@ test('abortParallel with an unknown traceId stops nothing', { timeout: 10000 }, 
   const collector = watch(main, events);
   await started.wait;
 
-  runner.abortParallel(sid, main.traceId!);     // the RUNNING turn's traceId, not a parallel one
-  runner.abortParallel(sid, 'nope');
+  assert.equal(runner.abortParallel(sid, main.traceId!), false);     // the RUNNING turn's traceId, not a parallel one
+  assert.equal(runner.abortParallel(sid, 'nope'), false);
   assert.equal(runner.status(sid).running, true);
 
   release.open();

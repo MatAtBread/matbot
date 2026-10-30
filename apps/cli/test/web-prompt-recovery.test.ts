@@ -54,32 +54,36 @@ const slowTool: Tool = {
   },
 };
 
-function boot(tool: Tool) {
+/** `pick` chooses which tool a turn calls from its submission's text; by default, the first. */
+function boot(tool: Tool | Tool[], pick?: (text: string) => string) {
   const session = createSession();
   const docs = new Map<string, Session>([[session.id, session]]);
   const store = {
     get:    async (id: string) => docs.get(id) ?? null,
     set:    async (id: string, v: Session) => { docs.set(id, v); },
-    cas:    async (id: string, _v: string, next: Session) => { docs.set(id, next); return next; },
+    cas:    async (id: string, _v: string, next: Session) => { docs.set(id, next); return { ok: true, doc: next }; },
     delete: async (id: string) => { docs.delete(id); },
   } as unknown as Store<Session>;
 
-  const tools = [tool];
+  const tools = Array.isArray(tool) ? tool : [tool];
   const registry = {
     register: () => {}, unregister: () => {},
     resolve: (n: string) => tools.find(t => t.name === n) ?? null,
     list: () => tools, has: (n: string) => tools.some(t => t.name === n),
   } as unknown as ToolRegistry;
 
-  let round = 0;
+  // By the history rather than a round count, so two turns at once (a parallel one) each get their own.
   const adapter: ProviderAdapter = {
     name: 'fake',
     async health() { return { ok: true } as never; },
-    complete(): AsyncIterable<CompletionEvent> {
-      const r = round++;
+    complete(messages): AsyncIterable<CompletionEvent> {
+      const answered = messages[messages.length - 1]?.content.some(c => c.type === 'tool-result') ?? false;
+      const asked = messages.findLast(m => m.role === 'user')?.content
+        .map(c => c.type === 'text' ? c.text : '').join(' ') ?? '';
+      const name = pick?.(asked) ?? tools[0]!.name;
       return (async function* () {
-        if (r === 0) yield { type: 'tool-call', id: 'c0', name: tool.name, input: {} };
-        else         yield { type: 'text-delta', delta: 'the answer' };
+        if (!answered) yield { type: 'tool-call', id: `c-${name}`, name, input: {} };
+        else           yield { type: 'text-delta', delta: 'the answer' };
         yield { type: 'done' };
       })();
     },
@@ -94,7 +98,7 @@ function boot(tool: Tool) {
     vault: { resolve: async (v: string) => v } as unknown as Vault,
     loadPlugin: async () => { throw new Error('unused'); }, unloadPlugin: async () => false,
   });
-  return { session, store, web };
+  return { session, store, web, run };
 }
 
 /** One browser's persistent per-session stream, recording the event names it receives. */
@@ -129,8 +133,8 @@ function attach(base: string, sid: string) {
 
 const settle = (ms = 400): Promise<void> => new Promise(r => setTimeout(r, ms));
 
-async function serve(tool: Tool) {
-  const b = boot(tool);
+async function serve(tool: Tool | Tool[], pick?: (text: string) => string) {
+  const b = boot(tool, pick);
   await new Promise<void>(r => b.web.server.listen(0, '127.0.0.1', r));
   const port = (b.web.server.address() as { port: number }).port;
   return { ...b, base: `http://127.0.0.1:${port}` };
@@ -322,5 +326,147 @@ test('cancelling a parked prompt clears the waiting status', { timeout: 20000 },
     await settle();
     assert.deepEqual(sidebar.statuses.at(-1), { sessionId: session.id, busy: false, prompting: false });
     sidebar.ac.abort();
+  } finally { await web.close(); }
+});
+
+// One turn asking twice at once — a body awaiting two gated `fetch`es together, parallel tool calls, a
+// parallel turn. The server held ONE prompt per session, so the second overwrote the first, whose promise
+// then never settled, and the turn waited on it for ever. They queue now, shown one at a time.
+const both: string[][] = [];
+const twiceTool: Tool = {
+  name: 'ask_twice',
+  description: 'asks two questions concurrently',
+  inputSchema: { type: 'object', properties: {} },
+  executor: {
+    async *execute(_input, ctx) {
+      const ask = (label: string) => ctx.prompt({ name: 'q', label, type: 'confirm', default: 'no' });
+      const settled = await Promise.allSettled([ask('Reach first.example?'), ask('Reach second.example?')]);
+      both.push(settled.map(s => s.status === 'fulfilled' ? s.value : 'cancelled'));
+      yield { type: 'result', value: 'asked' };
+    },
+  },
+};
+
+const promptsIn = (frames: string[]) => frames
+  .filter(f => f.startsWith('event: prompt\n'))
+  .map(f => JSON.parse(/^data: (.*)$/m.exec(f)![1]!) as { promptId: string; question: string });
+const answer = (base: string, sid: string, body: object): Promise<Response> =>
+  fetch(`${base}/sessions/${sid}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+test('two prompts at once are both answered, one shown at a time, and the turn completes', { timeout: 20000 }, async () => {
+  both.length = 0;
+  const { session, base, web } = await serve(twiceTool);
+  try {
+    const tab = attach(base, session.id);
+    await tab.ready;
+    await submit(base, session.id);
+    await settle();
+    const [first, ...rest] = promptsIn(tab.frames);
+    assert.match(first!.question, /first\.example/);
+    assert.equal(rest.length, 0, 'the second waits until the first is settled');
+
+    // A tab opening now is shown the same one question.
+    const late = attach(base, session.id);
+    await late.ready;
+    await settle(100);
+    assert.deepEqual(promptsIn(late.frames).map(p => p.promptId), [first!.promptId]);
+
+    assert.equal((await answer(base, session.id, { promptId: first!.promptId, answer: 'no' })).status, 200);
+    await settle();
+    const second = promptsIn(tab.frames)[1]!;
+    assert.match(second.question, /second\.example/);
+
+    // The other tab's late answer to the FIRST question must not land on the second.
+    assert.equal((await answer(base, session.id, { promptId: first!.promptId, answer: 'yes' })).status, 409);
+    await settle(100);
+    assert.deepEqual(both, [], 'still waiting on the second question');
+
+    assert.equal((await answer(base, session.id, { promptId: second.promptId, answer: 'no' })).status, 200);
+    await settle();
+    assert.deepEqual(both, [['no', 'no']]);
+    tab.ac.abort(); late.ac.abort();
+  } finally { await web.close(); }
+});
+
+test('cancelling one of a turn\'s prompts cancels the rest, so nothing is left waiting', { timeout: 20000 }, async () => {
+  both.length = 0;
+  const { session, base, web } = await serve(twiceTool);
+  try {
+    const tab = attach(base, session.id);
+    await tab.ready;
+    await submit(base, session.id);
+    await settle();
+    const [first] = promptsIn(tab.frames);
+    await answer(base, session.id, { promptId: first!.promptId, cancel: true });
+    await settle();
+    assert.equal(promptsIn(tab.frames).length, 1, 'the queued prompt is cancelled, never shown');
+    assert.deepEqual(both, [['cancelled', 'cancelled']]);
+    tab.ac.abort();
+  } finally { await web.close(); }
+});
+
+// A tool — or a function body — can ask without waiting for the answer (a `fetch` nobody awaits), and its
+// turn then ends with the question still parked. Queued, it would sit at the head for good and hold every
+// later turn's prompts behind it. A turn that has ended waits on nothing, so its prompts go with it.
+const strayTool: Tool = {
+  name: 'ask_and_leave',
+  description: 'raises a prompt and does not wait for it',
+  inputSchema: { type: 'object', properties: {} },
+  executor: {
+    async *execute(_input, ctx) {
+      ctx.prompt({ name: 'q', label: 'Reach stray.example?', type: 'confirm', default: 'no' }).then(a => both.push([a]), () => both.push(['cancelled']));
+      yield { type: 'result', value: 'left' };
+    },
+  },
+};
+
+test('a prompt nobody waits on is released when its turn ends', { timeout: 20000 }, async () => {
+  both.length = 0;
+  const { session, base, web } = await serve(strayTool);
+  try {
+    const tab = attach(base, session.id);
+    await tab.ready;
+    await submit(base, session.id);
+    await settle();
+    assert.equal(promptsIn(tab.frames).length, 1);
+    assert.ok(tab.seen.includes('prompt-resolved'), `the dialog is retired; saw ${tab.seen.join(', ')}`);
+    assert.deepEqual(both, [['cancelled']], 'cancelled, never answered with its default');
+    assert.equal((await answer(base, session.id, { answer: 'yes' })).status, 409, 'nothing is left at the head of the queue');
+    tab.ac.abort();
+  } finally { await web.close(); }
+});
+
+// A parallel turn shares its session, so its prompts queue with the running turn's — and giving up on
+// one used to `cancelTurn` the SESSION, stopping the turn it was asked beside rather than its own.
+test('cancelling a parallel turn\'s prompt stops that turn, not the one it runs beside', { timeout: 20000 }, async () => {
+  prompted.length = 0;
+  const { session, store, base, web, run } = await serve([slowTool, confirmTool], text => text.includes('side') ? confirmTool.name : slowTool.name);
+  try {
+    const tab = attach(base, session.id);
+    await tab.ready;
+    const { traceId: main } = await (await submit(base, session.id)).json() as { traceId: string };
+    await settle();
+    await fetch(`${base}/sessions/${session.id}/submit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'side', provider: 'fake', mode: 'parallel' }),
+    });
+    await settle();
+    assert.equal(run.status(session.id).parallel, 1);
+    const [asked] = promptsIn(tab.frames);
+    assert.ok(asked, 'the parallel turn is asking');
+
+    assert.equal((await answer(base, session.id, { promptId: asked.promptId, cancel: true })).status, 200);
+    await settle();
+    assert.equal(run.status(session.id).parallel, 0);
+
+    releaseTool();
+    await settle();
+    const ended = tab.frames.filter(f => f.startsWith('event: aborted\n'))
+      .map(f => (JSON.parse(/^data: (.*)$/m.exec(f)![1]!) as { traceId?: string }).traceId);
+    assert.ok(!ended.includes(main), 'the turn it ran beside was not stopped');
+    const texts = (await store.get(session.id))?.messages.flatMap(m => m.content.map(c => c.type === 'text' ? c.text : '')) ?? [];
+    assert.ok(texts.some(t => t.startsWith('(No reply') && t.includes('was stopped')), 'the parallel turn was');
+    assert.ok(texts.includes('the answer'), 'and the running turn still answers');
+    tab.ac.abort();
   } finally { await web.close(); }
 });

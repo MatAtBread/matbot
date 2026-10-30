@@ -23,7 +23,8 @@ import { makeWebEnvTool } from '../src/web-env.js';
 function makeInProcessTransport(services) {
   const run = services.run;
 
-  // sid → the parked prompt (mirror server.ts pendingPrompts). resolve applies the default fallback;
+  // sid → its queue of parked prompts, promptId → prompt, of which only the head is shown (mirror
+  // server.ts pendingPrompts, which says why a queue and why ids). resolve applies the default fallback;
   // cancel rejects with PromptCancelledError (the "give up" path). `event` is the `prompt` event itself,
   // kept so a stream that starts draining LATER is told about it: injecting is one fire-and-forget pass
   // over whatever hubs exist, and a session the user is not currently looking at has none — so the
@@ -31,6 +32,10 @@ function makeInProcessTransport(services) {
   // (No socket here, so none of the liveness machinery the HTTP transport needs applies; this half of the
   // problem is not about sockets at all, which is why it bites in-process too.)
   const pendingPrompts = new Map();
+  // Newest first, so cancelling in this order never promotes one only to cancel it.
+  const parkedIn = (sid, traceId) =>
+    [...pendingPrompts.get(sid)?.values() ?? []].filter(p => traceId === undefined || p.traceId === traceId).reverse();
+  const shownIn = sid => pendingPrompts.get(sid)?.values().next().value;
   // callId → settlers for an in-flight web_user_environment round-trip (mirror server.ts
   // pendingEvalCalls). Keyed by the tool call's callId, answered via answerEnv.
   const pendingEvalCalls = new Map();
@@ -121,24 +126,37 @@ function makeInProcessTransport(services) {
       const def = typeof p === 'string' ? defaultValue : p.default;
       // Mirror server.ts: every settle path funnels through these, and each announces the prompt dead so
       // an attached UI can retire its dialog (one window here, but app.js is shared with the HTTP build).
+      const promptId = crypto.randomUUID();
       const settled = () => {
-        pendingPrompts.delete(sid);
-        for (const inject of hub(sid)) inject({ type: 'prompt-resolved', traceId });
+        const parked = pendingPrompts.get(sid);
+        const shown  = shownIn(sid) === parked?.get(promptId);
+        if (parked?.delete(promptId) !== true) return false;
+        if (shown) {
+          for (const inject of hub(sid)) inject({ type: 'prompt-resolved', traceId, promptId });
+          const next = shownIn(sid);
+          if (next !== undefined) for (const inject of hub(sid)) inject(next.event);
+        }
+        if (parked.size === 0) pendingPrompts.delete(sid);
         updateBusy(sid);
+        return true;
       };
       const ev = {
         type: 'prompt',
         traceId,
+        promptId,
         question: typeof p === 'string' ? p : p.label,
         ...(def !== undefined ? { defaultValue: def } : {}),
         ...(typeof p === 'string' ? {} : { field: p }),
       };
-      pendingPrompts.set(sid, {
+      let parked = pendingPrompts.get(sid);
+      if (parked === undefined) { parked = new Map(); pendingPrompts.set(sid, parked); }
+      parked.set(promptId, {
+        traceId,
         event:   ev,
-        resolve: answer => { settled(); resolve(answer || def || ''); },
-        cancel:  ()     => { settled(); reject(promptCancelledError()); },
+        resolve: answer => { if (settled()) resolve(answer || def || ''); },
+        cancel:  ()     => { if (settled()) reject(promptCancelledError()); },
       });
-      for (const inject of hub(sid)) inject(ev);
+      if (parked.size === 1) for (const inject of hub(sid)) inject(ev);
       updateBusy(sid);
     });
   }
@@ -212,8 +230,16 @@ function makeInProcessTransport(services) {
         (async () => {
           try {
             for await (const ev of view.events) {
+              // A turn that has ended waits on nothing: its prompts are released at its terminal, and any
+              // left at idle (mirror server.ts, which says why — a prompt nobody awaited outlives its turn).
+              if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') {
+                for (const parked of parkedIn(sid, ev.traceId)) parked.cancel();
+              }
               updateBusy(sid);
-              if (ev.type === 'idle' && !run.status(sid).busy) break;
+              if (ev.type === 'idle' && !run.status(sid).busy) {
+                for (const parked of parkedIn(sid)) parked.cancel();
+                break;
+              }
             }
           } catch { /* stream torn down */ }
           finally { busyTrackers.delete(sid); trackAc.abort(); }
@@ -241,7 +267,7 @@ function makeInProcessTransport(services) {
     // another conversation). Queued ahead of the runner's replay below, which is where it belongs: the
     // UI creates a turn's render state lazily, and the running turn's user message is already in the
     // committed history it renders before subscribing.
-    const parked = pendingPrompts.get(sid);
+    const parked = shownIn(sid);
     if (parked !== undefined) inject(parked.event);
 
     let view;
@@ -279,13 +305,14 @@ function makeInProcessTransport(services) {
   }
 
   async function answerPrompt(sid, body) {
-    const entry = pendingPrompts.get(sid);
-    if (!entry) return;
+    // The shown prompt, and only if it is the one named (mirror server.ts).
+    const entry = shownIn(sid);
+    if (!entry || (body.promptId !== undefined && pendingPrompts.get(sid)?.get(body.promptId) !== entry)) return;
     if (body.cancel) {
       // Give up: reject the prompt (the tool closes its call with an error result) and abandon the
-      // turn without disturbing the queue (mirror server.ts).
-      entry.cancel();
-      run.cancelTurn(sid);
+      // turn without disturbing the queue, its other prompts with it (mirror server.ts).
+      for (const parked of parkedIn(sid, entry.traceId)) parked.cancel();
+      if (!run.abortParallel(sid, entry.traceId)) run.cancelTurn(sid);
     } else {
       entry.resolve(body.answer ?? '');
     }
@@ -300,13 +327,15 @@ function makeInProcessTransport(services) {
   }
 
   async function abort(sid, traceId) {
-    // A traceId names ONE parallel turn: stop that and nothing else. No prompt release on that path —
-    // `pendingPrompts` is keyed by session, so releasing would take the running turn's prompt with it.
-    if (traceId !== undefined) { run.abortParallel(sid, traceId); updateBusy(sid); return; }
+    // A traceId names ONE parallel turn: stop that and nothing else, its prompts included.
+    if (traceId !== undefined) {
+      for (const parked of parkedIn(sid, traceId)) parked.cancel();
+      run.abortParallel(sid, traceId); updateBusy(sid); return;
+    }
     // Release any pending prompt first so a turn parked on ctx.prompt() observes the abort rather
     // than hangs, then drop the queue + abort the running turn (mirror server.ts). Cancel, not
     // resolve(''): that hands the tool the field's default as though it had been chosen.
-    pendingPrompts.get(sid)?.cancel();
+    for (const parked of parkedIn(sid)) parked.cancel();
     run.abort(sid);
     updateBusy(sid);
   }

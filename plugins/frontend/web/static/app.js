@@ -3731,7 +3731,8 @@ async function renderTurn(sid, traceId) {
   // The turn's outstanding interactive prompt, if any: `{ dismiss }`. The dialog is drawn in every
   // browser attached to the session but answered in only one, so the others are retired by the
   // server's `prompt-resolved`. Cleared as soon as it settles here, so our own answer's echo is a no-op.
-  /** @type {{ dismiss: () => void }} */
+  // One at a time: the server queues a turn's concurrent prompts and shows the next once this settles.
+  /** @type {{ promptId?: string, dismiss: () => void }} */
   let livePrompt = null;
 
   // First visible activity for this turn: drop the queued egg-timer and create the assistant wrap
@@ -4067,7 +4068,7 @@ async function renderTurn(sid, traceId) {
             const unmark = () => block.querySelectorAll('.prompt-choice-btn.primary').forEach(b => b.classList.remove('primary'));
             // Retire the dialog without answering — someone else got there first. Resolving with
             // `dismissed` keeps the single settle path below from POSTing an answer nobody asked for.
-            livePrompt = { dismiss: () => {
+            livePrompt = { promptId: ev.promptId, dismiss: () => {
               unmark();
               done();
               block.classList.add('settled');
@@ -4188,13 +4189,16 @@ async function renderTurn(sid, traceId) {
           void answered.then(result => {
             livePrompt = null;
             if (result.dismissed) return;
-            return T.answerPrompt(sid, result.cancelled ? { cancel: true } : { answer: result.answer });
+            // Named, so an answer that arrives after this prompt has settled is refused rather than
+            // given to whichever prompt the server is showing by then.
+            const id = ev.promptId !== undefined ? { promptId: ev.promptId } : {};
+            return T.answerPrompt(sid, result.cancelled ? { ...id, cancel: true } : { ...id, answer: result.answer });
           });
           break;
         }
 
         case 'prompt-resolved': {
-          livePrompt?.dismiss();
+          if (ev.promptId === undefined || livePrompt?.promptId === undefined || livePrompt.promptId === ev.promptId) livePrompt?.dismiss();
           break;
         }
 

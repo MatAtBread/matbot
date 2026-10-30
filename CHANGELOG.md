@@ -25,6 +25,9 @@ churn and less likely to affect a consumer who doesn't use them.
   runner that tells a body's code from the host's must not count a tool the body calls as the body's.
   `makeToolBox` takes it as `hostCall`, and then copies each call's params before crossing, so nothing of
   the caller's runs past it.
+- **`SessionRunner.abortParallel` returns whether a parallel turn carried the traceId.** A parallel turn
+  shares its session's id, so a caller holding only a traceId (the turn a prompt came from) could not
+  tell whether giving up on it meant that or `cancelTurn`.
 
 ### Optional
 
@@ -82,6 +85,18 @@ churn and less likely to affect a consumer who doesn't use them.
   `bash_config set` refuses one before changing anything.
 - **`function-tools`** — a body's tool calls go through the runner's `hostCall`, and a `context.progress`
   message is made a string while the body is the caller.
+- **`frontend-web`** — a turn asking two things at once no longer hangs. The server held one prompt per
+  session, so a second (a body awaiting two gated `fetch`es together, parallel tool calls, a parallel
+  turn) overwrote the first, whose promise never settled. Prompts now queue per session and are shown one
+  at a time, the next after the `prompt-resolved` retiring the last. Each `prompt` and `prompt-resolved`
+  frame carries a `promptId`, which `POST /sessions/:id/prompt` takes back; an answer naming any prompt
+  but the one shown is a 409, so a second viewer's late answer cannot land on the next question. Additive
+  for a client: one sending no `promptId` answers the prompt shown, as before. Cancelling a prompt cancels
+  the rest of its turn's, and aborting one parallel turn now cancels that turn's prompts, which it could
+  not do while they were keyed by session. A prompt nobody awaited (a body's un-awaited `fetch`) is
+  cancelled when its turn ends, rather than sitting at the head of the queue. A viewer leaving still
+  answers nothing. Cancelling a parallel turn's prompt stops that turn; it used to stop the running turn
+  beside it, and leave the parallel one to carry on. The in-process browser transport does the same.
 
 ## 0.4.24
 
