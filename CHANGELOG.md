@@ -13,10 +13,11 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Breaking changes
 
-- **Every published package is 0.5.0, and a 0.4.x plugin will not install beside it.** Each plugin
-  peer-depends on `plugin-api` with a caret range, and on 0.x `^0.4.x` excludes 0.5.0, so npm refuses
-  the install (`ERESOLVE`). Plugins with no change of their own are republished at 0.5.0 for that reason
-  alone; upgrade them together with the CLI.
+- **Every published package is 0.5.0, and npm will not install a 0.4.x plugin beside it.** This is
+  packaging, not the plugin contract: `PLUGIN_API_VERSION` is still `0.4` and plugin-api's changes are
+  additive, so a 0.4.x plugin loads. But each plugin peer-depends on `plugin-api` with a caret range, and
+  on 0.x `^0.4.x` excludes 0.5.0, so npm refuses the install (`ERESOLVE`). Plugins with no change of their
+  own are republished at 0.5.0 for that reason alone; upgrade them together with the CLI.
 - **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
   instead: several co-exist and every one is asked, where the service key held one validator and a second
   had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
