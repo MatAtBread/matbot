@@ -42,3 +42,56 @@ export function contractArms(tools: Iterable<ContractSource>): ContractArms {
   const namespaces = new Map([...groups.values()].map(g => [g.ns, g.members.map(([, tool]) => tool)] as const));
   return { preamble, arms, namespaces };
 }
+
+/**
+ * Split TypeScript type text on any of `seps` at bracket depth 0. A separator inside a string-literal type
+ * (`'a|b'`) or a comment cannot split, and the `>` of an arrow (`(x: A) => B`) closes nothing — the two ways
+ * a depth count without them goes wrong on a contract a function author wrote.
+ */
+export function splitTypeText(s: string, seps: string): string[] {
+  const parts: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '"' || c === "'" || c === '`') {
+      for (i++; i < s.length && s[i] !== c; i++) if (s[i] === '\\') i++;
+      continue;
+    }
+    if (c === '/' && (s[i + 1] === '/' || s[i + 1] === '*')) {
+      const end = s[i + 1] === '/' ? s.indexOf('\n', i) : s.indexOf('*/', i) + 1;
+      i = end <= 0 ? s.length : end;
+      continue;
+    }
+    if (c === '=' && s[i + 1] === '>') { i++; continue; }
+    if (c === '<' || c === '{' || c === '(' || c === '[') depth++;
+    else if (c === '>' || c === '}' || c === ')' || c === ']') { if (depth > 0) depth--; }
+    else if (depth === 0 && c !== undefined && seps.includes(c)) { parts.push(s.slice(start, i)); start = i + 1; }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+/**
+ * The `params`/`result` union text of a `ToolContract<Result, Params>` type, or a `|`-union of such arms —
+ * the flat form the wire carries. `null` unless EVERY arm is a `ToolContract`, which is what a contract is:
+ * a bare type there names no call.
+ */
+export function parseContractArms(type: string): { params: string; result: string } | null {
+  const results: string[] = [], params: string[] = [];
+  for (const armText of splitTypeText(type, '|')) {
+    const t = armText.trim();
+    if (t === '') continue;                          // the leading `|` of a multi-line union
+    const m = t.match(/^ToolContract\s*<([\s\S]*)>$/);
+    if (!m) return null;
+    const inner = splitTypeText(m[1]!, ',');
+    results.push((inner[0] ?? 'unknown').trim());
+    params.push((inner[1] ?? 'unknown').trim());
+  }
+  return results.length ? { result: results.join(' | '), params: params.join(' | ') } : null;
+}
+
+/** {@link parseContractArms} for a tool's `toolContract` string, which is always meant as one: anything
+ *  else reads as `unknown` both ways rather than as no contract. */
+export function splitContract(contract: string): { params: string; result: string } {
+  return parseContractArms(contract) ?? { result: 'unknown', params: 'unknown' };
+}

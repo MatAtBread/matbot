@@ -1,5 +1,5 @@
 import type { MatbotMachine, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
-import { contractArms } from '@matatbread/matbot-plugin-api';
+import { contractArms, parseContractArms, splitContract, splitTypeText } from '@matatbread/matbot-plugin-api';
 
 // A browser ToolTypeIndex. The node one (@matatbread/matbot-tool-types) runs the real TypeScript compiler
 // over each tool's on-disk source to recover its `ToolContracts` augmentation; the browser has neither the
@@ -14,45 +14,6 @@ import { contractArms } from '@matatbread/matbot-plugin-api';
 //     `wireContracts()` omits it (no misleading `unknown` result in the wire description) — mirroring node.
 // `check()` is a no-op ([] = clean): there is no compiler to grade a snippet against, so function-tools
 // degrades to guess-and-run (define/lambda still compile and run via the sucrase TypeScriptStripper).
-
-// Split on `sep` at bracket-depth 0 only (respecting `<> {} () []`), so a top-level `|`/`,` inside a nested
-// type isn't mistaken for a separator.
-function splitTopLevel(s: string, sep: string): string[] {
-  const parts: string[] = [];
-  let depth = 0, start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '<' || c === '{' || c === '(' || c === '[') depth++;
-    else if (c === '>' || c === '}' || c === ')' || c === ']') depth--;
-    else if (depth === 0 && c === sep) { parts.push(s.slice(start, i)); start = i + 1; }
-  }
-  parts.push(s.slice(start));
-  return parts;
-}
-
-// Parse a `ToolContract<Result, Args>` type (or a `|`-union of such arms) to its `params`/`result` union
-// text. Returns null unless EVERY arm is a `ToolContract<R, P>` — mirroring the node compiler's extractArms
-// (a bare/plain entry yields no wire contract). This is the shape check; splitContract wraps it with a
-// permissive fallback for the always-a-contract `toolContract` string case.
-function parseContractArms(type: string): { params: string; result: string } | null {
-  const results: string[] = [], params: string[] = [];
-  for (const armText of splitTopLevel(type, '|')) {
-    const t = armText.trim();
-    if (t === '') continue;                          // leading/trailing `|` in a multi-arm union
-    const m = t.match(/^ToolContract\s*<([\s\S]*)>$/);
-    if (!m) return null;
-    const inner = splitTopLevel(m[1]!, ',');
-    results.push((inner[0] ?? 'unknown').trim());
-    params.push((inner[1] ?? 'unknown').trim());
-  }
-  return results.length ? { result: results.join(' | '), params: params.join(' | ') } : null;
-}
-
-// Flatten a `toolContract` (`ToolContract<Result, Args>`, or a `|`-union of arms) to the wire's
-// `params`/`result` union text. Permissive: a non-contract falls back to `unknown`/`unknown`.
-function splitContract(contract: string): { params: string; result: string } {
-  return parseContractArms(contract) ?? { result: 'unknown', params: 'unknown' };
-}
 
 // Scan from `start` to the `;` that closes a statement at bracket depth 0, so an object-literal member
 // separator (`{ a: string; b: number }`) doesn't truncate the type it sits inside.
@@ -95,8 +56,7 @@ export function collectContractAliases(src: string): Record<string, string> {
 // reads `.getText()` on the two type args) — the checker is only needed to MERGE declarations across files,
 // not to extract, so a source scan is equivalent per-file. Runs at assemble time over built-in source AND at
 // runtime over http-fetched plugin source, so a remotely-loaded plugin's tools carry real TS too. Best-effort
-// (shares splitTopLevel's `>`-as-close-bracket limitation, so an arrow type inside a contract arg can confuse
-// depth); an unparseable arm simply yields no contract for that tool, which degrades to its base description.
+// (an unparseable arm simply yields no contract for that tool, which degrades to its base description).
 export function extractToolContracts(
   src: string,
   aliases: Readonly<Record<string, string>> = {},
@@ -114,7 +74,7 @@ export function extractToolContracts(
       if (c === '{') depth++; else if (c === '}') depth--;
     }
     const body = clean.slice(RE.lastIndex, i - 1);
-    for (const member of splitTopLevel(body, ';')) {
+    for (const member of splitTypeText(body, ';')) {
       const text = member.trim();
       const q = text.match(/^(['"])(.*?)\1\s*:\s*([\s\S]*)$/);          // quoted key
       const b = q ? null : text.match(/^([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*)$/);   // bare key

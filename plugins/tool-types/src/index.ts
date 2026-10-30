@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName, splitContract } from '@matatbread/matbot-plugin-api';
 import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
@@ -45,35 +45,6 @@ export function asToolValidatorSupplier(index: unknown): ToolValidatorSupplier |
   return typeof (index as ToolValidatorSupplier | undefined)?.toolValidators === 'function'
     ? index as ToolValidatorSupplier
     : undefined;
-}
-
-// Split a string on `sep` at bracket-depth 0 only (respecting `<> {} () []`), so a top-level `|` or `,`
-// inside a nested type isn't mistaken for a separator.
-function splitTopLevel(s: string, sep: string): string[] {
-  const parts: string[] = [];
-  let depth = 0, start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '<' || c === '{' || c === '(' || c === '[') depth++;
-    else if (c === '>' || c === '}' || c === ')' || c === ']') depth--;
-    else if (depth === 0 && c === sep) { parts.push(s.slice(start, i)); start = i + 1; }
-  }
-  parts.push(s.slice(start));
-  return parts;
-}
-
-// Flatten a `toolContract` (`ToolContract<Result, Args>`, or a `|`-union of such arms) to the wire's
-// `params`/`result` union text — the same projection build-dts derives from source arms.
-function splitContract(contract: string): { params: string; result: string } {
-  const results: string[] = [], params: string[] = [];
-  for (const armText of splitTopLevel(contract, '|')) {
-    const m = armText.trim().match(/^ToolContract\s*<([\s\S]*)>$/);
-    if (!m) continue;
-    const inner = splitTopLevel(m[1]!, ',');
-    if (inner[0] !== undefined) results.push(inner[0].trim());
-    if (inner[1] !== undefined) params.push(inner[1].trim());
-  }
-  return { result: results.join(' | ') || 'unknown', params: params.join(' | ') || 'unknown' };
 }
 
 // Best-effort JSON-Schema → TypeScript type text. Used only for the params half of a tool that has neither
