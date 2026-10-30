@@ -19,6 +19,14 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`turnActivity` / `usageEntries` / `usageByProvider` no longer read the pre-0.4.3 usage shapes** — an
   assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
   report no usage for those turns.
+- **`matbotRuntime` is required: it is what makes a package a plugin.** The loader refuses a package whose
+  `package.json` declares no runtimes (or an empty list) before importing it — a `NotAPluginError` for an
+  explicit load, a skip recorded in `plugin list`'s `failed` at boot — where it used to import it on
+  trust. A third-party plugin without the field must add it, e.g. `"matbotRuntime": ["node", "browser"]`.
+  `plugin add` already refused such a package on the npm and http routes; `discover_local` now passes over
+  one without importing it. core, plugin-api, the apps and the library packages `default-gate`, `files`
+  and `tool-plugin` no longer declare it, since they are not plugins. A host whose `PluginResolver` has no
+  `runtimes` has nothing to check, and imports as before.
 
 ### API gaps filled
 

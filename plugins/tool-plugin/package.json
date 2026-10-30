@@ -1,8 +1,5 @@
 {
   "name": "@matatbread/matbot-tool-plugin",
-  "matbotRuntime": [
-    "node"
-  ],
   "version": "0.4.21",
   "engines": {
     "node": ">=24.0.0"

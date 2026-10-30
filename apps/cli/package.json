@@ -1,8 +1,5 @@
 {
   "name": "@matatbread/matbot-cli",
-  "matbotRuntime": [
-    "node"
-  ],
   "version": "0.4.25",
   "engines": {
     "node": ">=24.12.0"

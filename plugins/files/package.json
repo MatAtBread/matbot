@@ -1,8 +1,5 @@
 {
   "name": "@matatbread/matbot-files-node",
-  "matbotRuntime": [
-    "node"
-  ],
   "version": "0.4.7",
   "engines": {
     "node": ">=24.0.0"

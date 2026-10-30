@@ -129,12 +129,15 @@ keep their type-only `@matatbread/*` imports in `devDependencies`.
 ### Declaring supported runtimes (`matbotRuntime`)
 
 `matbotRuntime` in `package.json` declares which environments a plugin runs in — `["node"]`,
-`["browser"]`, or `["node","browser"]`. The loader reads it **before importing**: a plugin whose
-declared runtimes exclude the host is skipped without ever evaluating its top-level code — the only
-safe path for, e.g., a Node-only plugin reached from the browser. An **absent** field means "don't
-know": the loader imports it and falls back to a try-load/rollback path. Declare it honestly — a
-plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package and its
-cross-runtime base differ only by this field plus their imports.)
+`["browser"]`, or `["node","browser"]` — and it is **what makes a package a plugin**. The loader reads it
+**before importing**: a plugin whose declared runtimes exclude the host is skipped without ever
+evaluating its top-level code — the only safe path for, e.g., a Node-only plugin reached from the
+browser — and a package that declares none is refused the same way, as not a plugin (since 0.5.0; it was
+imported on trust before). `discover_local` passes over such a package without importing it, and `plugin
+add` refuses one on every route. So a package of shared helpers that sits beside the plugins — matbot's
+own `default-gate`, `files` and `tool-plugin` are such libraries — simply omits the field. Declare it
+honestly — a plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package
+and its cross-runtime base differ only by this field plus their imports.)
 
 ---
 

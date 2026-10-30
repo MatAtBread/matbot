@@ -97,23 +97,19 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-// Inspect one candidate directory: it is a plugin only if its entry module actually exports a
-// `plugin` object — the same contract the loader enforces. The package.json plugin-api dependency is
-// only a cheap pre-filter (a library may import the API for its *types*, e.g. `Store<T>`, yet export
-// no plugin); making the import load-bearing is what stops such a library from being offered here and
-// then failing at install. Returns the discovery entry (with the caller-supplied specifier + source),
-// or null.
+// Inspect one candidate directory. `matbotRuntime` is what makes a package a plugin, so a package without
+// it is passed over before anything is imported — a library's top-level code is not run to find out.
+// Then its entry module must actually export a `plugin` object, the same contract the loader enforces.
+// Returns the discovery entry (with the caller-supplied specifier + source), or null.
 async function inspectPluginDir(sub: string, specifier: string, source: { type: PluginSource; uri: string }): Promise<DiscoveryEntry | null> {
-  let pkg: { name?: string; version?: string; description?: string; dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; exports?: unknown; matbotRuntime?: unknown };
+  let pkg: { name?: string; version?: string; description?: string; exports?: unknown; matbotRuntime?: unknown };
   try {
     pkg = JSON.parse(await readFile(path.join(sub, 'package.json'), 'utf8')) as typeof pkg;
   } catch {
     return null;
   }
-  // plugin-api is a peerDependency on a published plugin (the host provides the singleton); a
-  // monorepo/source plugin may list it under dependencies. Either declaration passes the pre-filter.
-  if (pkg.dependencies?.['@matatbread/matbot-plugin-api'] === undefined
-      && pkg.peerDependencies?.['@matatbread/matbot-plugin-api'] === undefined) return null;
+  const runtimes = normalizeRuntimes(pkg.matbotRuntime);
+  if (runtimes === undefined || runtimes.length === 0) return null;
 
   // The entry is resolved from exports["."] (so we import the .ts file directly, not the directory).
   // No resolvable entry, an import that rejects, or a module with no `plugin` export → not a plugin.
@@ -130,14 +126,13 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
 
   // Prefer manifest.description (runtime source of truth) over package.json description.
   const description = p.manifest?.description ?? pkg.description ?? '';
-  const runtimes    = normalizeRuntimes(pkg.matbotRuntime);
   return {
     specifier,
-    name:        pkg.name ?? path.basename(sub),
+    name:          pkg.name ?? path.basename(sub),
     description,
     source,
     ...(pkg.version !== undefined ? { version: pkg.version } : {}),
-    ...(runtimes !== undefined ? { matbotRuntime: runtimes } : {}),
+    matbotRuntime: runtimes,
   };
 }
 

@@ -5,9 +5,8 @@ import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFai
 
 /**
  * The runtime this process is executing in — the one place this module decides what platform it is on.
- * Read by the declarative pre-import gate (an absent `matbotRuntime` declaration bypasses it entirely)
- * and by the import-rejection branch, which re-derived `typeof window` inline until the two could have
- * disagreed.
+ * Read by the declarative pre-import gate and by the import-rejection branch, which re-derived
+ * `typeof window` inline until the two could have disagreed.
  */
 const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
 
@@ -140,12 +139,14 @@ export async function loadPlugins(
       `and its first-party imports too IF the node resolve hook is installed (else only the entry).`,
     );
   }
-  // Declarative pre-import gate. A plugin whose package.json `matbotRuntime` lists runtimes that
-  // exclude this host is skipped *before* import() — its (possibly platform-specific) top-level
-  // code never evaluates here, which is both the quick path and the only safe one for, e.g., a
-  // node-only plugin reached from a browser. An *absent* declaration means "don't know": the
-  // resolver returns undefined and we import it, falling back to the try-load / rollback path
-  // below. Reading the declaration is the host resolver's job (this module stays node-free).
+  // Declarative pre-import gate. `matbotRuntime` is what makes a package a plugin, and a plugin whose
+  // declaration excludes this host is skipped *before* import() — its (possibly platform-specific)
+  // top-level code never evaluates here, which is both the quick path and the only safe one for, e.g.,
+  // a node-only plugin reached from a browser. A package that declares none is not a plugin, and is
+  // refused unimported too: a library has top-level code of its own. Reading the declaration is the
+  // host resolver's job (this module stays node-free); a host with no resolver for it has nothing to
+  // check, and imports as before.
+  const canDeclare = services.resolver?.runtimes !== undefined;
   const declared = await Promise.all(
     reqs.map(({ spec, runtimes }) =>
       runtimes !== undefined                     ? Promise.resolve(runtimes)
@@ -158,7 +159,15 @@ export async function loadPlugins(
   for (let i = 0; i < reqs.length; i++) {
     const { spec, importSpec, name, version } = reqs[i]!;
     const runtimes = declared[i];
-    if (runtimes !== undefined && runtimes.length > 0 && !runtimes.includes(CURRENT_RUNTIME)) {
+    if ((runtimes === undefined || runtimes.length === 0) && (canDeclare || reqs[i]!.runtimes !== undefined)) {
+      const reason = `its package.json declares no "matbotRuntime", so it is not a matbot plugin. A plugin `
+        + `declares the runtimes it supports, e.g. "matbotRuntime": ["node", "browser"].`;
+      if (onLoadError === 'throw') throw notAPluginError(spec, `Cannot load "${spec}": ${reason}`);
+      console.warn(`[matbot] Skipping "${spec}": ${reason}`);
+      recordFailedPlugin({ specifier: spec, error: reason, ...(name !== undefined ? { name } : {}) });
+      continue;
+    }
+    if (runtimes !== undefined && !runtimes.includes(CURRENT_RUNTIME)) {
       if (onLoadError === 'throw') {
         throw incompatibleRuntimeError(spec, runtimes, CURRENT_RUNTIME);
       }

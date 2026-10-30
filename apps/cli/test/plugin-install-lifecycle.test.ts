@@ -510,3 +510,25 @@ test('what installing a local plugin\'s dependencies created is offered back, an
     }
   }
 });
+
+// `matbotRuntime` is what makes a package a plugin, so discovery passes over a package without it before
+// importing anything: a shared helper package beside the plugins — which depends on plugin-api, as a
+// library of plugin helpers would — is never run to find out what it is.
+test('discover_local lists a declared plugin and never imports an undeclared package', async () => {
+  const p = await project();
+  try {
+    const write = async (name: string, pkg: Record<string, unknown>, src: string) => {
+      await mkdir(join(p.dir, 'plugins', name), { recursive: true });
+      await writeFile(join(p.dir, 'plugins', name, 'package.json'), JSON.stringify({ name: `@fixture/${name}`, exports: './index.ts', peerDependencies: { '@matatbread/matbot-plugin-api': '*' }, ...pkg }));
+      await writeFile(join(p.dir, 'plugins', name, 'index.ts'), src);
+    };
+    await write('real', { matbotRuntime: ['node'] }, `export const plugin = { apiVersion: '1', manifest: { description: 'real' } };\n`);
+    await write('helper', {}, `(globalThis as Record<string, unknown>)['__helperImported'] = true;\nexport const plugin = { apiVersion: '1' };\n`);
+
+    const { call } = run(p.configPath, async () => undefined);
+    const out = await call({ action: 'discover_local' });
+    assert.match(out, /@fixture\/real/);
+    assert.doesNotMatch(out, /@fixture\/helper/);
+    assert.equal((globalThis as Record<string, unknown>)['__helperImported'], undefined, 'the undeclared package must not be imported');
+  } finally { await p.cleanup(); }
+});

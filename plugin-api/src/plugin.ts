@@ -115,10 +115,11 @@ export interface PluginResolver {
   /**
    * The runtimes a plugin declares support for via its package.json `matbotRuntime`
    * (e.g. `["node"]`, `["browser"]`, `["node","browser"]`), or `undefined` when the field is
-   * absent — meaning "don't know". The loader skips a plugin *before* importing it when this
-   * returns a non-empty list that excludes the current runtime; `undefined` falls back to the
-   * try-load / catch / rollback path. Reading the declaration is host-specific (walk package.json
-   * on node; consult the baked manifest in the browser), so it lives here, not in the core loader.
+   * absent. The loader refuses a package *before* importing it when this returns a list that
+   * excludes the current runtime, and when it returns none at all: the field is what makes a
+   * package a plugin. Reading the declaration is host-specific (walk package.json on node; consult
+   * the baked manifest in the browser), so it lives here, not in the core loader — and a host that
+   * supplies no `runtimes` has nothing to check, so its loads are imported as before.
    */
   runtimes?(specifier: string): Promise<readonly Runtime[] | undefined>;
 }
