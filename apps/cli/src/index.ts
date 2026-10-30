@@ -898,7 +898,8 @@ async function main(): Promise<void> {
     console.warn(`[matbot] ${retiredConfigKeys.join(', ')}: no longer read here. These are settings of`
       + ' @matatbread/matbot-function-runner-node, authored under'
       + ' `default_settings: { "@matatbread/matbot-function-runner-node": { … } }`. Add that plugin to'
-      + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.');
+      + ' `plugins:` to bound a tool_function body, withhold host globals from it, and gate its imports.'
+      + ' This warning is removed in 0.6.0.');
   }
 
   // Read here, after a first-run wizard may have written to it. The environment wins over the file, as it

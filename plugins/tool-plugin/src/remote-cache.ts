@@ -207,7 +207,8 @@ const CODE_EXT = /\.(?:ts|mts|cts|js|mjs|cjs)$/;
  * into the path, with advice to rewrite it. That fragment used to switch the specifier to a
  * package-manager install, and it never worked: npm ignores `#path:` and installs the ENTIRE monorepo
  * under the repo's name, reporting success; pnpm extracts the right package but leaves `workspace:^`
- * peers unmet. Fetching the subdirectory over https is the thing that does work.
+ * peers unmet. Fetching the subdirectory over https is the thing that does work. The fragment is accepted
+ * until 0.6.0, which removes it.
  */
 function githubToHttps(spec: string): { url: string; advice?: string } {
   const body     = spec.slice('github:'.length);
@@ -234,7 +235,7 @@ function githubToHttps(spec: string): { url: string; advice?: string } {
   return { url, advice:
     `"${spec}" uses pnpm's \`#path:\` git-subdirectory fragment, which no package manager can actually ` +
     `install from an unpublished repo. It is now fetched over https like any other subdirectory — write it ` +
-    `as "${rewritten}" instead.` };
+    `as "${rewritten}" instead; the fragment stops being accepted in 0.6.0.` };
 }
 
 function resolveExportsEntry(exports: unknown): string | undefined {

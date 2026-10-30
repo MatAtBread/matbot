@@ -30,7 +30,7 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
       });
       // Backfill the cool-down onto an install seeded before it existed — those triggers are the ones
       // observed looping. Only when the field is entirely absent, so a user who tuned or cleared it
-      // (`cooldown: {}`) keeps their choice.
+      // (`cooldown: {}`) keeps their choice. Removed in 0.6.0.
       if (skill.cooldown !== undefined && seeded.cooldown === undefined) {
         await triggers.update(seeded.id, { cooldown: skill.cooldown });
       }

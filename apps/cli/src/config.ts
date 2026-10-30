@@ -33,7 +33,7 @@ export async function loadConfig(
  * for it has no business in `MatbotConfig`. They are still looked for here, by the host that used to
  * honour them, because a key that silently stops working is what reads as "my config does nothing" — and
  * the warning has to fire when that plugin is NOT installed, which is precisely when it cannot warn for
- * itself.
+ * itself. Removed in 0.6.0, with the warning in `index.ts`.
  */
 const RETIRED: Record<string, string> = {
   function_timeout_ms: '`timeout_ms`',

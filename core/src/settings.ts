@@ -49,6 +49,7 @@ export function installSettingsDefaults(byPlugin: ReadonlyMap<string, Readonly<R
  * round. What an adopt-once path would have bought is one keystroke; what this buys is that an install
  * which authored the key is told, rather than finding a prompt it thought it had answered. The dunder
  * namespace stays reserved (the host's unmatched-namespace warning skips it), so nothing else says this.
+ * Removed in 0.6.0.
  */
 function warnRetiredCoreSettings(): void {
   const core = installDefaults.get('__matbot_core__');
@@ -57,7 +58,7 @@ function warnRetiredCoreSettings(): void {
     '[matbot] default_settings.__matbot_core__.overwriteToolsOnCollision no longer does anything: the ' +
     'tool-collision decision is now a permission gate, and standing answers belong to the policy plugin. ' +
     "Re-author it as default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite' — the same list " +
-    'of tool names, or `true`.',
+    'of tool names, or `true`. This warning is removed in 0.6.0.',
   );
 }
 
