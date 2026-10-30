@@ -673,7 +673,6 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
       // matbotRuntime including "node" BEFORE downloading or executing any code, so a stray URL
       // cannot be installed.
       if (classified.kind === 'http') {
-        if (classified.advice !== undefined) yield { type: 'stdout', chunk: `${classified.advice}\n` };
         try {
           const manifest = await fetchRemoteManifest(specifier, path.join(projectDir, '.plugins'), /* live */ true);
           const refusal = runtimeRefusal(specifier, manifest.runtimes);

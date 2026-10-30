@@ -74,6 +74,11 @@ churn and less likely to affect a consumer who doesn't use them.
   (the `"legacy": true` rows, and `cancel`'s `legacy` field). A warning at startup still counts any that
   are left; re-create each with `background_job` and delete the old row. To list and cancel them with a
   tool, run 0.4.x once.
+- **`tool-plugin`** — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
+  refused; write `github:owner/repo/sub` (with `#ref` after it, if any), which fetches the same files. It
+  never worked as an install, and since 0.4.5 it was folded into the path with a warning. Refused when the
+  plugin is fetched, so a configured one is a recorded load failure naming the rewrite, not a boot that
+  stops. `Classified`'s `http` arm loses `url` and `advice`; `githubToHttps` is exported instead.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
 - **`triggers`** — a provider profile named `skills-classifier` is no longer used as the classifier by

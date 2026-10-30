@@ -151,19 +151,12 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
   // Deferred to after the loop: a remote plugin's dependency may be another remote plugin configured
   // LATER, whose files (and name link) do not exist while this one is being fetched.
   const materialized: { spec: string; m: MaterializedRemote }[] = [];
-  const adviceBySpec = new Map<string, string>();
 
   for (const spec of specifiers) {
     const classified = await classifySpecifier(spec, configDir);
     let importSpec: string;
 
     if (classified.kind === 'http') {
-      // A specifier that still works but should be rewritten: said once at boot, and carried as a note so
-      // it is also attached to the failure if this plugin turns out not to load.
-      if (classified.advice !== undefined) {
-        console.warn(`[matbot] ${classified.advice}`);
-        adviceBySpec.set(spec, classified.advice);
-      }
       try {
         const m = await materializeRemote(spec, dotPlugins, configDir, forceRefresh);
         importSpec = pathToFileURL(m.entry).href;
@@ -212,11 +205,9 @@ async function resolvePluginSpecifiers(specifiers: readonly string[], configDir:
   for (const { spec, m } of materialized) {
     const notes = await remoteDependencyNotes(m);
     for (const note of notes) console.warn(`[matbot] Plugin "${spec}" ${note}`);
-    const advice = adviceBySpec.get(spec);
-    const all = advice !== undefined ? [...notes, advice] : notes;
-    if (all.length === 0) continue;
+    if (notes.length === 0) continue;
     const entry = results.find(r => r.spec === spec);
-    if (entry !== undefined) entry.notes = all;
+    if (entry !== undefined) entry.notes = notes;
   }
 
   return results;

@@ -11,7 +11,7 @@ export { createProviderTool }   from './tools/provider.js';
 // by a test — the executor's own half is a confirmation prompt over `applyProviderPatch` (plugin-api,
 // which is where the patch semantics live, shared with the browser host).
 export { writeProviderBlock } from './tools/provider.js';
-export { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, materializeRemote, remoteDependencyNotes,
+export { classifySpecifier, canonicalLocalSpecifier, githubToHttps, fetchRemoteManifest, materializeRemote, remoteDependencyNotes,
          hostOwnPackageDir } from './remote-cache.js';
 // A refresh sets the previous cached copy aside rather than deleting it, so a reload whose load fails can
 // put the working one back. The `plugin` tool drives the pair; the tests drive them directly.

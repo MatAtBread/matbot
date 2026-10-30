@@ -4,12 +4,12 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { classifySpecifier, canonicalLocalSpecifier } from '@matatbread/matbot-tool-plugin';
+import { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, githubToHttps } from '@matatbread/matbot-tool-plugin';
 
 // Five acquisition kinds collapsed to three routes, each delegating resolution to whoever owns it:
 // local → the filesystem, npm → the package manager, http → the URL itself. Two of the old five were the
 // same route reached by punctuation — a `.tgz` was `pnpm-url` while a directory URL was `remote`, and a
-// `#path:` fragment switched mechanism on the strength of a `#`.
+// `#path:` fragment switched mechanism on the strength of a `#` (refused since 0.5.0).
 
 const RAW = 'https://raw.githubusercontent.com';
 
@@ -29,33 +29,25 @@ test('a URL is an answer: http, unless something must unpack it first', async ()
   }
 });
 
-test('github: is plain http, and its subdirectory forms agree on one URL', async () => {
-  const expect = async (spec: string, url: string) => {
-    const c = await classifySpecifier(spec, '/nonexistent');
-    assert.equal(c.kind, 'http', spec);
-    assert.equal(c.kind === 'http' ? c.url : '', url, spec);
-  };
-  await expect('github:MatAtBread/matbot',            `${RAW}/MatAtBread/matbot/HEAD/`);
-  await expect('github:MatAtBread/matbot#v1',         `${RAW}/MatAtBread/matbot/v1/`);
-  await expect('github:MatAtBread/matbot/plugins/x',  `${RAW}/MatAtBread/matbot/HEAD/plugins/x/`);
-  await expect('github:MatAtBread/matbot/plugins/x#v1', `${RAW}/MatAtBread/matbot/v1/plugins/x/`);
-  // the legacy fragment resolves to the SAME url as the modern form it advises
-  await expect('github:MatAtBread/matbot#path:plugins/x',    `${RAW}/MatAtBread/matbot/HEAD/plugins/x/`);
-  await expect('github:MatAtBread/matbot#v1&path:plugins/x', `${RAW}/MatAtBread/matbot/v1/plugins/x/`);
+test('github: is plain http, and its subdirectory goes in the path', async () => {
+  assert.equal((await classifySpecifier('github:MatAtBread/matbot/plugins/x#v1', '/nonexistent')).kind, 'http');
+  assert.equal(githubToHttps('github:MatAtBread/matbot'),              `${RAW}/MatAtBread/matbot/HEAD/`);
+  assert.equal(githubToHttps('github:MatAtBread/matbot#v1'),           `${RAW}/MatAtBread/matbot/v1/`);
+  assert.equal(githubToHttps('github:MatAtBread/matbot/plugins/x'),    `${RAW}/MatAtBread/matbot/HEAD/plugins/x/`);
+  assert.equal(githubToHttps('github:MatAtBread/matbot/plugins/x#v1'), `${RAW}/MatAtBread/matbot/v1/plugins/x/`);
 });
 
-// Matt's requirement for the taxonomy change: a specifier may stop working, but it must say what to
-// replace it with. `#path:` keeps working AND says so.
-test('a legacy #path: specifier advises the replacement that resolves identically', async () => {
-  const c = await classifySpecifier('github:MatAtBread/matbot#path:plugins/storage/sqlite', '/nonexistent');
-  assert.equal(c.kind, 'http');
-  const advice = c.kind === 'http' ? c.advice ?? '' : '';
-  assert.match(advice, /#path:/);
-  assert.match(advice, /"github:MatAtBread\/matbot\/plugins\/storage\/sqlite"/, 'must name the replacement');
-  // and the replacement it names classifies to the same URL, so following the advice changes nothing
-  const rewritten = await classifySpecifier('github:MatAtBread/matbot/plugins/storage/sqlite', '/nonexistent');
-  assert.equal(rewritten.kind === 'http' ? rewritten.url : 'x', c.kind === 'http' ? c.url : 'y');
-  assert.equal(rewritten.kind === 'http' ? rewritten.advice : 'x', undefined, 'the modern form is not nagged about');
+// A specifier may stop working, but it must say what to replace it with. pnpm's `#path:` fragment never
+// worked as an install, so 0.5.0 refuses it — at FETCH, naming the rewrite, so a configured one is a
+// recorded load failure rather than a boot that stops.
+test('a #path: specifier is refused, naming the form that replaces it', async () => {
+  assert.equal((await classifySpecifier('github:MatAtBread/matbot#path:plugins/storage/sqlite', '/nonexistent')).kind, 'http');
+  assert.throws(() => githubToHttps('github:MatAtBread/matbot#path:plugins/storage/sqlite'),
+    /#path:.*"github:MatAtBread\/matbot\/plugins\/storage\/sqlite"/s);
+  assert.throws(() => githubToHttps('github:MatAtBread/matbot#v1&path:plugins/x'),
+    /"github:MatAtBread\/matbot\/plugins\/x#v1"/);
+  await assert.rejects(fetchRemoteManifest('github:MatAtBread/matbot#path:plugins/x', '/nonexistent/.plugins'),
+    /"github:MatAtBread\/matbot\/plugins\/x"/);
 });
 
 test('a bare name is checked on disk before the registry — scoped ones too', async () => {

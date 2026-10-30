@@ -44,13 +44,12 @@ import { mirrorPath, mirroredFile, candidatesFor, recordOrigin } from './cache-l
 //
 // There used to be five, and two of them were the same route reached by punctuation: a `.tgz` was
 // `pnpm-url` while a directory URL was `remote`, and `github:o/r#path:sub` switched mechanism entirely on
-// the strength of a `#`. Which mechanism runs is now decided by what the specifier IS, and `npm:` is the
-// one explicit override.
+// the strength of a `#` (refused since 0.5.0). Which mechanism runs is now decided by what the specifier
+// IS, and `npm:` is the one explicit override.
 export type Classified =
   | { kind: 'local';        dir: string }   // a package.json was confirmed at/above the resolved dir
   | { kind: 'npm';          spec: string }  // what the package manager is asked for — `npm:` already stripped
-  | { kind: 'http';         spec: string; url: string; advice?: string }  // `url` is `spec` normalised; `advice` = rewrite this
-                                                        // specifier (it still works)
+  | { kind: 'http';         spec: string }
   | { kind: 'missing-path'; resolved: string }; // looked like a path but no package.json exists there
 
 // A tarball or a git repo is a URL, and still not the http route: there is nothing importable at the far
@@ -152,9 +151,6 @@ export async function canonicalLocalSpecifier(dir: string, projectDir: string): 
  * is checked on disk too, rather than being assumed to be a registry name: a bare specifier is a
  * *question* only when nothing local already answers it — as a path, or as a package that declares
  * that name.
- *
- * `advice` is a migration message for a specifier that still works but should be rewritten. It is
- * returned rather than printed so the caller can put it where its user will see it.
  */
 export async function classifySpecifier(spec: string, projectDir: string): Promise<Classified> {
   // The explicit force. Anything the shape rules would send elsewhere — a bare name that happens to
@@ -163,12 +159,9 @@ export async function classifySpecifier(spec: string, projectDir: string): Promi
 
   if (/^https?:\/\//.test(spec) || spec.startsWith('git+')) {
     if (isTarballOrGit(spec)) return { kind: 'npm', spec };
-    return { kind: 'http', spec, url: spec };
+    return { kind: 'http', spec };
   }
-  if (spec.startsWith('github:')) {
-    const { url, advice } = githubToHttps(spec);
-    return { kind: 'http', spec, url, ...(advice !== undefined ? { advice } : {}) };
-  }
+  if (spec.startsWith('github:')) return { kind: 'http', spec };
 
   // Path-like shapes: resolve against the project dir and confirm a package.json exists.
   const explicitPath = spec.startsWith('file://') || spec.startsWith('./') || spec.startsWith('../') || spec.startsWith('/');
@@ -203,14 +196,13 @@ const CODE_EXT = /\.(?:ts|mts|cts|js|mjs|cjs)$/;
  * place this translation happens, so classification and fetching cannot disagree about what a specifier
  * means.
  *
- * It also accepts pnpm's legacy git-subdirectory fragment (`#path:sub`, `#ref&path:sub`) and folds it
- * into the path, with advice to rewrite it. That fragment used to switch the specifier to a
- * package-manager install, and it never worked: npm ignores `#path:` and installs the ENTIRE monorepo
- * under the repo's name, reporting success; pnpm extracts the right package but leaves `workspace:^`
- * peers unmet. Fetching the subdirectory over https is the thing that does work. The fragment is accepted
- * until 0.6.0, which removes it.
+ * pnpm's git-subdirectory fragment (`#path:sub`, `#ref&path:sub`) is refused, naming the form that
+ * replaces it. Until 0.4.5 it switched the specifier to a package-manager install, which never worked:
+ * npm ignores `#path:` and installs the ENTIRE monorepo under the repo's name, reporting success; pnpm
+ * extracts the right package but leaves `workspace:^` peers unmet. Thrown at fetch rather than at
+ * classification, so a configured one is a recorded load failure, not a boot that stops.
  */
-function githubToHttps(spec: string): { url: string; advice?: string } {
+export function githubToHttps(spec: string): string {
   const body     = spec.slice('github:'.length);
   const hash     = body.indexOf('#');
   const pathPart = hash === -1 ? body : body.slice(0, hash);
@@ -227,15 +219,15 @@ function githubToHttps(spec: string): { url: string; advice?: string } {
   const owner = segs[0] ?? '';
   const repo  = segs[1] ?? '';
   const sub   = [segs.slice(2).join('/'), fragmentSub].filter(Boolean).join('/');
-  const base  = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/`;
-  const url   = sub ? new URL(sub + '/', base).href : base;
 
-  if (fragmentSub === '') return { url };
-  const rewritten = `github:${owner}/${repo}/${sub}${ref === 'HEAD' ? '' : `#${ref}`}`;
-  return { url, advice:
-    `"${spec}" uses pnpm's \`#path:\` git-subdirectory fragment, which no package manager can actually ` +
-    `install from an unpublished repo. It is now fetched over https like any other subdirectory — write it ` +
-    `as "${rewritten}" instead; the fragment stops being accepted in 0.6.0.` };
+  if (fragmentSub !== '') {
+    const rewritten = `github:${owner}/${repo}/${sub}${ref === 'HEAD' ? '' : `#${ref}`}`;
+    throw new Error(
+      `"${spec}" uses pnpm's \`#path:\` git-subdirectory fragment, which matbot no longer accepts (removed ` +
+      `in 0.5.0). Write it as "${rewritten}" — the subdirectory goes in the path`);
+  }
+  const base = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/`;
+  return sub ? new URL(sub + '/', base).href : base;
 }
 
 function resolveExportsEntry(exports: unknown): string | undefined {
@@ -294,7 +286,7 @@ export async function fetchRemoteManifest(spec: string, dotPlugins: string, live
   const cached = manifestCache.get(spec);
   if (cached !== undefined) return cached;
 
-  let url = spec.startsWith('github:') ? githubToHttps(spec).url : spec;
+  let url = spec.startsWith('github:') ? githubToHttps(spec) : spec;
 
   // A direct entry URL (…/index.ts): import that entry, but the plugin is still a *package*, so a
   // sibling package.json bearing the mandatory "name" (plus optional description / matbotRuntime gate)

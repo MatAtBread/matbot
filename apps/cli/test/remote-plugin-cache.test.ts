@@ -260,8 +260,8 @@ test('a declared dependency nothing satisfies is reported, named well enough to 
 // SUBDIRECTORY of a repo. No package manager can do it usefully here — npm ignores the fragment and
 // installs the whole monorepo under the repo's name (reporting success), pnpm extracts the right
 // package but leaves its `workspace:` peers unmet — and matbot needs neither, because the http route
-// fetches one package's files and resolves bare imports against the host. So the fragment is only a
-// spelling, and this is the mechanism under it.
+// fetches one package's files and resolves bare imports against the host. The fragment is refused since
+// 0.5.0; this is the mechanism under the `github:owner/repo/sub` form that replaces it.
 test('a plugin in a repo subdirectory is fetched as a package, workspace peers and all', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-subdir-'));
   const dotPlugins = join(dir, '.plugins');
