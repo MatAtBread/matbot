@@ -28,9 +28,11 @@ function makeUrlForResourceTool(services: MatbotMachine): Tool<ToolResultOf<'url
       'Return the URL PATH a stored file is served at, or null when it is not publicly viewable. Use this ' +
       'to hand the user a link to a file rather than guessing a path. Pass the same path the file was ' +
       'stored under. Only files marked viewable get one.\n' +
-      'The result is relative to this server\'s own origin (e.g. "/files/workspace/report.md") — this ' +
-      'server cannot know what host or port a reader reaches it on, so join it to the origin you used ' +
-      'to get here before quoting it to someone.',
+      'The result is a PATH relative to this server\'s own origin (e.g. "/files/workspace/report.md"), ' +
+      'and this server cannot know what host or port a reader reaches it on. Quote it exactly as ' +
+      'returned. Prefix an origin only if one was actually supplied in this conversation — the ' +
+      'browser\'s own origin, or one the user gave; never infer one, and never substitute a ' +
+      'development default such as localhost:19778.',
     inputSchema: {
       type:     'object',
       required: ['name'],

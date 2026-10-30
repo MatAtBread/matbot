@@ -97,6 +97,10 @@ churn and less likely to affect a consumer who doesn't use them.
   cancelled when its turn ends, rather than sitting at the head of the queue. A viewer leaving still
   answers nothing. Cancelling a parallel turn's prompt stops that turn; it used to stop the running turn
   beside it, and leave the parallel one to carry on. The in-process browser transport does the same.
+- **`frontend-web`** — `url_for_resource` tells the model to quote the path as returned and to prefix
+  an origin only if one was actually supplied in the conversation. Told to "join it to the origin you
+  used", a model that reached the server through no origin at all invented one, typically the
+  development default `localhost:19778`.
 
 ## 0.4.24
 
