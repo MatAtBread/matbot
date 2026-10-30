@@ -46,11 +46,11 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   await manager.load();
   // Re-read after a deferred StorageBackend swap lands: the new backend's `skills` namespace replaces
   // the old in-memory set (and re-indexes). No `replay` — the initial load is the boot load above; this
-  // reacts only to future swaps. Ends with the manager (teardown aborts manager.signal).
-  services.mounted.observe({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+  // reacts only to future swaps.
+  services.mounted.observe({ key: 'StorageBackend' }, () => void manager.load());
   // The index is a projection of this store, so its owner rebuilds it when the KnowledgeIndex is swapped or
   // reverts to the host default on unload — the host's drain can't copy out of an index with no `entries()`.
-  services.mounted.observe({ key: 'KnowledgeIndex', signal: manager.signal }, () => void manager.load());
+  services.mounted.observe({ key: 'KnowledgeIndex' }, () => void manager.load());
   await services.register('SkillManager', manager);
 
   services.tools.register(createSkillTool(manager));

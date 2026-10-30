@@ -1102,13 +1102,11 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
 export function createFunctionToolsPlugin(): MatbotPluginSpec {
   let store:     FunctionStore | undefined;
   let packages:  PackageStore | undefined;
-  let lifecycle: AbortController | undefined;
   return {
     apiVersion: PLUGIN_API_VERSION,
     manifest: { description: 'Author and run TypeScript functions that compose registered tools (`tool_function`: execute/define/package/check/list/types/remove).' },
 
     async setup(services) {
-      lifecycle = new AbortController();
       const lineage = new Lineage(services.settings());
       const docs = notifyingStore(
         services.createStore<FunctionDoc>(NAMESPACE), services.Notifier, NAMESPACE, 'function',
@@ -1125,7 +1123,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
       // The registered tools are state derived from the store at setup time, so they must be rebuilt
       // when a deferred StorageBackend swap lands on a different `functions` set. No `replay` — the
       // boot load is above; this reacts only to future swaps.
-      services.mounted.observe({ key: 'StorageBackend', signal: lifecycle.signal }, () => void fns.reload().then(() => pkgs.reload()));
+      services.mounted.observe({ key: 'StorageBackend' }, () => void fns.reload().then(() => pkgs.reload()));
       services.tools.register(functionTool(services, fns, pkgs, sessionFns));
       services.systemContext.register(() => MULTI_STAGE_ADVICE);
       // Session functions reach a turn only through here: never registered, offered by the runner each
@@ -1145,7 +1143,7 @@ export function createFunctionToolsPlugin(): MatbotPluginSpec {
       });
     },
 
-    async teardown() { lifecycle?.abort(); store?.removeAll(); packages?.removeAll(); },
+    async teardown() { store?.removeAll(); packages?.removeAll(); },
   };
 }
 

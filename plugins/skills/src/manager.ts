@@ -153,8 +153,8 @@ export interface SkillSummary {
  * catalogue advertisement only — firing a skill on a condition is the triggers subsystem's concern.
  */
 export interface SkillManager {
-  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
-   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
+  /** Aborts when the manager is cleared (teardown). A `services.mounted.observe` needs no such signal —
+   *  the host already ends it with the plugin that made it. */
   readonly signal: AbortSignal;
   /** The provider used to derive a skill's catalogue summary / knowledge analysis: the `analysisProvider`
    *  setting if pinned and configured, else the first configured provider (works with zero config). */
@@ -177,7 +177,7 @@ export interface SkillManager {
   setHidden(name: string, hidden: boolean): Promise<SkillDoc | undefined>;
   /** Import-only create: once a skill exists, the import is a no-op. Returns `true` if one was imported. */
   importIfAbsent(name: string, content: string, catalogSummary?: string): Promise<boolean>;
-  /** Teardown: end the mounted-swap subscription and cancel detached analyses. */
+  /** Teardown: abort `signal` and cancel detached analyses. */
   clear(): void;
 }
 
@@ -198,7 +198,6 @@ export class SkillManagerImpl implements SkillManager {
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
   private readonly services: MatbotMachine;
-  // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupSkills.
   private readonly lifecycle = new AbortController();
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
@@ -210,8 +209,6 @@ export class SkillManagerImpl implements SkillManager {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
-   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The provider used to derive a skill's catalogue summary / knowledge analysis. The user pins one
@@ -365,7 +362,7 @@ export class SkillManagerImpl implements SkillManager {
   }
 
   clear(): void {
-    this.lifecycle.abort();                                // end the mounted-swap subscription
+    this.lifecycle.abort();
     for (const ac of this.inflight.values()) ac.abort();   // cancel detached analyses on teardown
     this.inflight.clear();
   }

@@ -1368,7 +1368,7 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
-Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin, in the repo only and not published) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-webllm` (a browser-only prototype), `provider-store-test` (a test/reference plugin, in the repo only and not published) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
 
 | Package | Tools / Kind | Description |
 |---|---|---|
@@ -1413,6 +1413,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-provider-google` | provider | Google Gemini (native `generateContent`; OpenAI-compat fallback by endpoint path) |
 | `@matatbread/matbot-provider-customer-services` | provider | Free built-in demo LLM — no API key needed |
 | `@matatbread/matbot-provider-chatjimmy` | provider | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
+| `@matatbread/matbot-provider-webllm` | provider, `webllm_models` · Example | Open-weight models (Qwen3 by default) on the GPU in the page via WebLLM, loaded from a CDN on first use — browser only, keyless, a prototype |
 | `@matatbread/matbot-storage-filesystem` | storage backend | Filesystem-backed Store + FileStore (Node; content-addressed, CAS-safe; the CLI's default) |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |

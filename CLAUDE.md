@@ -84,6 +84,7 @@ plugins/            — one directory per package, flat but for the frontend/pro
       anthropic/   — Anthropic Messages API adapter
       openai-compat/— OpenAI-compatible adapter (+ opt-in `gemini` mode)
       google/      — Google Gemini adapter (native generateContent; OpenAI-compat fallback by endpoint path)
+      webllm/      — open-weight models on the GPU in the page via WebLLM, from a CDN (browser; prototype)
       customer-services/, chatjimmy/ — keyless demo/comparison endpoints
     storage/
       filesystem/    — FilesystemStore (Node, CAS-safe); CLI boot default
@@ -369,7 +370,7 @@ The machine edge keeps what is machine-wide: the `StorageBackend` swap and the m
 
 ### The mount table (`services.mounted`)
 
-A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `consume({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
+A plugin reacts to a registry service (re)mounting or being unloaded through **`services.mounted`** — a `Mounted` whose one method, `observe({ key, replay?, signal?, onUnmount? }, handler)`, is keyed on the service it cares about. The host batches mount notifications to the **quiescent edge**: `register`/`unregister` mark a key dirty; the edge computes each key's net presence transition and **multicasts** to that key's subscribers. A reload (unregister+register before the edge) collapses to a single **remount**; an unregister not replaced by the edge is a **committed unload**, delivered to `onUnmount`. The contract guarantees only *eventual, ordered* delivery per key — **it says nothing about timing** (a register is not observably inline, nor pinned to a turn boundary). `StorageBackend`'s swap also lands at the edge (CAS coherence); other keys repoint immediately but still notify at the edge.
 
 **The table is the in-process half; the bus is the other.** Each transition is *also* published as a
 `RegistryChange` on the `services` registry (`name` = the `MatbotServices` key, a remount reading as
