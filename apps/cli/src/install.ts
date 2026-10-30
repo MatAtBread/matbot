@@ -1,30 +1,10 @@
-import { readFile, writeFile, access } from 'node:fs/promises';
+import { readFile, writeFile }          from 'node:fs/promises';
 import { spawn }                        from 'node:child_process';
 import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
 import { backfillPluginDescription }    from './plugin-description.js';
-import { declaredDependencies, isPackageName, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
-
-// ── Package manager detection ───────────────────────��─────────────────────────
-
-async function detectPackageManager(dir: string): Promise<string> {
-  for (const [pm, lockfile] of [['pnpm', 'pnpm-lock.yaml'], ['yarn', 'yarn.lock'], ['bun', 'bun.lockb']] as const) {
-    try { await access(path.join(dir, lockfile)); return pm; } catch { /* not present */ }
-  }
-  return 'npm';
-}
-
-/** Extra `add` flags needed to install into `dir` itself.
- *
- *  `pnpm add` refuses at a workspace root (ERR_PNPM_ADDING_TO_ROOT) unless the root is named
- *  explicitly, on the assumption that a member package was meant. Here it never was: `dir` is where
- *  matbot.yaml lives, and a plugin is that project's dependency — there is no member package it could
- *  belong to instead. */
-async function addFlags(pm: string, dir: string): Promise<string[]> {
-  if (pm !== 'pnpm') return [];
-  try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
-}
+import { addFlags, declaredDependencies, detectPackageManager, isPackageName, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
 
 // ── Shell runner ───────────────────────��───────────────────────────────���──────
 
