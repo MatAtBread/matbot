@@ -1,9 +1,7 @@
 import type { Tool, ToolExecutor, ToolEvent, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
               PluginToolContract, DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-plugin-api';
 import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
-         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
-         getSpecifierForPlugin, getPluginNameForSpecifier, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
+import { getRegisteredPlugins, getSpecifierForPlugin, getPluginNameForSpecifier, clearFailedPlugin, describePlugins, storeSecret } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';
 import { createRequire }                     from 'node:module';
@@ -476,32 +474,6 @@ export function missingPackageOf(e: unknown): string | undefined {
   return pkg !== undefined && !pkg.startsWith('.') && !pkg.startsWith('/') ? pkg : undefined;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// A plugin contributes through several channels: static fields on the plugin object
-// (provider, tools, storage, storageBackend, frontend) and runtime registrations made
-// during setup() (tools, hooks, system-context contributors, and MatbotMachine keys such
-// as 'KnowledgeIndex'). Reflect every channel so the reported type list is complete, not just
-// the static ones.
-function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
-  const t: string[] = [];
-  const serviceKeys = getRegisteredServiceKeys(p.name);
-
-  if (p.provider !== undefined)                                                   t.push('provider');
-  if (p.tools?.length || registeredToolPlugins.has(p.name))                       t.push('tools');
-  if (p.storageBackend !== undefined || serviceKeys.includes('StorageBackend'))   t.push('storage');
-  if (getRegisteredFrontendPlugins().has(p.name))                                 t.push('frontend');
-  if (getHookPlugins().has(p.name))                                               t.push('hooks');
-  if (getSystemContextPlugins().has(p.name))                                      t.push('system-context');
-
-  // Any other runtime-registered service (custom cognitive subsystems, domain backends).
-  // 'KnowledgeIndex' and 'StorageBackend' are already surfaced as dedicated types above.
-  t.push(...serviceKeys);
-
-  if (!t.length) t.push('extension');
-  return [...new Set(t)];
-}
-
 // ── Provisioning a fetched plugin's dependencies ──────────────────────────────
 //
 // Offer to install them, rather than only naming them — into the plugin's OWN cached directory under
@@ -618,47 +590,16 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
 
     // ── list ─────────────────────────────────────────────────────────────────
     if (action === 'list') {
-      const configured = await readPluginsList(configPath);
-      const allTools   = getRegisteredTools();
-
-      // Group tools by owning plugin (undefined = built-in / unattributed)
-      const toolsByPlugin = new Map<string | undefined, { name: string; description: string }[]>();
-      for (const t of allTools) {
-        const key  = t.pluginName;
-        const list = toolsByPlugin.get(key) ?? [];
-        list.push({ name: t.name, description: t.description });
-        toolsByPlugin.set(key, list);
-      }
-
-      const pluginToolNames = new Set(
-        [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
-      );
-
-      const loaded = getRegisteredPlugins().map(p => ({
-        name:        p.name,
-        apiVersion:  p.apiVersion,
-        types:       pluginTypes(p, pluginToolNames),
-        tools:       toolsByPlugin.get(p.name) ?? [],
-        specifier:   p.specifier,
-        ...(p.version       !== undefined ? { version:       p.version }       : {}),
-        ...(p.resolvedUrl   !== undefined ? { resolvedUrl:   p.resolvedUrl }   : {}),
-        ...(p.manifest?.description ? { description: p.manifest.description } : {}),
-        ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
-      }));
-
-      const failed = getFailedPlugins();
+      const listed = describePlugins();
       // Reported alongside failures because it is the same kind of fact — something about the installed
       // set that is worth knowing and that nothing else would ever mention. It is not a failure: a second
       // copy of a singleton is survivable by design, which is exactly why it would otherwise go unnoticed.
-      const duplicateSingletons = await findDuplicateSingletons({ configDir: projectDir, plugins: loaded });
-
+      const duplicateSingletons = await findDuplicateSingletons({ configDir: projectDir, plugins: listed.loaded });
       yield {
         type:  'result',
         value: {
-          loaded,
-          configured,
-          ...(failed.length ? { failed: failed.map(f => ({ specifier: f.specifier, error: f.error, ...(f.name !== undefined ? { name: f.name } : {}) })) } : {}),
-          ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
+          ...listed,
+          configured: await readPluginsList(configPath),
           ...(duplicateSingletons.length ? { duplicateSingletons } : {}),
         },
       };
@@ -683,28 +624,9 @@ const executor: ToolExecutor<ToolResultOf<'plugin'>> = {
     }
 
     // ── store-key ──────────────────────────────────────────────────────────────
-    // A plugin or provider that needs a secret raises MissingSecretError naming the
-    // key; call this to supply it. The value is requested out-of-band via ctx.prompt
-    // so it never enters the conversation transcript, then stored in the vault. An
-    // empty value is the removal signal — leaving the prompt blank deletes the key.
     if (action === 'store-key') {
-      const { key } = input as { action: 'store-key'; key: string };
-      if (!key || !key.trim()) {
-        yield { type: 'error', message: 'store-key requires a "key" name.' };
-        return;
-      }
-      const name    = key.trim();
-      const value   = await ctx.prompt(`Enter the value for secret "${name}" (leave blank to remove it; not added to the conversation):`, '');
-      const trimmed = value.trim();
-      // writeSecret, not createSecret: this answers a MissingSecretError naming an exact key,
-      // so the value must land under that name verbatim — no reference/dedup canonicalisation.
-      // An empty value is writeSecret's removal signal.
-      const existed = trimmed === '' && ctx.vault.hasKey(name);
-      await ctx.vault.writeSecret(name, trimmed);
-      yield { type: 'result', value: { message:
-        trimmed !== '' ? `Secret "${name}" stored in the vault.`
-        : existed       ? `Secret "${name}" removed from the vault.`
-        :                 `No value entered and no secret named "${name}"; nothing changed.` } };
+      const stored = await storeSecret(ctx, (input as { action: 'store-key'; key: string }).key);
+      yield 'error' in stored ? { type: 'error', message: stored.error } : { type: 'result', value: stored };
       return;
     }
 

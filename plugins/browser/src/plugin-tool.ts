@@ -1,8 +1,6 @@
-import type { Tool, ToolExecutor, ToolResultOf, ToolContext, MatbotPlugin, Runtime,
+import type { Tool, ToolExecutor, ToolResultOf, ToolContext, Runtime,
               PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
-import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins,
-         getRegisteredServiceKeys, getHookPlugins, getSystemContextPlugins,
-         getSpecifierForPlugin, getFailedPlugins, clearFailedPlugin } from '@matatbread/matbot-core';
+import { getRegisteredPlugins, getSpecifierForPlugin, clearFailedPlugin, describePlugins, storeSecret } from '@matatbread/matbot-core';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 
 /**
@@ -45,23 +43,6 @@ function bakedAvailablePlugins(): AvailablePlugin[] {
   return mb?.config?.availablePlugins ?? [];
 }
 
-// Reflect every channel a plugin contributes through (mirrors the node plugin tool) so `list` reports
-// the complete type set, not just the static fields.
-function pluginTypes(p: MatbotPlugin, registeredToolPlugins: Set<string>): string[] {
-  const t: string[] = [];
-  const serviceKeys = getRegisteredServiceKeys(p.name);
-
-  if (p.provider !== undefined)                                              t.push('provider');
-  if (p.tools?.length || registeredToolPlugins.has(p.name))                 t.push('tools');
-  if (p.storageBackend !== undefined || serviceKeys.includes('StorageBackend')) t.push('storage');
-  if (getRegisteredFrontendPlugins().has(p.name))                           t.push('frontend');
-  if (getHookPlugins().has(p.name))                                         t.push('hooks');
-  if (getSystemContextPlugins().has(p.name))                                t.push('system-context');
-  t.push(...serviceKeys);
-  if (!t.length) t.push('extension');
-  return [...new Set(t)];
-}
-
 /**
  * The browser `plugin` tool. Unlike the node tool it edits no config file and runs no package
  * manager — there is neither in the browser. `add`/`remove`/`reload` work purely against live
@@ -74,37 +55,7 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       const { action } = input as PluginInput;
 
       if (action === 'list') {
-        const configured = await extras.list();
-        const allTools   = getRegisteredTools();
-        const toolsByPlugin = new Map<string | undefined, { name: string; description: string }[]>();
-        for (const tl of allTools) {
-          const list = toolsByPlugin.get(tl.pluginName) ?? [];
-          list.push({ name: tl.name, description: tl.description });
-          toolsByPlugin.set(tl.pluginName, list);
-        }
-        const pluginToolNames = new Set(
-          [...toolsByPlugin.keys()].filter((k): k is string => k !== undefined),
-        );
-        const loaded = getRegisteredPlugins().map(p => ({
-          name:       p.name,
-          apiVersion: p.apiVersion,
-          types:      pluginTypes(p, pluginToolNames),
-          tools:      toolsByPlugin.get(p.name) ?? [],
-          specifier:  p.specifier,
-          ...(p.version !== undefined ? { version: p.version } : {}),
-          ...(p.manifest?.description ? { description: p.manifest.description } : {}),
-          ...(p.matbotRuntime !== undefined ? { matbotRuntime: p.matbotRuntime } : {}),
-        }));
-        const failed = getFailedPlugins();
-        yield {
-          type:  'result',
-          value: {
-            loaded,
-            configured,
-            ...(failed.length ? { failed: failed.map(f => ({ specifier: f.specifier, error: f.error, ...(f.name !== undefined ? { name: f.name } : {}) })) } : {}),
-            ...(toolsByPlugin.has(undefined) ? { builtinTools: toolsByPlugin.get(undefined) } : {}),
-          },
-        };
+        yield { type: 'result', value: { ...describePlugins(), configured: await extras.list() } };
         return;
       }
 
@@ -129,20 +80,8 @@ export function createBrowserPluginTool(extras: ExtraPlugins): Tool<ToolResultOf
       }
 
       if (action === 'store-key') {
-        const { key } = input as { action: 'store-key'; key: string };
-        if (!key || !key.trim()) {
-          yield { type: 'error', message: 'store-key requires a "key" name.' };
-          return;
-        }
-        const name    = key.trim();
-        const value   = await ctx.prompt(`Enter the value for secret "${name}" (leave blank to remove it; not added to the conversation):`, '');
-        const trimmed = value.trim();
-        const existed = trimmed === '' && ctx.vault.hasKey(name);
-        await ctx.vault.writeSecret(name, trimmed);
-        yield { type: 'result', value: { message:
-          trimmed !== '' ? `Secret "${name}" stored in the vault.`
-          : existed       ? `Secret "${name}" removed from the vault.`
-          :                 `No value entered and no secret named "${name}"; nothing changed.` } };
+        const stored = await storeSecret(ctx, (input as { action: 'store-key'; key: string }).key);
+        yield 'error' in stored ? { type: 'error', message: stored.error } : { type: 'result', value: stored };
         return;
       }
 

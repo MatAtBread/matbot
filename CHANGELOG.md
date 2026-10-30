@@ -20,6 +20,20 @@ churn and less likely to affect a consumer who doesn't use them.
   assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
   report no usage for those turns.
 
+### API gaps filled
+
+- **`splitContract`, `parseContractArms`, `splitTypeText`** (plugin-api, beside `contractArms`) — a
+  `ToolContract<…>` string flattened to the wire's `params`/`result` text without a compiler. Both
+  `ToolTypeIndex` implementations had a copy, neither of which knew a string literal or an arrow, so
+  `'a|b'` split an arm and the `>` of `=>` closed a bracket. A `toolContract` that mixes arms with a bare
+  type now reads as `unknown` on node too, as it did in the browser.
+- **`describePlugins`, `storeSecret`** (core) — `plugin list`'s report from the registries, and `plugin
+  store-key`. Both hosts' `plugin` tools use them; `list` now carries `resolvedUrl` in the browser when
+  the loader recorded one.
+- **`confirmUnlistedModel`, `movedCredentialNote`** (plugin-api, beside `checkProviderModel`) — the gate
+  for a model the endpoint does not list, and the note when an update leaves a credential behind. Both
+  hosts' `provider` tools use them, so they ask the same question in the same words.
+
 ### Optional
 
 - **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the

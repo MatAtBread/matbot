@@ -7,7 +7,7 @@ declare module '@matatbread/matbot-plugin-api' {
     provider: ProviderToolContract;
   }
 }
-import { applyProviderPatch, checkProviderModel, credentialKeyName, movedCredentialKeys, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -296,11 +296,8 @@ async function* confirmModel(
       if (!retry) yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
       return 'unchecked';
     case 'unlisted': {
-      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
-      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
-                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
-      if (permit.allowed) return 'checked';
-      return { refusal: `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}` };
+      const refusal = await confirmUnlistedModel(check, cfg, ctx, gate, verb);
+      return refusal === undefined ? 'checked' : { refusal };
     }
   }
 }
@@ -605,10 +602,7 @@ function makeExecutor(
           value: {
             message: `Profile "${name}" updated: ${supplied.join(', ')}.`
               + (isCurrent ? ' It is the profile running this turn, so the change takes effect on the next one.' : '')
-              + (moved.length > 0
-                ? ` Its credential was not sent to the new origin: the profile now reads ${moved.join(', ')}, which is not set. ` +
-                  'Ask the user to supply it with `plugin store-key`, if this endpoint should have one.'
-                : ''),
+              + movedCredentialNote(moved),
           },
         };
         return;

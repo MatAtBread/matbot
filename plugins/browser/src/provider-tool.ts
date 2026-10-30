@@ -1,7 +1,7 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
               ProviderToolContract, ProviderSummary, AvailableProvider,
               ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { applyProviderPatch, checkProviderModel, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, movedCredentialNote } from '@matatbread/matbot-plugin-api';
 
 export type { AvailableProvider, ProviderSummary };
 
@@ -60,13 +60,6 @@ type ProviderInput =
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
  * exactly like `plugin store-key`. Persistence is entirely the injected {@link ProviderAdmin}'s concern.
  */
-/** What to tell the caller when a credential did not follow an endpoint to another origin. */
-function movedNote(keys: readonly string[]): string {
-  if (keys.length === 0) return '';
-  return ` Its credential was not sent to the new origin: the profile now reads ${keys.join(', ')}, which is not set. ` +
-         'Ask the user to supply it with the `plugin` tool\'s `store-key` action, if this endpoint should have one.';
-}
-
 // The adapter's own factory, read from its module as the setup wizard reads it. Importing registers
 // nothing, and a module already loaded is the same instance.
 async function adapterOf(module: string, cfg: ProviderConfig): Promise<ReturnType<NonNullable<MatbotPluginSpec['provider']>> | undefined> {
@@ -96,13 +89,8 @@ async function* confirmModel(
     case 'unchecked':
       yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
       return undefined;
-    case 'unlisted': {
-      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
-      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
-                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
-      if (permit.allowed) return undefined;
-      return `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}`;
-    }
+    case 'unlisted':
+      return confirmUnlistedModel(check, cfg, ctx, gate, verb);
   }
 }
 
@@ -213,7 +201,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         yield {
           type:  'result',
           value: moved !== undefined
-            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedNote(moved)}` }
+            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedCredentialNote(moved)}` }
             : { message: `No provider named "${name}".` },
         };
         return;
