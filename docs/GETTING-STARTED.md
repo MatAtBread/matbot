@@ -567,5 +567,6 @@ internal job — the triggers classifier, skills' content analysis, cognition's 
 **current turn's provider** by default. Those roles are *aliases* for an already-configured provider,
 not new profiles to stand up: to point one at a cheaper/faster (or, for the inner voice, a
 different-lineage) model, pin it to an existing provider with the relevant config tool —
-`triggers_config`, `skills_config`, or `cognition_config` (action `set`). Installs that historically
-defined a provider literally named `skills-classifier` keep working — it stays the classifier default.
+`triggers_config`, `skills_config`, or `cognition_config` (action `set`). A provider named
+`skills-classifier` is no longer picked up by name (since 0.5.0); pin it with `triggers_config` or
+`default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.

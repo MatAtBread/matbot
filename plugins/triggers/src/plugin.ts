@@ -1,6 +1,6 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
-import { TriggerManager } from './manager.js';
+import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
 import type { Trigger, Triggers, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
@@ -685,13 +685,10 @@ export function createTriggersPlugin(): MatbotPluginSpec {
       if (!captured) return base;
       const pinned    = await captured.settings().get<string>('classifierProvider');
       const available = [...captured.providers.keys()];
-      const legacy    = captured.providers.has('skills-classifier');
       if (pinned === undefined) {
         return base +
-          (legacy
-            ? '\n\nThe classifier uses the provider "skills-classifier" (the legacy default present in this install).'
-            : '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
-              'runs on — triggers work out of the box.') +
+          '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
+          'runs on — triggers work out of the box.' +
           ' To pin a small/fast model instead, use the triggers_config tool (action "set"). ' +
           `Available providers: ${available.join(', ') || '(none)'}.`;
       }
@@ -706,6 +703,11 @@ export function createTriggersPlugin(): MatbotPluginSpec {
     async setup(services) {
       captured = services;
       manager  = await setupTriggers(services);
+      if (services.providers.has(RETIRED_CLASSIFIER) && await services.settings().get('classifierProvider') === undefined) {
+        console.warn(`[triggers] a provider named "${RETIRED_CLASSIFIER}" is configured, but since 0.5.0 the classifier `
+          + 'no longer uses it by name — it uses the turn\'s provider. To keep it, add to matbot.yaml: '
+          + `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: ${RETIRED_CLASSIFIER} } }`);
+      }
     },
 
     async teardown() {

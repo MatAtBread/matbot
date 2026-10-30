@@ -4,10 +4,9 @@ import { surfaceOfKind } from './types.js';
 
 const MAX_MSG_CHARS = 4000;
 
-// Back-compat default: installs that configured a provider literally named "skills-classifier" (the
-// former hard-coded classifier name) keep working with no migration. A `classifierProvider` setting
-// overrides it; absent both, the classifier falls back to the turn's own provider.
-const LEGACY_CLASSIFIER = 'skills-classifier';
+// The provider name the classifier used to pick up implicitly. It no longer does; setup warns when an
+// install still has one and has not pinned it. Removed in 0.6.0, with that warning.
+export const RETIRED_CLASSIFIER = 'skills-classifier';
 
 function clip(text: string): string {
   if (text.length <= MAX_MSG_CHARS) return text;
@@ -55,13 +54,12 @@ export class TriggerManager implements Triggers {
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
-  // the next turn): the `classifierProvider` setting if set and valid, else the legacy "skills-classifier"
-  // provider if present, else the current turn's own provider. There is always a turn provider to fall
-  // back to, so the classifier always has a model — triggers work with zero config.
+  // the next turn): the `classifierProvider` setting if set and valid, else the current turn's own
+  // provider. There is always a turn provider to fall back to, so the classifier always has a model —
+  // triggers work with zero config.
   async resolveClassifierProvider(turnProvider: string): Promise<string> {
     const pinned = await this.services.settings().get<string>('classifierProvider');
     if (pinned !== undefined && this.services.providers.has(pinned)) return pinned;
-    if (this.services.providers.has(LEGACY_CLASSIFIER)) return LEGACY_CLASSIFIER;
     return turnProvider;
   }
 

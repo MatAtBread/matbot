@@ -37,16 +37,16 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
     }
   }
 
-  // "Remember this" is compiled into the `remember_fact` direct tool. Ensure exactly one trigger
-  // invokes it with the canonical conditions — repointing any legacy trigger that still loads the
-  // retired "Remember this" skill (so an install seeded under the old model converts in place rather
-  // than ending up with both a skill-load trigger and a remember_fact trigger firing in parallel).
+  // "Remember this" is compiled into the `remember_fact` direct tool, which one trigger invokes with the
+  // canonical conditions. A trigger seeded before 0.2.4 still loads the retired skill instead; it is no
+  // longer converted in place, so say so rather than leave two triggers firing for one fact. The
+  // warning is removed in 0.6.0.
   if (triggers) {
-    const legacy = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
-    if (legacy.length > 0) {
-      for (const t of legacy) await triggers.update(t.id, { invoke: { tool: 'remember_fact' }, conditions: REMEMBER_CONDITIONS });
-    } else {
-      await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    const retired = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
+    if (retired.length > 0) {
+      console.warn(`[cognition] trigger(s) ${retired.map(t => t.id).join(', ')} still load the retired "Remember this" skill, `
+        + 'which remember_fact replaced. Delete them with trigger_action.');
     }
   }
 }

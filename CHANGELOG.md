@@ -16,6 +16,9 @@ churn and less likely to affect a consumer who doesn't use them.
 - **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
   instead: several co-exist and every one is asked, where the service key held one validator and a second
   had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
+- **`turnActivity` / `usageEntries` / `usageByProvider` no longer read the pre-0.4.3 usage shapes** — an
+  assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
+  report no usage for those turns.
 
 ### Optional
 
@@ -28,6 +31,12 @@ churn and less likely to affect a consumer who doesn't use them.
   tool, run 0.4.x once.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
+- **`triggers`** — a provider profile named `skills-classifier` is no longer used as the classifier by
+  name; the classifier uses the `classifierProvider` setting, else the turn's provider. An install that
+  has such a profile and no pin is warned at startup, with the one line that keeps it:
+  `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.
+- **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
+  longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
 
 ## 0.4.25
 
