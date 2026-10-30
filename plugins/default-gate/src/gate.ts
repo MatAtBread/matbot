@@ -35,7 +35,8 @@ export function toStandingAnswer(value: unknown): StandingAnswer | undefined {
 }
 
 /**
- * Serialises every standing-answer write in this module, across gate instances.
+ * Serialises every standing-answer write in this package — the gate's and `gate_action`'s — across
+ * gate instances.
  *
  * Appending a subject is a read-modify-write and `PluginSettings` has no CAS on a value — `set` guards
  * the document, not the list that was read out of it — so two answers given at once would both read the
@@ -50,7 +51,7 @@ export function toStandingAnswer(value: unknown): StandingAnswer | undefined {
  * copy of this module. Both are last-write-wins, which is the store's contract to change, not ours.
  */
 let writes: Promise<unknown> = Promise.resolve();
-function serialised<T>(work: () => Promise<T>): Promise<T> {
+export function serialised<T>(work: () => Promise<T>): Promise<T> {
   const next = writes.then(work, work);
   writes = next.catch(() => {});
   return next;

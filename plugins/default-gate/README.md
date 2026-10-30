@@ -104,11 +104,27 @@ what the replaceable seam is for.
   configured default read identically, because the question is whether the prompt appears. A gate with
   **no** answer is not reported: on a fresh install this returns nothing, and every gate simply behaves
   as configured. There is no list of "all the gates" — ids are open, and an absent key says only that
-  nobody answered, not what will happen. Name a `gate` to ask about one, which is also the only way to
-  see one an installation configured but nobody has answered (settings cannot enumerate their keys).
-- `{ action: 'clear' }` — forget standing answers, denials included, so the operation asks again:
-  everything, one `gate`, or one `subject` within a gate. Clearing means *revert to the configured default*, so an
-  installation's own `default_settings:` floor survives it.
+  nobody answered, not what will happen.
+- `{ action: 'list', gate?, match? }` — the same answers one **entry** at a time, each with an `id`:
+  `{ id, gate, effect: 'allow' | 'deny', subject? }`, where an absent `subject` means every subject of
+  the gate. `match` keeps entries whose gate or subject contains the text — a host, a URL, a function or
+  plugin name. It is a substring because a subject's format belongs to the call site that raised the
+  gate, and this policy never parses one; so it can find "every entry mentioning this host", not
+  "every entry for it", and it lists rather than clears. The id is a digest of the entry itself, so it
+  is the same on every listing and needs nothing remembered between the two calls.
+- `{ action: 'clear', ids }` — forget exactly the entries named. An id that matches nothing (already
+  cleared) is reported, never applied to something else.
+- `{ action: 'clear' }` — forget everything, one `gate`, or one `subject` within a gate. Forgetting a
+  whole gate means *revert to the configured default*, so an installation's own `default_settings:`
+  floor survives it; forgetting entries of a configured list stores the rest of the list.
+
+Forgetting a **denial**, by any form of `clear`, is itself gated — `gate_action.forget-denial`, subject
+`deny:<gate> <subject>` (or `deny:<gate>` for a denial of every subject), `fallback: false`. A denial is a
+refusal the user chose, and without this a model asking for a refused act could clear the denial and ask
+again; at a door with nobody to ask the act would fall to its site's fallback, which for
+`tools.overwrite` is to proceed. Forgetting an allow is not gated, since it only makes a gate ask again.
+Writes re-read inside the same queue as the policy's own, so two clears at once cannot restore what the
+other removed.
 
 There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names
 the specific act.
@@ -119,7 +135,7 @@ the specific act.
 `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load` · `provider.add` / `provider.add-unverified` /
 `provider.add-unlisted` / `provider.update` / `provider.update-unverified` / `provider.update-unlisted` /
 `provider.remove` · `mcp_action.add` /
-`mcp_action.remove`.
+`mcp_action.remove` · `gate_action.forget-denial`.
 
 A tool's ids are qualified with the name it is **registered** under, so one answer covers both
 runtimes' implementations of a tool. The list is open — a plugin this build never compiled against

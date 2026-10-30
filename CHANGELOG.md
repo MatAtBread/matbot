@@ -62,7 +62,19 @@ churn and less likely to affect a consumer who doesn't use them.
     - `gate_action get`'s result gains an optional **`denials: GateAnswer[]`**, present only when one
       exists; `GateAnswer` and its `effect` union are unchanged. `gate_action clear` also removes
       denials, for a gate, a subject within one, or everything;
-    - `denyKey(gate)` is exported beside `toStandingAnswer`.
+    - `denyKey(gate)` is exported beside `toStandingAnswer`;
+    - `gate_action` gains a **`list`** action (`{ gate?, match? }` → `{ entries: GateEntry[] }`, each
+      `{ id, gate, effect: 'allow' | 'deny', subject? }`, exported type) and `clear` accepts **`ids`**
+      from it. `get` and the existing `clear` forms are unchanged in shape; `clear`'s `message` text is
+      reworded and no longer says the act "will ask again", which a broader answer may not;
+    - forgetting a denial, by any form of `clear`, raises a new gate, **`gate_action.forget-denial`**
+      (subject `deny:<gate> <subject>`, or `deny:<gate>`; `fallback: false`). A replacement policy sees
+      it as an unknown id and should ask, as for any other; with nobody to ask, the denial is kept.
+- **`default-gate`** — `gate_action` `list` reports each standing answer as an entry with an id, and
+  `match` finds those whose gate or subject mentions some text; `clear` with `ids` forgets exactly those,
+  so forgetting one no longer means retyping its subject. Forgetting a denial now asks the user, since
+  it undoes a refusal they chose. Two clears at once could each write back the list it had read, so one
+  restored what the other removed; both now re-read inside the policy's write queue.
 - **`docker-bash`** — uses or removes a container only if it made it for this project: labelled with the
   project's root, or (made before that label) mounting it at `/app`. The container's name is settable
   through `bash_config`, and every path that reuses, replaces or removes the container found it by name

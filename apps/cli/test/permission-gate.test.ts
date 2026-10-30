@@ -378,9 +378,10 @@ test('gate_action reports denials beside answers, and clear forgets them', async
   const { settings } = policy({ 'plugin.add': ['@x/ok'] });
   await settings.set('deny:tool_function.import', ['probe node:os']);
   const tool = makeGateActionTool(settings);
+  const ctx = { gate: async () => ({ allowed: true, source: 'user' }) } as never;
   const run = async (p: object): Promise<unknown> => {
     let v: unknown;
-    for await (const ev of tool.executor.execute(p, {} as never)) if (ev.type === 'result') v = ev.value;
+    for await (const ev of tool.executor.execute(p, ctx)) if (ev.type === 'result') v = ev.value;
     return v;
   };
   assert.deepEqual(await run({ action: 'get' }), {
@@ -562,4 +563,99 @@ test('clear does not claim to have cleared a configured default', async () => {
   // Still in effect afterwards — the report and the behaviour agree.
   const still = await run<{ answers: { gate: string }[] }>(tool, { action: 'get' });
   assert.deepEqual(still.answers.map(a => a.gate), ['tools.overwrite']);
+});
+
+// ── gate_action: entries by id ────────────────────────────────────────────────
+// Forgetting one answer used to mean retyping its subject exactly — `Hubs__check@752d… http://…` — and
+// the policy cannot offer "everything for this host" as such, because a subject's format is its call
+// site's. So `list` finds entries by substring and gives each an id, and `clear` takes the ids back.
+
+interface Entry { id: string; gate: string; effect: 'allow' | 'deny'; subject?: string }
+
+function withCtx(answer: boolean): { ctx: never; asked: { gate: string; subject: string }[] } {
+  const asked: { gate: string; subject: string }[] = [];
+  return { asked, ctx: { gate: async (r: { gate: string; subject: string }) => { asked.push(r); return { allowed: answer, source: 'user' }; } } as never };
+}
+async function call<T>(tool: ReturnType<typeof makeGateActionTool>, input: object, ctx: never = withCtx(true).ctx): Promise<T> {
+  for await (const ev of tool.executor.execute(input, ctx)) {
+    if (ev.type === 'result') return ev.value as T;
+    if (ev.type === 'error')  throw new Error(ev.message);
+  }
+  throw new Error('no result');
+}
+
+test('list finds entries by substring, each with an id clear takes back', async () => {
+  const { settings } = policy();
+  await settings.set('tool_function.connect', ['Hubs__check@aa http://house:8123', 'mqtt@bb http://192.168.0.8:8088', 'Hubs__check@cc http://house:8123']);
+  await settings.set('http.request', ['http://house:8800', 'http://100.120.82.75']);
+  const tool = makeGateActionTool(settings);
+
+  const house = (await call<{ entries: Entry[] }>(tool, { action: 'list', match: 'house' })).entries;
+  assert.deepEqual(house.map(e => `${e.gate} ${e.subject}`), [
+    'tool_function.connect Hubs__check@aa http://house:8123',
+    'tool_function.connect Hubs__check@cc http://house:8123',
+    'http.request http://house:8800',
+  ]);
+  const again = (await call<{ entries: Entry[] }>(tool, { action: 'list', match: 'house' })).entries;
+  assert.deepEqual(again.map(e => e.id), house.map(e => e.id), 'an id is what the entry is, so it is stable');
+
+  const result = await call<{ cleared: string[] }>(tool, { action: 'clear', ids: house.map(e => e.id) });
+  assert.deepEqual(result.cleared, house.map(e => e.id));
+  assert.deepEqual(await settings.get('tool_function.connect'), ['mqtt@bb http://192.168.0.8:8088']);
+  assert.deepEqual(await settings.get('http.request'), ['http://100.120.82.75']);
+
+  const stale = await call<{ cleared: string[]; message: string }>(tool, { action: 'clear', ids: [house[0]!.id] });
+  assert.deepEqual(stale.cleared, []);
+  assert.match(stale.message, /No entry has id/, 'a stale id is reported, never matched to something else');
+});
+
+test('an allow of every subject is one entry, and clearing it deletes the key', async () => {
+  const { settings } = policy();
+  await settings.set('plugin.add', true);
+  const tool = makeGateActionTool(settings);
+  const [entry] = (await call<{ entries: Entry[] }>(tool, { action: 'list', gate: 'plugin.add' })).entries;
+  assert.deepEqual({ ...entry, id: undefined }, { id: undefined, gate: 'plugin.add', effect: 'allow' });
+  await call(tool, { action: 'clear', ids: [entry!.id] });
+  assert.equal(await settings.get('plugin.add'), undefined);
+});
+
+test('forgetting an allow asks nobody; forgetting a denial asks the user, and a refusal keeps it', async () => {
+  const { settings } = policy();
+  await settings.set('http.request', ['http://a']);
+  await settings.set('deny:http.request', ['http://b']);
+  const tool = makeGateActionTool(settings);
+  const entries = (await call<{ entries: Entry[] }>(tool, { action: 'list' })).entries;
+
+  const no = withCtx(false);
+  const result = await call<{ cleared: string[]; message: string }>(tool, { action: 'clear', ids: entries.map(e => e.id) }, no.ctx);
+  assert.deepEqual(no.asked.map(r => [r.gate, r.subject]), [['forget-denial', 'deny:http.request http://b']], 'asked about the denial only');
+  assert.deepEqual(result.cleared, [entries.find(e => e.effect === 'allow')!.id]);
+  assert.match(result.message, /the user declined/);
+  assert.deepEqual(await settings.get('http.request'), []);
+  assert.deepEqual(await settings.get('deny:http.request'), ['http://b'], 'the denial stands');
+
+  // The old forms reach denials too, and are asked about the same way.
+  await call(tool, { action: 'clear', gate: 'http.request' }, no.ctx);
+  assert.deepEqual(await settings.get('deny:http.request'), ['http://b']);
+  await call(tool, { action: 'clear' }, withCtx(true).ctx);
+  assert.equal(await settings.get('deny:http.request'), undefined);
+});
+
+test('two clears at once each remove their own entry and restore nothing', async () => {
+  // Each used to write back the list it had read, filtered: the second write restored what the first removed.
+  const { settings } = policy();
+  await settings.set('http.request', ['http://a', 'http://b']);
+  const tool = makeGateActionTool(settings);
+  const [a, b] = (await call<{ entries: Entry[] }>(tool, { action: 'list' })).entries;
+  await Promise.all([call(tool, { action: 'clear', ids: [a!.id] }), call(tool, { action: 'clear', ids: [b!.id] })]);
+  assert.deepEqual(await settings.get('http.request'), []);
+});
+
+test('the report does not promise a prompt that a broader answer will pre-empt', async () => {
+  const { settings } = policy();
+  await settings.set('tool_function.import', ['probe node:os', '* node:os']);
+  const tool = makeGateActionTool(settings);
+  const result = await call<{ message: string }>(tool, { action: 'clear', gate: 'tool_function.import', subject: 'probe node:os' });
+  assert.doesNotMatch(result.message, /ask .* again/);
+  assert.match(result.message, /Other standing answers remain for tool_function\.import/);
 });

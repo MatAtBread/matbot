@@ -725,7 +725,10 @@ broader denials are installation authoring. Like everything else here it is `def
 itself is still yes or no, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
 the "names no loaded plugin" warning exempts that one key, since nothing loads it).
-`gate_action` (`get` / `clear`) reports the standing answers **in effect** and forgets them; there is
+`gate_action` (`get` / `list` / `clear`) reports the standing answers **in effect** and forgets them —
+`list` one entry at a time, each with an id that is a digest of the entry, found by substring because a
+subject's format is its call site's, and `clear` takes the ids back; forgetting a *denial* is itself gated
+(`gate_action.forget-denial`), being a refusal the user chose. There is
 deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
 the specific act. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
 from the listing rather than described as "will ask", since an absent key says only that nobody

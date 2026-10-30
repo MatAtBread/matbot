@@ -93,9 +93,12 @@ gate, or a list of exact subjects. Denials sit beside them under `deny:<gate>`, 
 [egress controlled outside matbot](#when-egress-is-controlled-outside-matbot) for an example). Settings
 are layered per gate: answering a prompt stores the subjects in effect plus the new one, and from then on
 the stored list is what applies, so a later edit to that gate's configured value has no effect until the
-stored one is cleared. `gate_action get` reports the answers in effect (and any `denials`), and `clear`
-forgets both, reverting a gate to its configured value. There is no `set`: the one way to give a
-standing answer at run time is a person answering the prompt that names the act.
+stored one is cleared. `gate_action get` reports the answers in effect (and any `denials`); `list`
+reports them one entry at a time with an id, optionally those mentioning some text (a host, a function),
+and `clear` forgets the entries named, a gate (reverting it to its configured value), or everything.
+Forgetting a denial asks the user first (`gate_action.forget-denial`), since it undoes a refusal they
+chose; forgetting an allow does not, since it only makes a gate ask again. There is no `set`: the one
+way to give a standing answer at run time is a person answering the prompt that names the act.
 
 ### What an answer can change
 
