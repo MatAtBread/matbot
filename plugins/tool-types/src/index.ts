@@ -2,7 +2,7 @@ import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName, splitContract } from '@matatbread/matbot-plugin-api';
-import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckOptions, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
@@ -385,7 +385,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     return fingerprintOf(runner, settings);
   }
 
-  async check(snippet: string): Promise<ToolCheckReport> {
+  async check(snippet: string, opts?: ToolCheckOptions): Promise<ToolCheckReport> {
     // ABSOLUTE, always. The virtual file is named `<root>/…`, and `ts.createProgram` normalises a
     // relative one to a different string than the hook compares against — so `getSourceFile(virtual)`
     // missed, there were no files to check, and the snippet came back clean whatever was in it. A
@@ -428,6 +428,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       // ENV-GATE's list, from the runner that withholds them. Absent with no runner, which is correct:
       // nothing is withheld there either, so there is nothing to reject.
       ...(withheld !== undefined ? { withheldGlobals: withheld } : {}),
+      ...(opts?.parametersOf !== undefined ? { parametersOf: opts.parametersOf } : {}),
     });
     // Stamped here and nowhere else, from the same two lists that were just passed to the worker, so the
     // fingerprint cannot describe an environment other than the one graded against. Only on a verdict

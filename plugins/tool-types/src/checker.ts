@@ -9,6 +9,7 @@
 // own virtual file, the same resolved typescript module), so a checker failure is a plumbing bug
 // that must surface as the caller's error, not be absorbed by a quieter path.
 
+import { fileURLToPath } from 'node:url';
 import { renderToolCheckOmitted } from '@matatbread/matbot-plugin-api';
 import type { ToolCheckDiagnostic, ToolCheckReport } from '@matatbread/matbot-plugin-api';
 
@@ -176,12 +177,14 @@ function reportOf(diags: DiagnosticRecord[], mode: Mode): ToolCheckReport {
   };
 }
 
-async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecord[] | null> {
+type CheckParameters = NonNullable<ToolCheckReport['parameters']>;
+
+async function runWorker(data: Record<string, unknown>): Promise<{ diags: DiagnosticRecord[] | null; parameters?: CheckParameters }> {
   const { Worker } = await import('node:worker_threads');
   const { createRequire } = await import('node:module');
   const typescriptPath = createRequire(import.meta.url).resolve('typescript');
 
-  const result = await new Promise<{ ok?: boolean; diagnostics?: DiagnosticRecord[]; error?: string }>((resolve, reject) => {
+  const result = await new Promise<{ ok?: boolean; diagnostics?: DiagnosticRecord[]; parameters?: CheckParameters; error?: string }>((resolve, reject) => {
     // Parsed AS TypeScript, never left to node to guess: without the flag eval'd code runs as JS and is
     // retried as TS only if it fails to parse, and `new Set<string>(x)` parses fine as two comparisons —
     // so it would have thrown `string is not defined` but for an unrelated annotation elsewhere in the
@@ -199,7 +202,10 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
   });
 
   if (result.error !== undefined) throw new Error(result.error);
-  return result.ok ? null : (result.diagnostics ?? []);
+  return {
+    diags: result.ok ? null : (result.diagnostics ?? []),
+    ...(result.parameters !== undefined ? { parameters: result.parameters } : {}),
+  };
 }
 
 /**
@@ -214,7 +220,7 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
 export async function checkProjectDir(
   buildDir: string, opts?: { ownContracts?: readonly string[] },
 ): Promise<CheckResult> {
-  const diags = await runWorker({
+  const { diags } = await runWorker({
     mode: 'project', buildDir,
     ...(opts?.ownContracts !== undefined ? { ownContracts: [...opts.ownContracts] } : {}),
   });
@@ -256,8 +262,10 @@ export async function checkSnippetAgainst(opts: {
    *  that is shadowed but not rejected typechecks and then fails at the first call. Absent ⇒ nothing is
    *  rejected: with no runner there is no claim about what a body does not have. */
   withheldGlobals?: readonly string[];
+  /** Functions in the snippet whose parameter schemas to report ({@link ToolCheckOptions.parametersOf}). */
+  parametersOf?: readonly string[];
 }): Promise<ToolCheckReport> {
-  const diags = await runWorker({
+  const { diags, parameters } = await runWorker({
     mode: 'snippet',
     root: opts.root,
     source: opts.source,
@@ -269,8 +277,12 @@ export async function checkSnippetAgainst(opts: {
     ...(opts.globalTypes  !== undefined ? { globalTypes:  opts.globalTypes  } : {}),
     ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
     ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
+    ...(opts.parametersOf !== undefined && opts.parametersOf.length > 0
+      ? { parametersOf: [...opts.parametersOf], parametersModule: fileURLToPath(new URL('./parameters.cts', import.meta.url)) }
+      : {}),
   });
-  return reportOf(diags ?? [], 'snippet');
+  const report = reportOf(diags ?? [], 'snippet');
+  return parameters !== undefined ? { ...report, parameters } : report;
 }
 
 // The worker body: CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks are
@@ -752,7 +764,11 @@ try {
     }
     return out;
   };
-  parentPort.postMessage({ ok: errors.length === 0, diagnostics: errors.map(rec) });
+  // Read from the program just checked, so a schema describes exactly the types that were graded.
+  const parameters = workerData.parametersOf && virtual !== null
+    ? require(workerData.parametersModule).parametersOf(ts, program.getTypeChecker(), program.getSourceFile(virtual), workerData.parametersOf)
+    : undefined;
+  parentPort.postMessage({ ok: errors.length === 0, diagnostics: errors.map(rec), ...(parameters ? { parameters } : {}) });
 } catch (e) {
   parentPort.postMessage({ error: String((e && e.message) || e) });
 }

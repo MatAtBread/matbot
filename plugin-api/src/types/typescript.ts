@@ -1,3 +1,5 @@
+import type { JSONSchema } from './primitives.js';
+
 // ── TypeScript ──────────────────────────────────────────────────────────────
 
 /**
@@ -278,6 +280,25 @@ export interface ToolCheckReport {
    * so "this passed" can say which environment it passed in. Absent when nothing was checked.
    */
   environment?: string;
+  /** Per function named in {@link ToolCheckOptions.parametersOf} and declared at the snippet's top level,
+   *  its parameters in order, each with the JSON Schema its resolved type projects to. Absent from an index
+   *  that cannot resolve types (the browser), which is the caller's cue to derive one some other way. */
+  parameters?: Record<string, ToolCheckParameter[]>;
+}
+
+/** One parameter of a checked function. `schema` is the JSON a caller sends for it — the JSON projection
+ *  of the resolved type, permissive (`{}`) wherever a schema could not honestly constrain it. */
+export interface ToolCheckParameter {
+  name:     string;
+  optional: boolean;
+  schema:   JSONSchema;
+}
+
+export interface ToolCheckOptions {
+  /** Functions declared at the snippet's top level (a function declaration, or a `const` holding a
+   *  function or arrow) whose parameters to report on {@link ToolCheckReport.parameters}, read from the same
+   *  program the check ran. */
+  parametersOf?: readonly string[];
 }
 
 /**
@@ -330,7 +351,7 @@ export interface ToolTypeIndex {
    *  ToolProxy}: each multi-action tool an overload set, so `await tool.x(params)` narrows its result by the
    *  params) is in scope. Returns a {@link ToolCheckReport} whose positions are snippet-relative. A
    *  composer uses it to catch bad tool-call code before running/registering it. */
-  check(snippet: string): Promise<ToolCheckReport>;
+  check(snippet: string, opts?: ToolCheckOptions): Promise<ToolCheckReport>;
   /** Per live tool (that has a contract): the `params`/`result` wire text, flattened from the one contract —
    *  a source tool's `ToolContracts` arms (via the source scan) or a source-less tool's `toolContract` string.
    *  The single contract is thus also the source of the wire description; the host folds this into the

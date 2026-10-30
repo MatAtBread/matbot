@@ -600,6 +600,16 @@ helper, `contractArms` in plugin-api: the declarations go in a namespace of thei
 tool beside them, so the contract stays exactly as written and still resolves, and two packages' types of
 one name never merge. A diagnostic inside such a namespace refuses the tools it serves and no others.
 
+**A defined function's `inputSchema` is the checker's on node, and the text's in the browser.** The browser
+has no compiler, so `function-tools` derives a schema from the parameter text by hand, and that cannot see
+a named or imported type, an alias or `Omit<…>`: each degrades to `{}`, which tells a provider nothing and
+lets `json-validation` accept anything. On node the define's own check also reports each parameter's schema
+from its RESOLVED type (`check(snippet, { parametersOf })`, emitted by `tool-types/src/parameters.cts` in
+the checker's worker), with the text path's conventions so the two agree where both can answer. It is
+STORED with the definition (a function's record, a session marker, a package's per-export map), because
+nothing re-checks a definition on load; absent — the browser, `noTypeCheck`, a record from before 0.5.0 —
+the text path answers as it always did.
+
 There are **no** `paramsType`/`resultType` fields — they are fully retired. A foreign tool (e.g. an MCP proxy) that carries neither an augmentation nor a `toolContract` falls back to its loose `inputSchema`, and the registry block emits `ToolContract<unknown, unknown>` so it stays in `keyof ToolContracts` (hence callable, loosely, through `ToolProxy`). Unregistered ⇒ `unknown`.
 
 **A scanned root supplies a tool's *contract*; only the live registry says the tool *exists*.** The dts scan roots at each loaded plugin's `resolvedUrl` and then UNIONs a glob of the monorepo `plugins/` tree onto it — not a fallback, but the only way to reach host-constructed builtins (`plugin`, `provider`) that have no `resolvedUrl` — so the roots are a **superset** of the loaded set by construction, reaching plugins for other runtimes and plugins nobody loaded. `buildMatbotToolsDts` therefore emits only the keys in `tools.list()`. A declared-but-unloaded tool is worse than an absent one: `await tool.telegram_send({ text })` typechecks clean against it and throws `not registered` at runtime — the one failure the check gate exists to prevent, and one the repair loop cannot repair, because the code is correct against the types it was shown. Contrast `MatbotServices`, which takes no such filter: absence there is already a type (the `?:` *is* the "may not be loaded" signal), whereas a `ToolContracts` key carries no such qualifier — declared means callable. What the filter cannot settle is two roots declaring one *live* name (`bash`, by `plugins/bash` and `plugins/docker-bash`): that still merges by Program file order, and is reported via `conflicts` rather than resolved.

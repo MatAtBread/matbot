@@ -23,7 +23,9 @@ interface PackageRecord { name: string; tools: string[]; definition: string; def
 
 /** A stored package, keyed by package name: the unit of declaration AND of removal, so an internal helper
  *  can never outlive the exports calling it, nor an export the helper it calls. */
-interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true; checkedAgainst?: string }
+interface PackageDoc { id: string; version: string; definition: string; definedUnchecked?: true; checkedAgainst?: string;
+  /** Per export, its input schema as the checker resolved it at define time; see {@link FunctionDoc.inputSchema}. */
+  inputSchemas?: Record<string, JSONSchema> }
 
 /** A stored function. Its `id` IS its name — names are already unique (they are tool-registry keys),
  *  so there is no second identity to keep in step, and a rename is a delete plus an add. */
@@ -36,6 +38,9 @@ interface FunctionDoc {
   definedUnchecked?: true;
   /** The {@link ToolTypeIndex.environment} fingerprint the check was reached under, when one was. */
   checkedAgainst?: string;
+  /** The tool's input schema as the checker resolved it at define time ({@link checkedSchema}). Stored,
+   *  because nothing re-checks a definition on load; absent ⇒ derived from the text, as the browser does. */
+  inputSchema?: JSONSchema;
 }
 
 /**
@@ -125,7 +130,7 @@ const recordOf = (doc: FunctionDoc, env?: string): FunctionRecord => ({
 
 /** A session function's row: the fingerprint compared and dropped (see {@link elsewhere}). */
 const sessionRow = (rec: SessionFunctionRecord, env?: string): SessionFunctionRow => {
-  const { checkedAgainst, ...rest } = rec;
+  const { checkedAgainst, inputSchema: _schema, ...rest } = rec;
   return { ...rest, ...elsewhere(checkedAgainst, env) };
 };
 
@@ -155,6 +160,38 @@ function checkSnippet(sig: ParsedSignature): string {
   if (sig.returnType === undefined) return `async function __fn(${sig.paramsText}) ${sig.body}`;
   const ret = /^Promise\s*</.test(sig.returnType) ? sig.returnType : `Promise<${sig.returnType}>`;
   return `async function __fn(${sig.paramsText}): ${ret} ${sig.body}`;
+}
+
+/**
+ * A defined function's input schema from the checker's RESOLVED parameter types, which see what the text
+ * cannot — a named or imported type, an alias, `Omit<…>`. Only when the check reported exactly the
+ * parameters the source declares; otherwise undefined, and the schema is derived from the text.
+ */
+function checkedSchema(report: ToolCheckReport, params: readonly ParsedParam[]): JSONSchema | undefined {
+  const got = report.parameters?.['__fn'];
+  if (got === undefined || got.length !== params.length || got.some((g, i) => g.name !== params[i]?.name)) return undefined;
+  const required = got.filter(g => !g.optional).map(g => g.name);
+  return { type: 'object', properties: Object.fromEntries(got.map(g => [g.name, g.schema])), ...(required.length > 0 ? { required } : {}) };
+}
+
+/**
+ * {@link checkedSchema} for a package: each export takes its one object parameter AS its input, so that
+ * parameter's resolved schema is the tool's. An export the check did not describe keeps its text-derived
+ * schema. One whose parameter resolves to something other than an object is refused as the text check
+ * refuses one, now that an alias or an imported type can no longer hide it.
+ */
+function exportSchemas(report: ToolCheckReport, parsed: ParsedPackage): Record<string, JSONSchema> | undefined {
+  const out: Record<string, JSONSchema> = {};
+  for (const e of parsed.exports) {
+    const got = report.parameters?.[e.name];
+    if (got === undefined || got.length !== 1 || e.param === undefined) continue;
+    const schema = got[0]!.schema;
+    if (schema['type'] !== undefined && schema['type'] !== 'object') {
+      throw new Error(`exported function "${e.name}" takes a ${JSON.stringify(schema['type'])} — a tool's parameter must be an object, e.g. \`${e.name}(args: { value: ${e.param.type ?? 'string'} })\`.`);
+    }
+    out[e.name] = { ...schema, type: 'object' };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 type DefinedSignature = ParsedSignature & { name: string; returnType: string };
@@ -197,7 +234,7 @@ function globalTypeError(report: ToolCheckReport, sessionNames: Iterable<string>
  *  registry entry for a validator to find it by). */
 function definedTool(
   machine: MatbotMachine, lineage: Lineage, rec: FunctionRecord, sig: ParsedSignature, fn: CompiledFn,
-  origin: string, extra?: { wire?: true; check?: (input: Record<string, unknown>) => string | undefined },
+  origin: string, extra?: { wire?: true; check?: (input: Record<string, unknown>) => string | undefined; inputSchema?: JSONSchema | undefined },
 ): Tool {
   const paramNames = sig.params.map(p => p.name);
   const contract   = contractOf(sig);
@@ -210,7 +247,7 @@ function definedTool(
   return {
     name:        rec.name,
     description: `${base}\n\n${origin}${wire}`,
-    inputSchema: paramsSchema(sig.params),
+    inputSchema: extra?.inputSchema ?? paramsSchema(sig.params),
     // A defined function has no augmentation source; it carries its own contract. Same shape as a
     // ToolContracts arm — the params object paired with the declared return type — so tool-types splices
     // it into the dts registry block (bare `ToolContract` rewritten to an inline import) and derives the
@@ -295,7 +332,7 @@ class FunctionStore {
     for (const doc of items) {
       const holder = this.holderOf(doc.id);
       if (holder !== undefined) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": the name is held by a tool from "${holder}"`); continue; }
-      try { this.commit(await this.build(recordOf(doc), true)); seen.add(doc.id); }
+      try { this.commit(await this.build(recordOf(doc), true, doc.inputSchema)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of this.registered) if (!seen.has(name) && this.owns(name)) this.machine.tools.remove(name);
@@ -328,14 +365,16 @@ class FunctionStore {
     const index = this.machine.ToolTypeIndex;
     let checked = false;
     let checkedAgainst: string | undefined;
+    let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(checkSnippet(sig));
+      const report = await index.check(checkSnippet(sig), { parametersOf: ['__fn'] });
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       // An index that cannot check says so, and a clean report from one proves nothing. The browser
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
       // verified when nothing had read them.
       checked = report.checked;
       checkedAgainst = report.environment;
+      inputSchema = checkedSchema(report, sig.params);
     }
     const doc: FunctionDoc = {
       id:      sig.name,
@@ -350,12 +389,13 @@ class FunctionStore {
       // WHERE it passed, so a later reader can tell that the environment has moved under it — stored
       // only when there is a verdict to qualify.
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
     };
     // Compiled before anything is written, so bad source fails with nothing changed; registered only once
     // written, so a refused write changes nothing either. The registry never holds a definition the store
     // refused — which, with a store that refuses writes to an item shared in, ran someone else's name as
     // the caller's unsaved code.
-    const tool = await this.build(recordOf(doc));
+    const tool = await this.build(recordOf(doc), false, doc.inputSchema);
     this.assertFree(sig.name);   // the check and the compile awaited: a plugin may have taken the name meanwhile
     // No CAS: a define is an unconditional "this name now means this source", not a read-modify-write,
     // and the name is the whole identity. Only this one document is touched, so two concurrent defines
@@ -430,13 +470,13 @@ class FunctionStore {
     if (this.holderOf(name) !== undefined) throw new Error(`A tool named "${name}" already exists and wasn't defined here — choose another name.`);
   }
 
-  private async build(rec: FunctionRecord, deferCompile = false): Promise<Tool> {
+  private async build(rec: FunctionRecord, deferCompile = false, inputSchema?: JSONSchema): Promise<Tool> {
     const sig   = parseSignature(rec.definition);
     const names = sig.params.map(p => p.name);
     const fn    = deferCompile
       ? onFirstCall(() => buildAsyncFn(this.machine, rec.definition, names))
       : await buildAsyncFn(this.machine, rec.definition, names);
-    return definedTool(this.machine, this.lineage, rec, sig, fn, `Defined via ${TOOL_NAME}.`);
+    return definedTool(this.machine, this.lineage, rec, sig, fn, `Defined via ${TOOL_NAME}.`, { inputSchema });
   }
 
   private commit(tool: Tool): void {
@@ -467,7 +507,7 @@ class PackageStore {
     const { items } = await this.store.query({ immutable: true });
     const seen = new Set<string>();
     for (const doc of items) {
-      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition, true)); seen.add(doc.id); }
+      try { this.commit(doc.id, await this.prepare(doc.id, parsePackage(doc.id, doc.definition), doc.definition, true, doc.inputSchemas)); seen.add(doc.id); }
       catch (e) { console.warn(`[${PLUGIN_NAME}] skipping package "${doc.id}": ${e instanceof Error ? e.message : String(e)}`); }
     }
     for (const name of [...this.owned.keys()]) if (!seen.has(name)) this.unregister(name);
@@ -509,18 +549,21 @@ class PackageStore {
     const index = this.machine.ToolTypeIndex;
     let checked = false;
     let checkedAgainst: string | undefined;
+    let inputSchemas: Record<string, JSONSchema> | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(definition);
+      const report = await index.check(definition, { parametersOf: parsed.exports.map(e => e.name) });
       if (!report.ok) throw new Error(globalTypeError(report, sessionNames));
       checked = report.checked;
       checkedAgainst = report.environment;
+      inputSchemas = exportSchemas(report, parsed);
     }
     // Compiled and clash-checked before the write, registered after it: see FunctionStore.define.
-    const tools = await this.prepare(name, parsed, definition);
+    const tools = await this.prepare(name, parsed, definition, false, inputSchemas);
     const doc: PackageDoc = {
       id: name, version: crypto.randomUUID(), definition,
       ...(checked ? {} : { definedUnchecked: true as const }),
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
+      ...(inputSchemas !== undefined ? { inputSchemas } : {}),
     };
     const before = (await this.store.get(name))?.definition;
     try { await this.store.set(doc.id, doc); }
@@ -586,7 +629,7 @@ class PackageStore {
 
   /** Compile, then check every exported name, registering nothing — so a failure at either step, or a
    *  refused write after it, leaves the previous definition (or nothing) registered. */
-  private async prepare(name: string, parsed: ParsedPackage, definition: string, deferCompile = false): Promise<Tool[]> {
+  private async prepare(name: string, parsed: ParsedPackage, definition: string, deferCompile = false, inputSchemas?: Record<string, JSONSchema>): Promise<Tool[]> {
     const pkg  = deferCompile
       ? onFirstCall(() => buildPackageFn(this.machine, definition, parsed))
       : await buildPackageFn(this.machine, definition, parsed);
@@ -603,7 +646,7 @@ class PackageStore {
       return {
         name:         e.toolName,
         description:  `${e.description ?? `${PLACEHOLDER_DESCRIPTION}\n\nSource:\n${e.source}`}\n\nExported by package "${name}", defined via ${TOOL_NAME}.`,
-        inputSchema:  e.inputSchema,
+        inputSchema:  inputSchemas?.[e.name] ?? e.inputSchema,
         toolContract: e.toolContract,
         ...(e.toolContractTypes !== undefined ? { toolContractTypes: e.toolContractTypes } : {}),
         pluginName:   PLUGIN_NAME,
@@ -682,17 +725,20 @@ class SessionFunctions {
     const index = this.machine.ToolTypeIndex;
     let checked = false;
     let checkedAgainst: string | undefined;
+    let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }));
+      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }), { parametersOf: ['__fn'] });
       if (!report.ok) throw new Error(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
       checked = report.checked;
       checkedAgainst = report.environment;
+      inputSchema = checkedSchema(report, sig.params);
     }
     const rec: SessionFunctionRecord = {
       name: sig.name, definition,
       ...(description !== undefined && description.trim() !== '' ? { description: description.trim() } : {}),
       ...(checked ? {} : { definedUnchecked: true as const }),
       ...(checkedAgainst !== undefined ? { checkedAgainst } : {}),
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
     };
     const built = await this.build(rec);   // compiles: a bad source fails here, before any marker exists
     if (built instanceof Error) throw built;
@@ -730,7 +776,7 @@ class SessionFunctions {
   }
 
   private build(rec: SessionFunctionRecord): Promise<Tool | Error> {
-    const key = JSON.stringify([rec.name, rec.definition, rec.description ?? null]);
+    const key = JSON.stringify([rec.name, rec.definition, rec.description ?? null, rec.inputSchema ?? null]);
     const hit = this.built.get(key);
     if (hit !== undefined) return hit;
     const made = (async (): Promise<Tool | Error> => {
@@ -738,7 +784,7 @@ class SessionFunctions {
         const sig = parseSignature(rec.definition);
         const fn  = await buildAsyncFn(this.machine, rec.definition, sig.params.map(p => p.name));
         return definedTool(this.machine, this.lineage, rec, sig, fn, `Defined via ${TOOL_NAME} for this conversation only.`,
-          { wire: true, check: paramsGate(rec.name, sig.params) });
+          { wire: true, check: paramsGate(rec.name, sig.params), inputSchema: rec.inputSchema });
       } catch (e) { return e instanceof Error ? e : new Error(String(e)); }
     })();
     this.built.set(key, made);

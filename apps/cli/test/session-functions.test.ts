@@ -222,8 +222,9 @@ test('session functions type-check like registered tools, and a global function 
   // `checkedAgainst` is where it passed — no FunctionRunner here, which is as much an environment as a
   // configured one: install the runner later and what a body may import changes under the stored verdict.
   assert.deepEqual(defined[0], { type: 'marker', creator: '@matatbread/matbot-function-tools',
-    data: { op: 'define', name: 'fib', definition: FIB, checkedAgainst: 'no-runner' } },
-    'checked: recursion types against its own contract, and no definedUnchecked');
+    data: { op: 'define', name: 'fib', definition: FIB, checkedAgainst: 'no-runner',
+            inputSchema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] } } },
+    'checked: recursion types against its own contract, its input schema as the checker resolved it, and no definedUnchecked');
 
   // What the runner would hand the next round: the tool built from that marker.
   session.messages.push({ id: 'm', role: 'marker', traceId: 't', createdAt: '', content: [defined[0] as never] } as Message);
@@ -313,4 +314,44 @@ test('execute takes a bare body, and an arrow definition is refused rather than 
   const retired = await call({ action: 'lambda', definition: 'x' });
   assert.equal(retired.at(-1)?.type, 'error');
   assert.match(errOf(retired), /[Uu]nknown tool_function action/);
+});
+
+// On node a defined tool's inputSchema is the checker's: the text path sees `Opts` as an unknown name and
+// can only offer `{}`, which tells the provider nothing and lets json-validation accept anything. It is
+// stored with the definition, since nothing re-checks one on load.
+test('a define and a package export take their inputSchema from the checker, and keep it', { timeout: 60000 }, async () => {
+  let index: ToolTypeIndex | undefined;
+  const machine = machineWith({
+    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
+  });
+  await createToolTypesPlugin().setup?.(machine);
+  Object.assign(machine, { ToolTypeIndex: index });
+  await createFunctionToolsPlugin().setup?.(machine);
+  const fn = machine.tools.resolve('tool_function')!;
+  const call = async (input: unknown): Promise<ToolEvent[]> => {
+    const ctx = { callId: 'c', session: createSession(), signal: new AbortController().signal, prompt: async () => { throw new Error('no'); } } as unknown as ToolContext;
+    const out: ToolEvent[] = [];
+    for await (const ev of fn.executor.execute(input, ctx)) out.push(ev);
+    return out;
+  };
+
+  const defined = await call({ action: 'define', definition: "greet(who: Pick<{ name: string; title?: 'Dr' | 'Ms' }, 'name' | 'title'>): string { return who.name; }" });
+  assert.equal(defined.at(-1)?.type, 'result', JSON.stringify(defined.at(-1)));
+  const expected = { type: 'object', properties: { who: {
+    type: 'object', properties: { name: { type: 'string' }, title: { type: 'string', enum: ['Dr', 'Ms'] } }, required: ['name'] } }, required: ['who'] };
+  assert.deepEqual(machine.tools.resolve('greet')?.inputSchema, expected);
+  const stored = await machine.createStore<{ id: string; version: string; inputSchema?: unknown }>('functions').get('greet');
+  assert.deepEqual(stored?.inputSchema, expected, 'stored, so a reload rebuilds the same schema without a check');
+
+  const pkg = await call({ action: 'package', name: 'shapes', definition:
+    'type Box = { w: number; h: number; unit?: "cm" | "in" };\nexport async function area(box: Box): Promise<number> { return box.w * box.h; }' });
+  assert.equal(pkg.at(-1)?.type, 'result', JSON.stringify(pkg.at(-1)));
+  assert.deepEqual(machine.tools.resolve('shapes__area')?.inputSchema, {
+    type: 'object', properties: { w: { type: 'number' }, h: { type: 'number' }, unit: { type: 'string', enum: ['cm', 'in'] } }, required: ['w', 'h'] });
+
+  // An alias hid a non-object parameter from the text check; the checker sees through it.
+  const bad = await call({ action: 'package', name: 'oops', definition:
+    'type Name = string;\nexport async function hi(name: Name): Promise<string> { return name; }' });
+  assert.match(JSON.stringify(bad.at(-1)), /must be an object/);
 });

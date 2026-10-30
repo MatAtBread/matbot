@@ -45,8 +45,20 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`confirmUnlistedModel`, `movedCredentialNote`** (plugin-api, beside `checkProviderModel`) — the gate
   for a model the endpoint does not list, and the note when an update leaves a credential behind. Both
   hosts' `provider` tools use them, so they ask the same question in the same words.
+- **`ToolTypeIndex.check(snippet, { parametersOf })`** — names functions declared at the snippet's top level,
+  and the report's new `parameters` gives each one's parameters (`ToolCheckParameter`: name, optional, and
+  the JSON Schema its resolved type projects to), read from the program the check just ran. An index that
+  cannot resolve types (the browser) omits it.
 
 ### Optional
+
+- **`function-tools`** — on node a defined function's, and a package export's, `inputSchema` comes from the
+  checker's resolved parameter types instead of from the parameter text, so a named or imported type, an
+  alias or `Omit<…>` reaches the provider and `json-validation` as its real shape rather than as `{}`. It is
+  stored with the definition; one defined with `noTypeCheck`, in the browser, or before 0.5.0 keeps the
+  text-derived schema. A package export whose parameter only an alias showed to be a non-object is now
+  refused, as a visibly non-object one already was.
+- **`tool-types`** — implements `parametersOf`.
 
 - **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):
