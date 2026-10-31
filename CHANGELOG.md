@@ -161,6 +161,10 @@ churn and less likely to affect a consumer who doesn't use them.
   never worked as an install, and since 0.4.5 it was folded into the path with a warning. Refused when the
   plugin is fetched, so a configured one is a recorded load failure naming the rewrite, not a boot that
   stops. `Classified`'s `http` arm loses `url` and `advice`; `githubToHttps` is exported instead.
+- **The CLI no longer installs `provenance`.** It was a runtime dependency of `@matatbread/matbot-cli`
+  only because a CLI test imports it, so an npm install of the CLI carried it while every other plugin
+  needed `plugin add`. An installation whose `plugins:` names `@matatbread/matbot-provenance` adds it
+  (`plugin add @matatbread/matbot-provenance`); a source checkout is unaffected.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
 - **`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`

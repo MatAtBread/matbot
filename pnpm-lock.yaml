@@ -32,9 +32,6 @@ importers:
       '@matatbread/matbot-host-node':
         specifier: workspace:^
         version: link:../../host-node
-      '@matatbread/matbot-provenance':
-        specifier: workspace:^
-        version: link:../../plugins/provenance
       '@matatbread/matbot-provider-anthropic':
         specifier: workspace:^
         version: link:../../plugins/providers/anthropic
@@ -63,6 +60,9 @@ importers:
       '@matatbread/matbot-function-tools':
         specifier: workspace:^
         version: link:../../plugins/function-tools
+      '@matatbread/matbot-provenance':
+        specifier: workspace:^
+        version: link:../../plugins/provenance
       '@matatbread/matbot-sessions':
         specifier: workspace:^
         version: link:../../plugins/sessions

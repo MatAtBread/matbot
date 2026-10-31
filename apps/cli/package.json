@@ -48,14 +48,14 @@
     "@matatbread/matbot-provider-openai-compat": "workspace:^",
     "@matatbread/matbot-provider-google": "workspace:^",
     "@matatbread/matbot-provider-customer-services": "workspace:^",
-    "@matatbread/matbot-provider-chatjimmy": "workspace:^",
-    "@matatbread/matbot-provenance": "workspace:^"
+    "@matatbread/matbot-provider-chatjimmy": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "@matatbread/matbot-caching-tool-types": "workspace:^",
     "@matatbread/matbot-function-runner-node": "workspace:^",
     "@matatbread/matbot-function-tools": "workspace:^",
+    "@matatbread/matbot-provenance": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-tool-skill-compiler": "workspace:^",
