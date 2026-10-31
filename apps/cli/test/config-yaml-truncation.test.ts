@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseYaml } from '@matatbread/matbot-core';
+import { parseYaml } from '../src/yaml.js';
 
 // The config parser used to answer a construct it could not read by `break`ing its enclosing loop,
 // which returned what had been read so far and left the rest of the document silently discarded. A

@@ -3,8 +3,8 @@
 The core runtime for [matbot](https://github.com/MatAtBread/matbot) — a thin, composable
 TypeScript AI harness.
 
-It contains the agentic loop, hook dispatch, the plugin loader, config (YAML + `.env`),
-security (`VaultImpl`, principal origin), and the default in-memory knowledge index. It is
+It contains the agentic loop, hook dispatch, the plugin loader, security (`VaultImpl`,
+principal origin), and the default in-memory knowledge index. It is
 the runtime an **app** (such as the CLI) instantiates; plugins rarely import it directly.
 
 Two **subpath exports** are provided for plugin authors, so you can link against them without

@@ -73,7 +73,6 @@ export * from './system-context.js';
 export * from './single-turn.js';
 export * from './media.js';
 export * from './about.js';
-export * from './config/index.js';
 export * from './security/index.js';
 export * from './knowledge/index.js';
 export * from './assemble.js';

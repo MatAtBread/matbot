@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { parseYaml, applyProviderPatch, movedCredentialKeys, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
+import { parseYaml } from '../src/yaml.js';
+import { applyProviderPatch, movedCredentialKeys, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
          CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
 import { writeProviderBlock, createProviderTool } from '../src/plugins/index.js';
 import type { ProviderConfig, PromptFn, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';

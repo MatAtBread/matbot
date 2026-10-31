@@ -1,4 +1,4 @@
-import type { ModelParameters, Principal, ProviderConfig } from '@matatbread/matbot-plugin-api';
+import type { ModelParameters, Principal, ProviderConfig } from '@matatbread/matbot-core';
 import { parseYaml, type YamlMap, type YamlValue } from './yaml.js';
 
 export interface MatbotConfig {

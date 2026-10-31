@@ -46,6 +46,11 @@ churn and less likely to affect a consumer who doesn't use them.
   `provider` tools edit `matbot.yaml`, and acquisition fetches into `.plugins/` and installs with npm beside
   it. Nothing changes for a CLI user. An application that imported it builds its own against its own
   persistence, as the browser's tools do.
+- **core no longer parses `matbot.yaml`.** `parseConfig`, `parseYaml` and `MatbotConfig` are the CLI's
+  (`apps/cli/src/config-parse.ts`, `yaml.ts`): a config file is how the CLI chooses to be configured, and
+  core takes what a host hands `assembleMachine` rather than reading a format of its own. A host that
+  parsed `matbot.yaml` with them parses its own configuration; `installSettingsDefaults` stays in core,
+  taking a map.
 
 ### API gaps filled
 

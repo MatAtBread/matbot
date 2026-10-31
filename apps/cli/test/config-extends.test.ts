@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseConfig } from '@matatbread/matbot-core';
+import { parseConfig } from '../src/config-parse.js';
 
 // `extends:` merges per TOP-LEVEL KEY and the derived document REPLACES the section it names — a child
 // declaring one plugin supplies the whole list. The word "extends" invites the other reading, and the

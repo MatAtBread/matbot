@@ -34,8 +34,8 @@ plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServic
                        ./host — boot assembly for an EMBEDDER, not a plugin: carrier installers,
                                 swap proxies, the mount table's producer half, HookRegistry,
                                 createNotifier, the broadcaster. See "The /host boundary" below.
-core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
-                     (YAML + .env), security (VaultImpl, Principal origin), knowledge
+core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, security
+                     (VaultImpl, Principal origin), knowledge
                      (LookupKnowledgeIndex), boot assembly (`assembleMachine` — see "Boot
                      assembly" below), the default PermissionGate policy + `gate_action`
                      (`default-gate/` — see "Permission gates"). Author-facing subpath exports — link against without
@@ -93,7 +93,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
       google-drive/  — Drive-backed StorageBackend (browser)
       profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
-  cli/             — interactive REPL + single-turn; node plugin acquisition and the `plugin`/`provider`
+  cli/             — interactive REPL + single-turn; matbot.yaml (its schema and parser — core takes a
+                     config, it does not read one); node plugin acquisition and the `plugin`/`provider`
                      tools, which edit matbot.yaml (src/plugins)
   web-bundle/      — browser-only matbot.html
 examples/          — private, never published: programs using matbot as a dependency (minimal-matbot:
