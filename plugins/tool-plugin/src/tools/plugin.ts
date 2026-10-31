@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolEvent, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
-              PluginToolContract, DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-plugin-api';
+              DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-plugin-api';
 import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin, getPluginNameForSpecifier, clearFailedPlugin, describePlugins, storeSecret } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
@@ -87,15 +87,6 @@ function resolveExportsMain(exports: unknown): string | undefined {
 
 // What `discoverLocalPlugins` builds, before the caller stamps `configuredVia` from the config it read.
 type DiscoveryEntry = Omit<DiscoveredPlugin, 'configuredVia'>;
-
-// The contract is shared with the browser implementation of this same tool name (a `ToolContracts` key
-// is registered by declaration merging, so two implementations cannot each describe themselves — see
-// plugin-api/src/types/builtin-tools.ts).
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    plugin: PluginToolContract;
-  }
-}
 
 // Inspect one candidate directory. `matbotRuntime` is what makes a package a plugin, so a package without
 // it is passed over before anything is imported — a library's top-level code is not run to find out.

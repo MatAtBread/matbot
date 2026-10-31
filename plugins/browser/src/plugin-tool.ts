@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, Runtime,
-              PluginToolContract, DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
+              DiscoveredPlugin } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin, clearFailedPlugin, describePlugins, storeSecret } from '@matatbread/matbot-core';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 
@@ -28,15 +28,6 @@ type PluginInput =
 // assembler's own bake shape, read straight off a global — `discover_local` maps it to the shared
 // `DiscoveredPlugin` rather than returning it, so the bake format stays free to change.
 interface AvailablePlugin { name: string; specifier: string; matbotRuntime?: readonly Runtime[]; description?: string }
-
-// The contract is shared with the node implementation of this same tool name (a `ToolContracts` key is
-// registered by declaration merging, so two implementations cannot each describe themselves — see
-// plugin-api/src/types/builtin-tools.ts).
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    plugin: PluginToolContract;
-  }
-}
 
 function bakedAvailablePlugins(): AvailablePlugin[] {
   const mb = (globalThis as unknown as { __MB__?: { config?: { availablePlugins?: AvailablePlugin[] } } }).__MB__;

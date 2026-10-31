@@ -405,9 +405,9 @@ surviving one is whichever the compiler happened to see first. `buildMatbotTools
 clash it finds rather than silently picking a winner.
 
 The generated dts declares the **live tool registry**, not the source tree it scanned. The scan roots
-at each loaded plugin and then unions a glob of the monorepo `plugins/` tree onto it — the only way to
-reach host-constructed builtins like `plugin` and `provider`, which have no `resolvedUrl` — so its
-roots are a *superset* of what is actually loaded. A scanned root may supply a tool's **contract**;
+at `plugin-api`, at `core` (whose own tools no plugin owns) and at each loaded plugin, and then unions a
+glob of the monorepo `plugins/` tree onto it — the only view a static caller with no loaded set has,
+such as the web bundle's build — so its roots are a *superset* of what is actually loaded. A scanned root may supply a tool's **contract**;
 only the registry says the tool **exists**. Without that filter a generator composes
 `await tool.telegram_send({ text })` against a telegram frontend nobody loaded, typechecks clean, and
 throws `Tool "telegram_send" is not registered` at runtime — which no repair pass can fix, because the

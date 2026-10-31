@@ -1,5 +1,5 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
-              ProviderToolContract, ProviderSummary, AvailableProvider,
+              ProviderSummary, AvailableProvider,
               ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, movedCredentialNote } from '@matatbread/matbot-plugin-api';
 
@@ -17,15 +17,6 @@ export interface ProviderDraft {
   parameters?: ModelParameters;
 }
 
-// Shared with the node implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
-// The two used to declare different types for this one key, and node's names won: `hasCredentials` (not
-// `hasKey`) and `module` (not `adapter`) are what matbot.yaml calls these, and this tool's own
-// `ProviderSummary` already said `module` on the way out while demanding `adapter` on the way in.
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    provider: ProviderToolContract;
-  }
-}
 
 /**
  * The provider-admin surface a host (the web bootstrap) or a storage-backend plugin (google-drive)

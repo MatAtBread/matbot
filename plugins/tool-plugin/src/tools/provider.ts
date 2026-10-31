@@ -1,12 +1,6 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ProviderRegistry, MatbotPlugin,
-              ProviderToolContract, ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
+              ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
 
-// Shared with the browser implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    provider: ProviderToolContract;
-  }
-}
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';

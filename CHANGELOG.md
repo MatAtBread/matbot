@@ -46,6 +46,9 @@ churn and less likely to affect a consumer who doesn't use them.
 
 - **`assembleMachine`'s `gate` is optional**, defaulting to core's `defaultGate`, so an embedder that wants
   matbot's ordinary policy passes nothing.
+- **`plugin` and `provider` are declared in `ToolContracts` by plugin-api**, beside the shapes it already
+  held, rather than by each host's implementation. A host builds both tools itself, so a frontend or client
+  typing calls to them needs only plugin-api.
 - **`splitContract`, `parseContractArms`, `splitTypeText`** (plugin-api, beside `contractArms`) — a
   `ToolContract<…>` string flattened to the wire's `params`/`result` text without a compiler. Both
   `ToolTypeIndex` implementations had a copy, neither of which knew a string literal or an arrow, so
@@ -64,6 +67,11 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### Optional
 
+- **`tool-types`** — the tools a host and `assembleMachine` register themselves (`plugin`, `provider`,
+  `gate_action`, `about_matbot`, `single_turn`) are typed in an installed matbot. The scan found them only
+  through a source checkout's `plugins/` tree, or, for core's, through whichever loaded plugin happened to
+  import core; otherwise a generator was shown no contract for them. Core is now a scan root, as plugin-api
+  was.
 - **`function-tools`** — on node a defined function's, and a package export's, `inputSchema` comes from the
   checker's resolved parameter types instead of from the parameter text, so a named or imported type, an
   alias or `Omit<…>` reaches the provider and `json-validation` as its real shape rather than as `{}`. It is

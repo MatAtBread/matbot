@@ -6,7 +6,7 @@ import type { ToolContract } from './tools.js';
  * Call contracts for the two builtin admin tools that have BOTH a node and a browser implementation —
  * `plugin` (@matatbread/matbot-tool-plugin, @matatbread/matbot-browser) and `provider` (likewise).
  *
- * They live here, rather than beside either implementation, for two reasons.
+ * They live here, rather than beside either implementation, for three reasons.
  *
  * ONE DECLARATION, NOT TWO IDENTICAL ONES. A `ToolContracts` key is registered by declaration merging,
  * which requires every declaration of it to have the same type. Two implementations of one tool name
@@ -25,6 +25,12 @@ import type { ToolContract } from './tools.js';
  *   declare module '@matatbread/matbot-plugin-api' {
  *     interface LoadedPluginSummary { managedBy?: 'personal' | 'shipped' }
  *   }
+ *
+ * THE KEYS ARE DECLARED HERE TOO, not only the shapes. A host builds these tools itself rather than
+ * loading them as plugins, so no loaded plugin's import graph reaches an implementation, and the
+ * `ToolTypeIndex` scan — which roots at plugin-api and at what is loaded — found them only by globbing a
+ * source checkout's `plugins/` tree. In an installed matbot there is no such tree, and the two tools a
+ * model most needs to drive correctly were the two it was shown no contract for.
  *
  * Where the two runtimes genuinely differ, the shared shape carries the superset and the divergent
  * member is optional — absence is the honest encoding of "this runtime has nothing to report". Each
@@ -225,3 +231,10 @@ export type ProviderToolContract =
     }>
   | ToolContract<ProviderActionResult, { action: 'update'; name: string } & ProviderPatch>
   | ToolContract<ProviderActionResult, { action: 'remove'; name: string }>;
+
+declare module './tools.js' {
+  interface ToolContracts {
+    plugin:   PluginToolContract;
+    provider: ProviderToolContract;
+  }
+}
