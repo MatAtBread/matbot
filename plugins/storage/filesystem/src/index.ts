@@ -9,6 +9,7 @@ import { FilesystemStorageBackend } from './backend.js';
 // unregistering whatever is in force.
 export { FilesystemStore } from './store.js';
 export { FilesystemStorageBackend } from './backend.js';
+export { FilesystemFileStore } from './file-store.js';
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,

@@ -10,7 +10,6 @@
   "description": "matbot's default permission policy, seeded by the host rather than loaded as a plugin: asks about a privileged operation, offers to remember the answer, honours what was remembered — plus the built-in gate_action tool for inspecting and forgetting standing answers.",
   "keywords": [
     "matbot",
-    "matbot-plugin",
     "llm",
     "ai",
     "agent"

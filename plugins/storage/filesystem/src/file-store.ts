@@ -2,7 +2,7 @@ import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'nod
 import { createReadStream } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import type { FileFilter, FileHandle, FileMetaData, FileStore, MimeType } from '@matatbread/matbot-core';
+import type { FileFilter, FileHandle, FileMetaData, FileStore, MimeType } from '@matatbread/matbot-plugin-api';
 
 // Only what the filesystem cannot derive: semantic metadata.
 interface FileMeta {

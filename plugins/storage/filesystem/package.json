@@ -36,9 +36,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "dependencies": {
-    "@matatbread/matbot-files-node": "workspace:^"
-  },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^",
     "@matatbread/matbot-core": "workspace:^"

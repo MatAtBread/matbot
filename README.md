@@ -175,8 +175,6 @@ And a **Status**:
 | | `storage/profiles` | Example | Per-principal partitioning over the filesystem backend — a profile per user (`profile_action`, `share`). No login or auth: any user can impersonate any profile |
 | | `browser` | Functional | Browser-native storage: IndexedDB store, OPFS files, WebCrypto vault (+ the browser `plugin`/`provider` tools) |
 
-`files` (`@matatbread/matbot-files-node`) is not a plugin but a library: the Node filesystem `FileStore` the CLI and `storage/*` backends use for MIME-typed blobs served by the web frontend.
-
 The built-in `plugin` and `provider` tools (add/remove/reload plugins, manage LLM profiles) are always
 loaded — see [Core](#core) above. Note: plugins are scoped to a run-time; not all (eg `bash`) are
 available in all run-times (eg the browser).

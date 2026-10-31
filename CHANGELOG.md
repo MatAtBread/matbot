@@ -29,8 +29,8 @@ churn and less likely to affect a consumer who doesn't use them.
   explicit load, a skip recorded in `plugin list`'s `failed` at boot — where it used to import it on
   trust. A third-party plugin without the field must add it, e.g. `"matbotRuntime": ["node", "browser"]`.
   `plugin add` already refused such a package on the npm and http routes; `discover_local` now passes over
-  one without importing it. core, plugin-api, the apps and the library packages `default-gate`, `files`
-  and `tool-plugin` no longer declare it, since they are not plugins. A host whose `PluginResolver` has no
+  one without importing it. core, plugin-api, the apps and the library packages `default-gate` and
+  `tool-plugin` no longer declare it, since they are not plugins. A host whose `PluginResolver` has no
   `runtimes` has nothing to check, and imports as before.
 - **Two migration warnings are removed.** `default_settings.__matbot_core__.overwriteToolsOnCollision` (moved
   to `'@matatbread/matbot-default-gate': { 'tools.overwrite': … }` in 0.4.14) and the CLI's top-level
@@ -80,7 +80,7 @@ churn and less likely to affect a consumer who doesn't use them.
   - `storage-sqlite` no longer renames a table named under the pre-0.4.4 scheme (`a-b` stored as
     `a_b_store`). Start a pre-0.4.4 database once with matbot >=0.4.4 <0.5.0 before upgrading; opened by
     0.5.0, an affected namespace looks empty and the old table is left in the file.
-  - `files` and `storage-profiles` no longer read an unnamed file's sidecar written before 0.2.4 (an `id`
+  - `storage-filesystem` and `storage-profiles` no longer read an unnamed file's sidecar written before 0.2.4 (an `id`
     field and no `dataFile`). No version rewrites these; add `"dataFile": "<id>.data"` to keep one.
 - **`tool-background` is removed** (`@matatbread/matbot-tool-background`: `background`, `every_action`),
   superseded by `background-jobs` / `background-jobs-node` since 0.4.18. An installation still listing it
@@ -96,6 +96,9 @@ churn and less likely to affect a consumer who doesn't use them.
   stops. `Classified`'s `http` arm loses `url` and `advice`; `githubToHttps` is exported instead.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
+- **`@matatbread/matbot-files-node` is no longer published.** Its one export, `FilesystemFileStore`, moved
+  into `storage-filesystem`, its only user, and is exported from `@matatbread/matbot-storage-filesystem`.
+  Import it from there. The versions already on npm are left there.
 - **`triggers`** — a provider profile named `skills-classifier` is no longer used as the classifier by
   name; the classifier uses the `classifierProvider` setting, else the turn's provider. An install that
   has such a profile and no pin is warned at startup, with the one line that keeps it:

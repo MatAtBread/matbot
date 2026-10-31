@@ -66,7 +66,6 @@ plugins/            — one directory per package, flat but for the frontend/pro
     json-validation/— toolcall hook validating inputs against inputSchema
     default-gate/  — the default PermissionGate policy (ask, remember, honour) + the gate_action
                      builtin. A LIBRARY the host seeds, like tool-plugin — never in `plugins:`
-    files/         — file codec and producer registry
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
@@ -159,7 +158,7 @@ configured storage plugin's backend before any store exists, and `loaded()` runs
 **`matbotRuntime` is the plugin marker.** A package under `plugins/` is a plugin if and only if its
 `package.json` declares the runtimes it supports. The loader refuses an undeclared package before importing
 it, and discovery passes over one unimported, so a library that lives beside the plugins (`default-gate`,
-`files`, `tool-plugin`, or a shared helper of your own) omits the field and is never mistaken for one —
+`tool-plugin`, or a shared helper of your own) omits the field and is never mistaken for one —
 nothing has to run its top-level code to find out. core, plugin-api and the apps do not declare it either.
 
 ---

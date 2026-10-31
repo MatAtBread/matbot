@@ -135,7 +135,7 @@ evaluating its top-level code — the only safe path for, e.g., a Node-only plug
 browser — and a package that declares none is refused the same way, as not a plugin (since 0.5.0; it was
 imported on trust before). `discover_local` passes over such a package without importing it, and `plugin
 add` refuses one on every route. So a package of shared helpers that sits beside the plugins — matbot's
-own `default-gate`, `files` and `tool-plugin` are such libraries — simply omits the field. Declare it
+own `default-gate` and `tool-plugin` are such libraries — simply omits the field. Declare it
 honestly — a plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package
 and its cross-runtime base differ only by this field plus their imports.)
 
@@ -1422,7 +1422,6 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |
 | `@matatbread/matbot-storage-profiles` | storage backend + `profile_action`, `share` | Partitions selected namespaces per web principal over the filesystem backend, so each profile gets its own slice (Node; list it first in `matbot.yaml`) |
 | `@matatbread/matbot-browser` | storage + `plugin`/`provider` tools | Browser-native backends: IndexedDB Store, OPFS FileStore, WebCrypto vault, and browser plugin/provider management tools |
-| `@matatbread/matbot-files-node` | `FileStore` | Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend |
 
 ---
 

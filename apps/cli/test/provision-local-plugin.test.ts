@@ -89,14 +89,14 @@ test('the host singleton is never fetched from the registry, even declared as a 
 // them would be this module resolving dependencies itself. So such a manifest is left entirely alone.
 test('a workspace/catalog manifest is left alone rather than partly provisioned', async () => {
   const { dir, cleanup } = await pluginDir({
-    dependencies: { '@matatbread/matbot-files-node': 'workspace:^', typescript: 'catalog:', debug: '^4.3.4' },
+    dependencies: { '@matatbread/matbot-storage-filesystem': 'workspace:^', typescript: 'catalog:', debug: '^4.3.4' },
   });
   try {
     const plan = await planProvision(dir);
     assert.deepEqual(plan.packages, [], 'nothing is installed when any range is not a registry range');
     assert.deepEqual(
       plan.unsupported.map(u => `${u.name}@${u.range}`).sort(),
-      ['@matatbread/matbot-files-node@workspace:^', 'typescript@catalog:'],
+      ['@matatbread/matbot-storage-filesystem@workspace:^', 'typescript@catalog:'],
     );
     assert.equal(await exists(join(dir, 'package-lock.json')), false, 'npm is not even asked');
     // The host singleton is still linked. "Leave the manifest alone" is about not handing unresolvable
