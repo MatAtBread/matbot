@@ -116,7 +116,6 @@ async function runAdd(model: string, answers: string[], models: (c: ProviderConf
   const prompts: string[] = [];
   const ask = (async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answers.shift() ?? CONFIRM_YES; }) as PromptFn;
   const ctx = {
-    configPath: file,
     session:    { id: 's1', messages: [] },
     signal:     new AbortController().signal,
     prompt:     ask,
@@ -127,7 +126,7 @@ async function runAdd(model: string, answers: string[], models: (c: ProviderConf
   const providers = new ProviderRegistryImpl([]);
   const events: ToolEvent<unknown>[] = [];
   const input = { action: 'add', name: 'oai', module: '@test/fake-adapter', model, credentialEnvVar: 'OPENAI_KEY' };
-  for await (const e of createProviderTool(providers).executor.execute(input, ctx)) events.push(e);
+  for await (const e of createProviderTool(file, providers).executor.execute(input, ctx)) events.push(e);
   const result = events.find(e => e.type === 'result' || e.type === 'error') as { value?: { message: string } };
   return { prompts, providers, listedWith, message: result.value?.message ?? '', yaml: await readFile(file, 'utf8'), events };
 }

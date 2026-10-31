@@ -831,6 +831,9 @@ async function main(): Promise<void> {
       matbotConfig = await runSetupWizard(configPath);
     }
   }
+  // Part of the CLI's command-line contract, beside IS_SUB_AGENT and MATBOT_PRINCIPAL: what a plugin that
+  // starts this CLI again (background-jobs-node) extends, so the copy boots on the same configuration.
+  process.env['MATBOT_CONFIG'] = configPath;
 
   // Merge prompt sources: CLI flag/arg > config file
   const argPrompt = opts.promptFile !== undefined
@@ -890,7 +893,7 @@ async function main(): Promise<void> {
     vault:           bootVault,
     providers,
     defaultSettings: matbotConfig.defaultSettings,
-    builtinTools:    createBuiltinTools(),
+    builtinTools:    createBuiltinTools(configPath),
     version:         selfVersion(),
     host: machine => ({
       async loadPlugin(specifier: string, prompt?: PromptFn, refresh = false) {
@@ -918,7 +921,10 @@ async function main(): Promise<void> {
       },
       resolver:   nodePluginResolver(configDir),
       workdir:    path.join(dotData, 'bash-cwd'),
-      configPath,
+      // The CLI's layout: relative specifiers and packages resolve beside matbot.yaml, state lives in
+      // `.data` beside it. Plugins are handed both and derive neither.
+      projectDir: configDir,
+      dataDir:    dotData,
       isSubAgent: () => isBackground,
       TypeScriptStripper: { strip: (source: string) => stripTypeScriptTypes(source) },
     }),
@@ -981,7 +987,7 @@ async function main(): Promise<void> {
   // Register the provider management tool now that all adapter plugins are loaded and
   // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
   // and pluginNameToOrigPath to build its description.
-  services.tools.register(createProviderTool(providers, pluginNameToOrigPath, providerNameResolves));
+  services.tools.register(createProviderTool(configPath, providers, pluginNameToOrigPath, providerNameResolves));
 
   // ── Dump tools (one-shot) ───────────────────────────────────────────────────────
   // `--dump-tools [path]`: serialize the live registry and exit. Each tool's `description` is the WIRE

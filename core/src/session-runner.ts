@@ -55,7 +55,6 @@ export interface SessionRunnerDeps {
   // barrier would be waiting for a drain that its own parent prevents.
   heldByCreator?:  true;
   workdir?:        string;
-  configPath?:     string;
   loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:    (specifier: string) => Promise<boolean>;
 }
@@ -324,7 +323,6 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   ...(deps.appender      !== undefined ? { appender:      deps.appender      } : {}),
                   ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
                   ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
-                  ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
                   ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
                   ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
                   ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),

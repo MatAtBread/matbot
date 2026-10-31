@@ -100,8 +100,8 @@ standalone during development.
 **`dependencies` — real runtime libraries you import.** Third-party npm packages whose *values* you
 import and call at runtime (a parser, a client library), plus any first-party matbot package you
 depend on **by construction** — the *specialization* relationship from CLAUDE.md, where your plugin
-imports another plugin's runtime code and constructs it (e.g. `skills-node` → `skills`, `tool-mcp` →
-`mcp-http`). These are installed into your tree and shipped.
+imports another plugin's runtime code and constructs it (e.g. `background-jobs-node` →
+`background-jobs`, `tool-mcp` → `mcp-http`). These are installed into your tree and shipped.
 
 **`devDependencies` — build/dev/type-only, erased at runtime.** `typescript` and `@types/node`; the
 peer mirrors above; and — the subtle one — **any matbot package you import only as a type.** Under
@@ -123,7 +123,7 @@ if it isn't published — for a package your code never imports.
 | You don't reference it at all? | remove it |
 
 The first-party packages in this repo follow exactly this: `plugin-api`/`core` are peers everywhere;
-`skills-node` keeps `skills` in `dependencies`; `frontend-web`, `cognition`, and `web-principal-user`
+`background-jobs-node` keeps `background-jobs` in `dependencies`; `frontend-web`, `cognition`, and `web-principal-user`
 keep their type-only `@matatbread/*` imports in `devDependencies`.
 
 ### Declaring supported runtimes (`matbotRuntime`)
@@ -1390,7 +1390,6 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
-| `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
 | `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
 | `@matatbread/matbot-function-runner-node` | `FunctionRunner` service, `function_runner_config` · Node only · optional | Bounds a `tool_function` body's run time, withholds host globals and routes its `import(...)` through the permission gate; without it a body runs unbounded and ungated |

@@ -57,7 +57,6 @@ export interface WebServerDeps {
    *  non-interactive, so a privileged tool reached through it gets whatever the policy decides with no
    *  `ask` channel: a standing answer, or the call site's own `fallback`. */
   permissionGate?: () => PermissionGate | undefined;
-  configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
   /** How often to write a keep-alive comment on each SSE stream, in ms. Default 20s — comfortably inside
@@ -528,7 +527,6 @@ export function createWebServer(deps: WebServerDeps) {
       ...bindGate(deps.permissionGate?.(), tool, undefined, deps.tools),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
-      ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
     };
   }
 

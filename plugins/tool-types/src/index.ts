@@ -184,7 +184,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // Read before anything is awaited, with the live tool list: a change that lands while this builds
     // leaves the result stale, for the next caller to rebuild, instead of being marked seen.
     const generation = this.generation;
-    const root   = this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.';
+    const root   = this.machine.projectDir ?? '.';
     // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
     // (.compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
     // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
@@ -390,7 +390,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // relative one to a different string than the hook compares against — so `getSourceFile(virtual)`
     // missed, there were no files to check, and the snippet came back clean whatever was in it. A
     // checker that silently passes everything is the one failure mode this path must not have.
-    const root = resolve(this.machine.configPath !== undefined ? dirname(this.machine.configPath) : '.');
+    const root = resolve(this.machine.projectDir ?? '.');
     // Read ONCE, before anything else: the dts, the `paths`, the worker's restriction and the fingerprint
     // stamped below all have to describe one environment — the one this was graded against — not
     // whatever is current by the time each is computed.

@@ -58,7 +58,7 @@ export interface HostGate {
 
 /** The machine members only a host can supply. */
 export type HostMembers =
-  Pick<MatbotMachine, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'isSubAgent' | 'TypeScriptStripper' | 'workdir' | 'configPath'>;
+  Pick<MatbotMachine, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'isSubAgent' | 'TypeScriptStripper' | 'workdir' | 'projectDir' | 'dataDir'>;
 
 export interface AssembleOptions {
   /** The host's own storage: the revert target when a plugin's StorageBackend is unregistered. */
@@ -365,7 +365,6 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     mediaStore:     () => services.MediaStore,
     permissionGate: () => services.PermissionGate,
     ...(services.workdir    !== undefined ? { workdir:    services.workdir }    : {}),
-    ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     loadPlugin:     services.loadPlugin.bind(services),
     unloadPlugin:   services.unloadPlugin.bind(services),
   });

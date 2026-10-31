@@ -1,5 +1,4 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import { dirname } from 'node:path';
 import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
 import { createRunnerConfigTool, readRunnerConfig } from './config.js';
 import type { FunctionRunner, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
@@ -28,9 +27,9 @@ function createRunner(services: MatbotMachine): FunctionRunner {
     warned.add(m);
     console.warn(`[matbot] function-runner-node: ${m}`);
   };
-  // The directory holding matbot.yaml, named when a package a body asks for is not installed: it is where
-  // the user would install it. Absent in a host that has no config file.
-  const projectDir = services.configPath !== undefined ? dirname(services.configPath) : undefined;
+  // Named when a package a body asks for is not installed: it is where the user would install it. Absent
+  // in a host that resolves packages from no directory of its own.
+  const projectDir = services.projectDir;
   return createVmFunctionRunner(FUNCTION_SYNC_LIMIT_MS, projectDir !== undefined ? { projectDir } : {}, async () => {
     const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
     for (const p of problems) warnOnce(p);

@@ -7,7 +7,7 @@ import { mkdir, readdir, stat } from 'node:fs/promises';
 import { getServers } from 'node:dns';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
-import process from 'node:process';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 // `bash` itself is declared by the local plugin's stream module, imported above: one contract for the
 // tool name both implement.
@@ -36,17 +36,31 @@ interface ContainerConfig {
   /** DNS server(s) to pass as --dns to docker run (e.g. ['1.1.1.1']). The token 'host' expands to
    * the host's current resolvers at create time. Omit/[] inherits host DNS (Docker default). */
   dns?:        string[];
-  /** Host path mounted read-only at mountPoint. Defaults to process.cwd(). */
-  projectRoot: string;
-  /** Mount point inside the container for projectRoot (read-only). */
+  /** Mount point inside the container for the host's project directory (read-only). */
   mountPoint:  string;
-  /** Subpath of projectRoot (and mountPoint) mounted read-write for runtime data. */
-  dataSubdir:  string;
-  /** Working directory inside the container for exec'd scripts. */
-  execCwd:     string;
   /** Cap on combined stdout+stderr bytes per command; on exceed the process is killed. */
   maxOutputBytes: number;
 }
+
+/**
+ * Where the host's directories are, and where the data one lands in the container. The project is mounted
+ * read-only at `mountPoint`; the data directory read-write at its own place under the project when it is
+ * inside it — the CLI's `.data`, so a script's paths are the same either way — and at `/data` otherwise.
+ * Scripts run in `<data>/bash-cwd`.
+ */
+interface HostPaths {
+  projectRoot: string;
+  dataPath:    string;
+  dataMount:   string;
+}
+
+function hostPaths(projectDir: string, dataDir: string, mountPoint: string): HostPaths {
+  const rel = relative(projectDir, dataDir);
+  const inside = rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  return { projectRoot: projectDir, dataPath: dataDir, dataMount: inside ? `${mountPoint}/${rel.split(sep).join('/')}` : '/data' };
+}
+
+type EffectiveConfig = ContainerConfig & HostPaths;
 
 /**
  * The immutable defaults — only the fields in `BashConfigOverrides` are overridable via persisted
@@ -56,10 +70,7 @@ interface ContainerConfig {
 const CONTAINER: ContainerConfig = {
   image:          'node:24-bookworm',
   name:           'matbot-bash',
-  projectRoot:    process.cwd(),
   mountPoint:     '/app',
-  dataSubdir:     '.data',
-  execCwd:        '/app/.data/bash-cwd',
   maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES,
 };
 
@@ -209,7 +220,7 @@ interface Existing { running: boolean; mounts: string; ours: boolean }
  * project's root where this config mounts it: a container docker-bash made for this project, however old.
  * A failed inspect is taken as no such container, as it always was.
  */
-async function inspectContainer(cfg: ContainerConfig): Promise<Existing | undefined> {
+async function inspectContainer(cfg: EffectiveConfig): Promise<Existing | undefined> {
   let out: string;
   try {
     out = await dockerExec(['inspect', '--format', '{{json .State.Running}}\t{{json .Config.Labels}}\t{{json .Mounts}}', cfg.name]);
@@ -238,7 +249,7 @@ function notOurs(name: string): Error {
 /** Force-remove this config's container, if it is ours; one that is not is refused, never removed. A
  *  missing one is not an error (current Docker exits 0 for it; older releases exit 1 saying so). Anything
  *  else — a daemon restarting, a permissions fault — throws, since the container is then still running. */
-async function removeContainer(cfg: ContainerConfig): Promise<void> {
+async function removeContainer(cfg: EffectiveConfig): Promise<void> {
   const found = await inspectContainer(cfg);
   if (found === undefined) return;
   if (!found.ours) throw notOurs(cfg.name);
@@ -278,8 +289,8 @@ async function hiddenPaths(projectRoot: string): Promise<string[]> {
   return HIDDEN_FILES.filter((_, i) => present[i]);
 }
 
-async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
-  const dataPath = `${cfg.projectRoot}/${cfg.dataSubdir}`;
+async function ensureContainerRunning(cfg: EffectiveConfig): Promise<void> {
+  const dataPath = cfg.dataPath;
   await mkdir(dataPath, { recursive: true });
   const readOnly = await readOnlyPaths(dataPath);
   const hidden   = await hiddenPaths(cfg.projectRoot);
@@ -305,9 +316,9 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
     }
     args.push(
       '-v', `${cfg.projectRoot}:${cfg.mountPoint}:ro`,
-      '-v', `${dataPath}:${cfg.mountPoint}/${cfg.dataSubdir}`,
+      '-v', `${dataPath}:${cfg.dataMount}`,
       // Over the read-write mount above: a nested mount wins for its own path.
-      ...readOnly.flatMap(p => ['-v', `${dataPath}/${p}:${cfg.mountPoint}/${cfg.dataSubdir}/${p}:ro`]),
+      ...readOnly.flatMap(p => ['-v', `${dataPath}/${p}:${cfg.dataMount}/${p}:ro`]),
       ...hidden.flatMap(f => ['-v', `/dev/null:${cfg.mountPoint}/${f}:ro`]),
       cfg.image,
       'sleep', 'infinity',
@@ -327,8 +338,8 @@ async function ensureContainerRunning(cfg: ContainerConfig): Promise<void> {
  * Return the effective ContainerConfig — immutable defaults merged with any
  * persisted overrides.
  */
-function effectiveConfig(overrides: BashConfigOverrides): ContainerConfig {
-  return { ...CONTAINER, ...overrides };
+function effectiveConfig(overrides: BashConfigOverrides, host: HostPaths): EffectiveConfig {
+  return { ...CONTAINER, ...host, ...overrides };
 }
 
 /** Order-sensitive array equality — DNS nameserver order is significant. */
@@ -337,7 +348,7 @@ function sameStrings(a: readonly string[] = [], b: readonly string[] = []): bool
 }
 
 /** True when the two configs differ in a way that requires recreating the container. */
-function containerAffectingChange(a: ContainerConfig, b: ContainerConfig): boolean {
+function containerAffectingChange(a: EffectiveConfig, b: EffectiveConfig): boolean {
   return a.name !== b.name || !sameStrings(a.dns, b.dns);
 }
 
@@ -346,6 +357,7 @@ type BashConfigInput = { action: string } & BashConfigOverrides;
 async function* bashConfigExecutor(
   input: unknown,
   settings: PluginSettings,
+  host: HostPaths,
   signal: AbortSignal,
 ): AsyncIterable<ToolEvent<ToolResultOf<'bash_config'>>> {
   const { action, dns, name, maxOutputBytes } = input as BashConfigInput;
@@ -373,8 +385,8 @@ async function* bashConfigExecutor(
     const existing = await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {};
     const merged: BashConfigOverrides = { ...existing, ...overrides };
 
-    const oldCfg = effectiveConfig(existing);
-    const newCfg = effectiveConfig(merged);
+    const oldCfg = effectiveConfig(existing, host);
+    const newCfg = effectiveConfig(merged, host);
     const restart = containerAffectingChange(oldCfg, newCfg);
 
     // Tear the old container down by the name it ran under BEFORE persisting (only dns/name need a
@@ -411,7 +423,7 @@ async function* bashConfigExecutor(
   if (action === 'restart') {
     // Force a recreate regardless of config change — recovers a wedged container and re-resolves a
     // "host" DNS token against the host's current resolvers. Transient, nothing persisted.
-    const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
+    const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {}, host);
     try {
       await removeContainer(cfg);
       await ensureContainerRunning(cfg);
@@ -426,7 +438,7 @@ async function* bashConfigExecutor(
   if (action === 'pull') {
     // Pull the image, then recreate unconditionally: an up-to-date image says nothing about which
     // image the existing container was built from, which is exactly the case after the default moves.
-    const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {});
+    const cfg = effectiveConfig(await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {}, host);
     let pullOutput: string;
     try {
       pullOutput = yield* streamDocker(['pull', cfg.image], signal);
@@ -492,13 +504,13 @@ const active = new Set<ChildProcess>();
  *  inside core's per-plugin teardown budget, since every exec is released at once. */
 const LEASE_DRAIN_MS = 2_000;
 
-function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolResultOf<'bash'>> {
+function createContainerExecutor(settings: PluginSettings, host: HostPaths): ToolExecutor<ToolResultOf<'bash'>> {
   return {
     async *execute(input: unknown, ctx: ToolContext) {
       // settings is the source of truth; derive the effective config per call (a
       // cheap read, dwarfed by the docker exec it precedes — not a restart).
       const overrides = await settings.get<BashConfigOverrides>(SETTINGS_KEY) ?? {};
-      const cfg = effectiveConfig(overrides);
+      const cfg = effectiveConfig(overrides, host);
 
       try {
         await ensureContainerRunning(cfg);
@@ -507,9 +519,8 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
         return;
       }
 
-      // execCwd lives inside the rw .data mount — ensure the host-side path exists.
-      const hostExecCwd = cfg.projectRoot + cfg.execCwd.slice(cfg.mountPoint.length);
-      await mkdir(hostExecCwd, { recursive: true });
+      // Scripts run inside the read-write data mount — ensure the host-side directory exists.
+      await mkdir(join(cfg.dataPath, 'bash-cwd'), { recursive: true });
 
       const { script, env, timeout, maxOutputBytes } = input as BashInput;
       if (maxOutputBytes !== undefined && (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 1)) {
@@ -520,7 +531,7 @@ function createContainerExecutor(settings: PluginSettings): ToolExecutor<ToolRes
       // The script goes by env rather than argv to avoid a quoting layer. `-i` keeps stdin attached,
       // which is what the lease is made of (see LEASE_WRAPPER) — so stdin belongs to the lease and is
       // never written to.
-      const args = ['exec', '-i', '-w', cfg.execCwd, '-e', `MATBOT_SCRIPT=${script}`];
+      const args = ['exec', '-i', '-w', `${cfg.dataMount}/bash-cwd`, '-e', `MATBOT_SCRIPT=${script}`];
       for (const [k, v] of Object.entries(env ?? {})) {
         args.push('-e', `${k}=${v}`);
       }
@@ -611,6 +622,12 @@ export const plugin: MatbotPluginSpec = {
 
   async setup(services) {
     const settings = services.settings();
+    // The host says where its project and its data are; without both there is nothing to mount.
+    if (services.projectDir === undefined || services.dataDir === undefined) {
+      console.warn('[docker-bash] the host gives no project or data directory to mount, so bash is not available.');
+      return;
+    }
+    const host = hostPaths(services.projectDir, services.dataDir, CONTAINER.mountPoint);
 
     // We deliberately do NOT reconcile a stale container at boot. A sleeping container from a
     // previous run is reused (matched by name) so the restarted matbot just continues with it.
@@ -622,7 +639,7 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash',
       description: TOOL_DESCRIPTION,
       inputSchema: BASH_INPUT_SCHEMA,
-      executor:    createContainerExecutor(settings),
+      executor:    createContainerExecutor(settings, host),
     };
     services.tools.register(bashTool);
 
@@ -631,7 +648,7 @@ export const plugin: MatbotPluginSpec = {
       name:        'bash_config',
       description: BASH_CONFIG_DESCRIPTION,
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
-      executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, ctx.signal) },
+      executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, host, ctx.signal) },
     };
     services.tools.register(configTool);
   },

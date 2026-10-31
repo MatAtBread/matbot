@@ -101,7 +101,7 @@ export type InvokeToolOptions =
  * The host-only bits a one-shot caller can't derive (the session under which the call runs, its
  * abort signal, and an optional interactive `prompt`/`provider`) come in via `opts` — pass the
  * calling tool's `ctx` to forward them all (see {@link InvokeToolOptions}); everything else (vault,
- * plugin (un)loading, workdir/configPath/files) is filled from `machine`.
+ * plugin (un)loading, workdir/files) is filled from `machine`.
  *
  * Throws synchronously if no tool is registered under `name`, or if `opts.signal` has already aborted.
  * When no `prompt` is supplied the tool
@@ -136,7 +136,6 @@ export function invokeTool<K extends string, const P>(
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
-    ...(machine.configPath !== undefined ? { configPath: machine.configPath } : {}),
     ...(machine.files      !== undefined ? { files:      machine.files      } : {}),
   };
 

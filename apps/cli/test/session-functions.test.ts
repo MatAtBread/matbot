@@ -200,7 +200,7 @@ test('promoting to global retires the session function; remove retires one too',
 test('session functions type-check like registered tools, and a global function may not call one', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);
@@ -265,7 +265,7 @@ test('session functions type-check like registered tools, and a global function 
 test('execute takes a bare body, and an arrow definition is refused rather than run', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);
@@ -333,7 +333,7 @@ test('execute takes a bare body, and an arrow definition is refused rather than 
 test('a define and a package export take their inputSchema from the checker, and keep it', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);

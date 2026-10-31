@@ -29,7 +29,7 @@ interface Setup {
 
 async function setupWith(
   floor: Record<string, unknown>,
-  opts: { configPath?: string; stored?: Record<string, unknown> } = {},
+  opts: { projectDir?: string; stored?: Record<string, unknown> } = {},
 ): Promise<Setup> {
   const registered: Record<string, unknown> = {};
   const tools = new Map<string, Tool>();
@@ -62,7 +62,7 @@ async function setupWith(
       },
       tools: { register: (t: Tool) => { tools.set(t.name, t); } },
       get FunctionRunner() { return registered['FunctionRunner'] as FunctionRunner | undefined; },
-      ...(opts.configPath !== undefined ? { configPath: opts.configPath } : {}),
+      ...(opts.projectDir !== undefined ? { projectDir: opts.projectDir } : {}),
     } as unknown as MatbotMachine);
   } finally { console.warn = warn; }
 
@@ -81,7 +81,7 @@ async function setupWith(
 test('the plugin registers a runner built from its own settings', async () => {
   // Its settings, not the host's config: `function_timeout_ms` and `function_imports` were read by
   // apps/cli, which is exactly the coupling moving this out removes.
-  const { registered } = await setupWith({ permit_imports: ['node:os'] }, { configPath: '/tmp/proj/matbot.yaml' });
+  const { registered } = await setupWith({ permit_imports: ['node:os'] }, { projectDir: '/tmp/proj' });
   const runner = registered['FunctionRunner'] as FunctionRunner;
   assert.ok(runner !== undefined, 'registered under the service key, like any other plugin');
   assert.deepEqual([...await permitOf(runner) ?? []], ['node:os']);

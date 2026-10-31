@@ -147,7 +147,7 @@ export function createVmFunctionRunner(
       try { target = import.meta.resolve(spec); }
       catch {
         throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it.${
-          projectDir !== undefined ? ` Install it in ${projectDir}, where matbot.yaml is.` : ''}`);
+          projectDir !== undefined ? ` Install it in ${projectDir}.` : ''}`);
       }
       // As host code: a module's own top-level may compile code, and it is not the body's.
       return hostCall(() => import(target, options));

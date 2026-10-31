@@ -200,7 +200,6 @@ async function runUpdate(
   // bindGate with NO registered policy, which is exactly what a host boots with: the asking default.
   const ask = (async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answer; }) as PromptFn;
   const ctx = {
-    configPath: file,
     session:    { id: 's1', messages: [] },
     signal:     new AbortController().signal,
     prompt:     ask,
@@ -209,7 +208,7 @@ async function runUpdate(
   } as unknown as ToolContext;
 
   const events: ToolEvent<unknown>[] = [];
-  for await (const e of createProviderTool(providers).executor.execute(input, ctx)) events.push(e);
+  for await (const e of createProviderTool(file, providers).executor.execute(input, ctx)) events.push(e);
   return { events, providers, prompts };
 }
 

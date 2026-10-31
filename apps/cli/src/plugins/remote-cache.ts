@@ -526,7 +526,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   // Two kinds of entry go in the farm under `.plugins/node_modules`, for one reason: a bare specifier from
   // inside the cache has to reach a real package on disk, which is exactly what a node_modules entry is for.
   //   - the plugin's OWN name, so a sibling plugin importing it by canonical name resolves to this fetched
-  //     copy (`@matatbread/matbot-skills` from skills-node, `…-tool-store` from cognition);
+  //     copy (`@matatbread/matbot-background-jobs` from background-jobs-node, `…-tool-store` from cognition);
   //   - the host's SINGLETONS, so `import … from '@matatbread/matbot-plugin-api'` reaches the copy the host
   //     loaded.
   // The host resolves all http specifiers before importing any, so by load time every fetched plugin's
@@ -542,7 +542,7 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
 
   // A declared dependency is the one place a plugin states what it needs that this route does not bring —
-  // and the only place a matbot-plugin dependency (`mcp` → `mcp-http`, `skills-node` → `skills`, …) is
+  // and the only place a matbot-plugin dependency (`mcp` → `mcp-http`, `background-jobs-node` → `background-jobs`, …) is
   // named at all. An unsatisfied *import* is no longer guessed at from the source: the hook fails the
   // resolution it actually attempted, naming the specifier and the importer, which is both accurate and
   // impossible to false-positive on.

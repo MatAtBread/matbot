@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import type { ToolContext, ToolEvent } from '@matatbread/matbot-core';
-import { pluginTool, pluginFingerprint, recordLoaded } from '../src/plugins/index.js';
+import { createPluginTool, pluginFingerprint, recordLoaded } from '../src/plugins/index.js';
 
 // A reload imports whatever is on disk now, or freshly fetched upstream — and the model can change both. So
 // reloading a resident plugin is unasked only while its code is what was loaded; changed code is the
@@ -26,14 +26,14 @@ function host(configPath: string, allow: boolean) {
   const asked: string[] = [];
   const did: string[] = [];
   const ctx = {
-    callId: 't', signal: new AbortController().signal, configPath, prompt: async () => undefined,
+    callId: 't', signal: new AbortController().signal, prompt: async () => undefined,
     gate: async (req: { gate: string; subject: string }) => { asked.push(`${req.gate} ${req.subject}`); return { allowed: allow, source: 'user' }; },
     loadPlugin:   async (s: string) => { did.push(`load ${s}`); return {}; },
     unloadPlugin: async (s: string) => { did.push(`unload ${s}`); return true; },
   } as unknown as ToolContext;
   const call = async (input: Record<string, unknown>): Promise<string> => {
     const events: ToolEvent[] = [];
-    for await (const e of pluginTool.executor.execute(input, ctx)) events.push(e as ToolEvent);
+    for await (const e of createPluginTool(configPath).executor.execute(input, ctx)) events.push(e as ToolEvent);
     return events.map(e => e.type === 'result' ? (e.value as { message?: string }).message ?? '' : e.type === 'error' ? e.message : '').join('');
   };
   return { asked, did, call };

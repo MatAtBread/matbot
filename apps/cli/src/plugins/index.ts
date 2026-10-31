@@ -1,5 +1,5 @@
 import type { Tool } from '@matatbread/matbot-core';
-export { pluginTool }           from './tools/plugin.js';
+export { createPluginTool }     from './tools/plugin.js';
 // Exported to be tested against the error a real unresolved import throws: it reads a MESSAGE, and the
 // one it must read is thrown in apps/cli's ts-hooks, which no compiler ties to this regex.
 export { missingPackageOf }     from './tools/plugin.js';
@@ -34,8 +34,8 @@ export { findDuplicateSingletons, describeDuplicateSingleton } from './singleton
 // The host records every load it makes, boot included; the tool reads it.
 export { pluginFingerprint, recordLoaded } from './fingerprint.js';
 
-import { pluginTool } from './tools/plugin.js';
+import { createPluginTool } from './tools/plugin.js';
 
-export function createBuiltinTools(): Tool[] {
-  return [pluginTool];
+export function createBuiltinTools(configPath: string): Tool[] {
+  return [createPluginTool(configPath)];
 }

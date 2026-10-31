@@ -42,8 +42,8 @@ if (cmd === 'inspect') {
 } else { save(); }
 `;
 
-// Real, because the plugin's project root is process.cwd() after the chdir below, which resolves symlinks:
-// on macOS the temp dir is under /var, a link to /private/var, and the mount it looks for would never match.
+// Real, because the mount the plugin looks for is compared as a path: on macOS the temp dir is under /var,
+// a link to /private/var, and an unresolved one would never match what docker reports.
 const dir = await realpath(await mkdtemp(join(tmpdir(), 'docker-bash-own-')));
 const project = join(dir, 'project');
 const stateFile = join(dir, 'state.json');
@@ -52,8 +52,6 @@ await chmod(join(dir, 'docker'), 0o755);
 process.env['PATH'] = `${dir}:${process.env['PATH'] ?? ''}`;
 process.env['FAKE_DOCKER_STATE'] = stateFile;
 await (await import('node:fs/promises')).mkdir(project, { recursive: true });
-// The plugin takes its project root from the working directory when it loads.
-process.chdir(project);
 const { plugin } = await import('../../../plugins/docker-bash/src/index.ts');
 
 const tools = new Map<string, Tool>();
@@ -65,6 +63,9 @@ await plugin.setup!({
     delete: async (k: string) => { stored.delete(k); },
   }),
   tools: { register: (t: Tool) => { tools.set(t.name, t); } },
+  // The host's directories, as the CLI gives them: the data directory inside the project.
+  projectDir: project,
+  dataDir:    join(project, '.data'),
 } as unknown as MatbotMachine);
 
 async function reset(containers: Record<string, Fake>): Promise<void> {

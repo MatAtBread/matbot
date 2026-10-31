@@ -67,7 +67,7 @@ function harness(opts: {
     hooks: { register: (h: Hook) => { if (h.on === 'validate') registered = h; }, removeByPlugin() {} },
     get ToolTypeIndex() { return reg['ToolTypeIndex']; },
     // Enough machine for a REAL ToolTypeIndex to be constructed: it subscribes to tool-registry changes
-    // to know when its dts is stale, and roots its scan at the config's directory. `configPath` is left
+    // to know when its dts is stale, and roots its scan at `projectDir`, which is left
     // undefined so the scan roots at '.', which keeps these tests off the monorepo walk — the generated
     // output is pinned in tool-contract-validators.test.ts, not here.
     Notifier: {

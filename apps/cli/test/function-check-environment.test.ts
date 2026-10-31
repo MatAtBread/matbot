@@ -56,7 +56,7 @@ type Row = { name: string; definedUnchecked?: true; checkedElsewhere?: true };
 test('a stored verdict carries the environment it was reached in, and says when that has moved', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);

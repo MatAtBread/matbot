@@ -95,7 +95,7 @@ export const nodeTypeScriptStripper: NonNullable<HostMembers['TypeScriptStripper
  */
 export function nodePluginMembers(
   machine: () => MatbotMachine, baseDir: string,
-): Pick<HostMembers, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'TypeScriptStripper'> {
+): Pick<HostMembers, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'TypeScriptStripper' | 'projectDir'> {
   return {
     async loadPlugin(specifier: string, prompt?: PromptFn): Promise<MatbotPlugin> {
       const request = await resolveInstalledPlugin(specifier, baseDir);
@@ -106,5 +106,7 @@ export function nodePluginMembers(
     unloadPlugin: (specifier: string) => unloadNodePlugin(specifier, machine()),
     resolver:     nodePluginResolver(baseDir),
     TypeScriptStripper: nodeTypeScriptStripper,
+    // What relative specifiers resolve from is what a plugin writing code for this host to load needs.
+    projectDir:   baseDir,
   };
 }

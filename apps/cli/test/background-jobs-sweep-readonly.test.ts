@@ -49,7 +49,6 @@ function machine(): { services: MatbotMachine; store: Store<Sched>; written: str
   } as unknown as Store<Sched>;
 
   const services = {
-    configPath:  '/nowhere/matbot.yaml',
     isSubAgent:  () => false,
     createStore: () => store,
     files:       undefined,

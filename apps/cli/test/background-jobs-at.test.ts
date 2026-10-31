@@ -30,7 +30,6 @@ async function harness() {
   } as unknown as Store<Sched>;
 
   const services = {
-    configPath:  '/nowhere/matbot.yaml',
     isSubAgent:  () => false,
     createStore: () => store,
     files:       undefined,

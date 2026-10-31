@@ -211,7 +211,6 @@ export interface ToolContext {
    *  work should default to this so the child inherits the same model rather than the config default. */
   provider?:   string;
   workdir?:    string;
-  configPath?: string;
   files?:      FileStore;
   /**
    * The appender belonging to the runner this turn is on, when it is not the machine's — an ephemeral

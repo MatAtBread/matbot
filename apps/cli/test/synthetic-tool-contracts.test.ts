@@ -81,9 +81,9 @@ async function index(): Promise<ToolValidatorSupplier & {
 }> {
   let registered: unknown;
   const machine = {
-    // `configPath`'s directory is where the scan roots, so the real monorepo contracts are read — the
-    // point is the CONTRAST between a scanned tool and a synthetic one, not a synthetic one alone.
-    configPath: join(root, 'matbot.yaml'),
+    // `projectDir` is where the scan roots, so the real monorepo contracts are read — the point is the
+    // CONTRAST between a scanned tool and a synthetic one, not a synthetic one alone.
+    projectDir: root,
     Notifier: { consume: () => {}, notify: () => {}, subscribe: () => (async function* () {})() },
     tools: {
       // Both must be LIVE: a scanned contract is filtered by the tool registry (build-dts applies the

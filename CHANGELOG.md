@@ -51,6 +51,18 @@ churn and less likely to affect a consumer who doesn't use them.
   core takes what a host hands `assembleMachine` rather than reading a format of its own. A host that
   parsed `matbot.yaml` with them parses its own configuration; `installSettingsDefaults` stays in core,
   taking a map.
+- **`configPath` is gone from `MatbotMachine` and `ToolContext`; a host supplies `projectDir` and `dataDir`
+  instead.** A plugin was handed the path of the CLI's config file and derived what it actually needed from
+  it — `.data` beside it for storage, its directory for where packages are installed — so it worked only
+  under the CLI's layout. `projectDir` is where the host resolves packages and relative plugin specifiers
+  from (`tool-types`, `function-runner-node`, `skills_compiler`); `dataDir` is where plugins keep state on
+  disk (the storage plugins, `docker-bash`). Both are optional, and a plugin degrades without one as it did
+  without a config path. The CLI sets them to the config file's directory and `.data` beside it, so nothing
+  changes for a CLI user; `nodePluginMembers` reports its base directory as `projectDir`. A plugin that read
+  `configPath` reads whichever of the two it meant.
+- **`@matatbread/matbot-skills-node` is no longer published.** Its `.md` import and directory watch added
+  nothing `skills` and its tool do not, and the directory it watched is not one anything else writes to.
+  Load `@matatbread/matbot-skills` in its place.
 
 ### API gaps filled
 
@@ -97,6 +109,15 @@ churn and less likely to affect a consumer who doesn't use them.
   reinterpret, and refuses one containing a line break rather than writing it broken.
 
 ### Optional
+
+- **`background-jobs-node`** — its host is the matbot CLI, which it starts again for each job, and it now
+  says so: it extends the config the CLI publishes as `MATBOT_CONFIG` rather than reading one off the
+  machine. Under any other host it disables itself, as before; `background-jobs` runs jobs in-process
+  anywhere.
+- **`docker-bash`** — mounts the host's `projectDir` read-only and its `dataDir` read-write, instead of the
+  working directory and `.data` inside it. A data directory inside the project keeps its place in the
+  container, so under the CLI scripts see `/app/.data/bash-cwd` as before; one outside it is mounted at
+  `/data`.
 
 - **`tool-types`** — the tools a host and `assembleMachine` register themselves (`plugin`, `provider`,
   `gate_action`, `about_matbot`, `single_turn`) are typed in an installed matbot. The scan found them only

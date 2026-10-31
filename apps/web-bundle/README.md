@@ -82,10 +82,10 @@ google Gemini — pure `fetch`) are inlined as wizard-selectable *types* rather 
 providers — including **customer-services**, a free self-contained demo LLM the wizard offers with no
 endpoint or API key required (zero-config first run). **webllm** is the other self-contained one: open models (Qwen3-4B by
 default) on the GPU in the page, with WebLLM imported from a CDN only when it is chosen. Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
-plugin, `skills-node`, the node web frontend's server entry) are omitted — they need Node primitives.
+plugin, `background-jobs-node`, the node web frontend's server entry) are omitted — they need Node primitives.
 Note the MCP split: the stdio `@matatbread/matbot-tool-mcp` is Node-only, but the cross-runtime
-`@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `skills` plugin is
-cross-runtime and bundled; only its `skills-node` filesystem specialization is Node-only. See
+`@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `background-jobs`
+plugin is cross-runtime and bundled; only its `background-jobs-node` specialization is Node-only. See
 [WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md) for the three-layer plugin model.
 
 Built-in tools `plugin` (list/add/remove/reload/discover_local/store-key) and `provider` (list/add/remove) are present too,

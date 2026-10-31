@@ -91,7 +91,6 @@ test('it reports to the conversation it was made from, and warns of the old plug
 
   const tools = new Map<string, Tool>();
   const services = {
-    configPath:  '/nowhere/matbot.yaml',
     isSubAgent:  () => false,
     sessions:    sessions.store,
     createStore: (ns: string) => (ns === 'schedules' ? legacy.store : jobs.store),
@@ -102,7 +101,13 @@ test('it reports to the conversation it was made from, and warns of the old plug
   const warnings: string[] = [];
   const warn = console.warn;
   console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
-  try { await jobsPlugin.setup!(services); } finally { console.warn = warn; }
+  // The CLI publishes the config it booted with; the plugin starts jobs as copies of it, so it needs one.
+  const config = process.env['MATBOT_CONFIG'];
+  process.env['MATBOT_CONFIG'] = '/nowhere/matbot.yaml';
+  try { await jobsPlugin.setup!(services); } finally {
+    console.warn = warn;
+    if (config === undefined) delete process.env['MATBOT_CONFIG']; else process.env['MATBOT_CONFIG'] = config;
+  }
   for (const t of jobsPlugin.tools ?? []) tools.set(t.name, t as Tool);
 
   try {

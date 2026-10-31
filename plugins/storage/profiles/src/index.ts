@@ -1,4 +1,3 @@
-import { dirname, join } from 'node:path';
 import type { MatbotPluginSpec, MatbotMachine, ToolRegistry } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { ProfilesStorageBackend, asProfileDirectory } from './backend.js';
@@ -22,7 +21,7 @@ export const plugin: MatbotPluginSpec = {
   // Boot storage backend: the pre-scan opens it before the services object exists (list it before any
   // plugin whose setup() calls createStore). On a hot load there is no pre-scan; setup() installs it.
   storageBackend: {
-    open: async (dotData: string) => { openedByPreScan = true; return ProfilesStorageBackend.open(dotData); },
+    open: async (dataDir: string) => { openedByPreScan = true; return ProfilesStorageBackend.open(dataDir); },
   },
 
   async setup(services: MatbotMachine) {
@@ -34,12 +33,11 @@ export const plugin: MatbotPluginSpec = {
     // active-backend check is duck-typed, never `instanceof`: a hot reload gives this module a fresh class
     // identity, so an identity check would miss a still-active earlier instance.
     if (!openedByPreScan && asProfileDirectory(services.StorageBackend) === undefined) {
-      if (!services.configPath) {
-        console.warn('[storage-profiles] no configPath — cannot hot-activate the profiles backend; add it to matbot.yaml.');
+      if (services.dataDir === undefined) {
+        console.warn('[storage-profiles] the host gives no data directory, so the profiles backend has nowhere to keep its files.');
         return;
       }
-      const dotData = join(dirname(services.configPath), '.data');
-      await services.register('StorageBackend', await ProfilesStorageBackend.open(dotData));
+      await services.register('StorageBackend', await ProfilesStorageBackend.open(services.dataDir));
     }
 
     // The tools + WatchVisibility resolve their directory live (duck-typed, swap-safe) on each call, so

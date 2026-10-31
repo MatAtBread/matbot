@@ -323,8 +323,18 @@ export interface MatbotRuntime {
   readonly systemContext:   SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
   readonly workdir?:        string;
-  /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
-  readonly configPath?:     string;
+  /**
+   * Where the host resolves packages and relative plugin specifiers from: a plugin that writes code for
+   * the host to load (a compiled skill), types against what is installed, or tells a user where to install
+   * a package uses this. Absent ⇒ the host has no such directory (a browser), and the plugin degrades.
+   */
+  readonly projectDir?:     string;
+  /**
+   * Where plugins keep state on disk of their own — a storage backend's files, a sandbox's mount. The host
+   * chooses it; a plugin never derives one from anything else. Absent ⇒ no disk (a browser, an embedder
+   * that gives none), and the plugin degrades.
+   */
+  readonly dataDir?:        string;
 
   /**
    * Whether this process is a background sub-agent (spawned by another matbot, not a top-level

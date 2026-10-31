@@ -145,7 +145,6 @@ And a **Status**:
 | | `rumsfeld` | Functional | Look up the knowledge index when the LLM encounters an unknown term (`contextual_search`, `find_fact`) |
 | | `cognition` | Functional | Inner-voice critique, persistent fact memory, and background Dream Time consolidation |
 | | `skills` | Functional | Named markdown playbooks, injected on demand by a classifier (`skill_action`; provides `SkillManager`) |
-| | `skills-node` | Functional | Node specialization of `skills`: import & watch local `.md` skill files |
 | | `skill-compiler` | Functional | Compile a procedural skill into a hot-loadable TypeScript tool plugin (`skill_compiler`; Node) |
 | | `background-jobs` | Functional | Run prompts as background jobs — now, at a time, or on an interval — that report by appending to a conversation; jobs run in-process |
 | | `background-jobs-node` | Functional | The same, each job in its own process (Node) |

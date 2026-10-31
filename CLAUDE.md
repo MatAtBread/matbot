@@ -53,7 +53,6 @@ plugins/            — one directory per package, flat but for the frontend/pro
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
     skills/        — skill CRUD + catalogue (cross-runtime)
-    skills-node/   — node specialization: .md import/watch
     skills_compiler/— compiles a procedural skill into a TS tool plugin
     function-tools/— tool_function: TS lambdas/named tools composing registered tools
     function-runner-node/— the node FunctionRunner: bounds a body, withholds host globals, routes its

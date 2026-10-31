@@ -79,7 +79,7 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
 /**
  * The cross-runtime base skills plugin: content CRUD via `skill_action`, persisted through the active
  * storage backend and indexed into the knowledge subsystem, plus a `skills_config` tool. Runs in both
- * Node and the browser. It has no filesystem watch — that lives in @matatbread/matbot-skills-node.
+ * Node and the browser.
  */
 export function createSkillsPlugin(): MatbotPluginSpec {
   let manager:  SkillManager   | undefined;

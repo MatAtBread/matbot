@@ -145,7 +145,6 @@ export interface RunSessionOpts {
   signal:         AbortSignal;
   vault?:         Vault;
   workdir?:       string;
-  configPath?:    string;
   files?:         FileStore;
   /** Handed to tools as `ToolContext.appender`: set only by a runner whose sessions the machine's own
    *  appender cannot reach (an ephemeral one). */
@@ -674,7 +673,6 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // `ToolContext.prompt` keeps the stand-in exactly as before; only the gate sees the truth.
         ...bindGate(opts.permissionGate, tool, opts.prompt, opts.toolRegistry ?? { resolve: n => tools.get(n) ?? null }),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
-        ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
         ...(opts.appender    !== undefined ? { appender:    opts.appender    } : {}),
         ...(turnTools.size   > 0         ? { turnTools                      } : {}),

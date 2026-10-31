@@ -310,6 +310,7 @@ function currentProviderName(ctx: ToolContext): string | undefined {
 // ── Executor ──────────────────────────────────────────────────────────────────
 
 function makeExecutor(
+  configPath:           string,
   providers:            ProviderRegistry,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
   nameResolves?:         (pluginName: string) => boolean,
@@ -317,12 +318,6 @@ function makeExecutor(
   return {
     async *execute(input: unknown, ctx: ToolContext) {
       const { action } = input as ProviderInput;
-
-      const configPath = ctx.configPath;
-      if (!configPath) {
-        yield { type: 'error', message: 'No config path in tool context — cannot manage providers.' };
-        return;
-      }
 
       // ── list ───────────────────────────────────────────────────────────────
       if (action === 'list') {
@@ -649,7 +644,10 @@ function makeExecutor(
 
 // ── Tool factory ──────────────────────────────────────────────────────────────
 
+// The config file is the CLI's, handed over when the tool is built: profiles are persisted the way the CLI
+// chooses, not somewhere a tool call says.
 export function createProviderTool(
+  configPath:         string,
   providers:          ProviderRegistry,
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
   nameResolves?:         (pluginName: string) => boolean,
@@ -785,6 +783,6 @@ When a user asks to add a new LLM or provider, ask for:
       },
     },
 
-    executor: makeExecutor(providers, pluginNameToOrigPath, nameResolves),
+    executor: makeExecutor(configPath, providers, pluginNameToOrigPath, nameResolves),
   };
 }

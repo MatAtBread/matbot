@@ -89,7 +89,6 @@ function makeInProcessTransport(services) {
       prompt:       nonInteractivePrompt,
       ...(services.workdir    !== undefined ? { workdir:    services.workdir    } : {}),
       ...(services.files      !== undefined ? { files:      services.files      } : {}),
-      ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     };
   }
 

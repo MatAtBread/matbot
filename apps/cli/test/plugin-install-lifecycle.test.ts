@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { notAPluginError, type ToolContext, type ToolEvent } from '@matatbread/matbot-core';
-import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '../src/plugins/index.js';
+import { createPluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '../src/plugins/index.js';
 
 const execFileP = promisify(execFile);
 
@@ -46,7 +46,7 @@ function run(configPath: string, load: Load, allow: (gate: string) => boolean = 
   const asked: string[] = [];
   const labels: string[] = [];
   const ctx = {
-    callId: 't', signal: new AbortController().signal, configPath, prompt: async () => undefined,
+    callId: 't', signal: new AbortController().signal, prompt: async () => undefined,
     gate: async (req: { gate: string; subject: string; label: string }) => {
       asked.push(`${req.gate} ${req.subject}`);
       labels.push(req.label);
@@ -56,7 +56,7 @@ function run(configPath: string, load: Load, allow: (gate: string) => boolean = 
   } as unknown as ToolContext;
   const call = async (input: Record<string, unknown>) => {
     const events: ToolEvent[] = [];
-    for await (const e of pluginTool.executor.execute(input, ctx)) events.push(e as ToolEvent);
+    for await (const e of createPluginTool(configPath).executor.execute(input, ctx)) events.push(e as ToolEvent);
     return events.map(e => 'chunk' in e ? e.chunk : 'message' in e ? e.message : JSON.stringify(e)).join('');
   };
   return { asked, labels, call };
