@@ -1,17 +1,18 @@
-# @matatbread/matbot-default-gate
+# The default permission gate
 
-matbot's default permission policy.
+matbot's default permission policy, in `core` (`core/src/default-gate/`).
 
 A privileged operation — installing a plugin, adding a provider profile, removing an MCP server,
 overwriting a tool another plugin owns — **declares** that acceptance is needed, by calling
-`ctx.gate({ gate, subject, label, fallback })`. What *happens* then is this package's business, and
-it is replaceable: an installation that wants different rules registers its own `PermissionGate`
-instead of undoing this one.
+`ctx.gate({ gate, subject, label, fallback })`. What *happens* then is the `PermissionGate`'s business,
+and it is replaceable: an installation that wants different rules registers its own `PermissionGate`
+instead of undoing this one, and an embedder can pass its own `gate` to `assembleMachine`.
 
-**This is a library, not a plugin** — do not list it in `plugins:`. Each host seeds it at boot
-(`createDefaultGate` as the `PermissionGate`, `createGateTools()` beside the `plugin` and `provider`
-builtins), because a minimal install's first act is a gated one: making the policy, or the means to
-inspect and undo an answer, conditional on a config line answers the question at the wrong moment.
+**It is not a plugin** — there is nothing to list in `plugins:`. `assembleMachine` seeds it at boot
+(`createDefaultGate` as the `PermissionGate`, `gate_action` beside the other built-in tools) unless the
+host passes another `gate`, because a minimal install's first act is a gated one: making the policy, or
+the means to inspect and undo an answer, conditional on a config line answers the question at the wrong
+moment.
 
 This one reproduces matbot's historical behaviour:
 
@@ -32,9 +33,10 @@ one displaces keeps its own source when it is delegated to.
 
 ## Configuring it
 
-Standing answers live in this package's own settings namespace, one key per gate id, so an
-installation authors them the ordinary way (the hosts exempt this one key from the "names no loaded
-plugin" warning, since nothing loads it):
+Standing answers live in the policy's own settings namespace, `@matatbread/matbot-default-gate` (the
+name of the package it was published as before 0.5.0, kept because existing answers and installations
+are keyed by it), one key per gate id, so an installation authors them the ordinary way (this one key is
+exempt from the "names no loaded plugin" warning, since nothing loads it):
 
 ```yaml
 default_settings:

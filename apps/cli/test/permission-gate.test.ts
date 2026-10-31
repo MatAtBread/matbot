@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { CONFIRM_NO, askPermissionGate, bindGate, createSession, HookRegistry, installSettingsDefaults, makePluginSettings,
          optionValue, optionLabel, permitted, refused, refusalMessage } from '@matatbread/matbot-core';
 import type { FormField, PermissionGate, PermissionRequest, PromptFn, SettingsDoc, Store, Tool } from '@matatbread/matbot-core';
-import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
+import { createDefaultGate, makeGateActionTool, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-core';
 
 // The seam: a privileged call site DECLARES (gate id, subject, label, fallback); the installation's
-// PermissionGate DECIDES. These tests cover the two halves the harness ships — the host's boot default
-// (ask, else fallback) and the default-gate plugin's policy (ask, remember, honour) — plus the binding
+// PermissionGate DECIDES. These tests cover the two halves the harness ships — the bare asking gate
+// (ask, else fallback) and core's default policy (ask, remember, honour) — plus the binding
 // that qualifies a tool's gate suffix with the name it is registered under.
 
 const req = (over: Partial<PermissionRequest> = {}): PermissionRequest =>

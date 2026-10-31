@@ -135,7 +135,7 @@ evaluating its top-level code — the only safe path for, e.g., a Node-only plug
 browser — and a package that declares none is refused the same way, as not a plugin (since 0.5.0; it was
 imported on trust before). `discover_local` passes over such a package without importing it, and `plugin
 add` refuses one on every route. So a package of shared helpers that sits beside the plugins — matbot's
-own `default-gate` and `tool-plugin` are such libraries — simply omits the field. Declare it
+own `tool-plugin` is such a library — simply omits the field. Declare it
 honestly — a plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package
 and its cross-runtime base differ only by this field plus their imports.)
 
@@ -1388,7 +1388,6 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
-| `@matatbread/matbot-default-gate` | `PermissionGate` + `gate_action` · always seeded | Built-in: the default permission policy — asks about a privileged operation, offers to remember the answer, honours what was remembered. Register your own `PermissionGate` to supply different rules |
 | `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |

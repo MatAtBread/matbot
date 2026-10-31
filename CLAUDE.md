@@ -37,7 +37,8 @@ plugin-api/        — @matatbread/matbot-plugin-api: MatbotPlugin, MatbotServic
 core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plugin loader, config
                      (YAML + .env), security (VaultImpl, Principal origin), knowledge
                      (LookupKnowledgeIndex), boot assembly (`assembleMachine` — see "Boot
-                     assembly" below). Author-facing subpath exports — link against without
+                     assembly" below), the default PermissionGate policy + `gate_action`
+                     (`default-gate/` — see "Permission gates"). Author-facing subpath exports — link against without
                      pulling the runtime:
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
@@ -64,8 +65,6 @@ plugins/            — one directory per package, flat but for the frontend/pro
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence
     json-validation/— toolcall hook validating inputs against inputSchema
-    default-gate/  — the default PermissionGate policy (ask, remember, honour) + the gate_action
-                     builtin. A LIBRARY the host seeds, like tool-plugin — never in `plugins:`
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
@@ -156,8 +155,8 @@ configured storage plugin's backend before any store exists, and `loaded()` runs
 
 **`matbotRuntime` is the plugin marker.** A package under `plugins/` is a plugin if and only if its
 `package.json` declares the runtimes it supports. The loader refuses an undeclared package before importing
-it, and discovery passes over one unimported, so a library that lives beside the plugins (`default-gate`,
-`tool-plugin`, or a shared helper of your own) omits the field and is never mistaken for one —
+it, and discovery passes over one unimported, so a library that lives beside the plugins
+(`tool-plugin`, or a shared helper of your own) omits the field and is never mistaken for one —
 nothing has to run its top-level code to find out. core, plugin-api and the apps do not declare it either.
 
 ---
@@ -722,9 +721,9 @@ the time.
 The shape's one hazard is stated where it is read (`ToolContext.gate`): the decision is an object, so
 `if (!await ctx.gate(…))` is always false. Test `.allowed`.
 
-**The default policy is host-seeded, not a configured plugin** — `matbot-default-gate` is a library
-in the `tool-plugin` mould: each host passes its `defaultGate` to `assembleMachine`, which boots it as
-the `PermissionGate` and seeds `gate_action` beside `plugin`/`provider`. It has to be, because a *minimal* install's first act
+**The default policy is seeded, not a configured plugin** — it is core's (`core/src/default-gate`,
+exported as `defaultGate`), and `assembleMachine` boots it as the `PermissionGate` and seeds `gate_action`
+beside the other built-in tools unless the host passes a `gate` of its own. It has to be, because a *minimal* install's first act
 is adding a plugin or a provider, which is gated: making the policy — or the means to inspect and
 undo an answer — depend on a `plugins:` line answers the question at exactly the wrong moment. It
 being seeded rather than registered also keeps `gate_action` from colliding with itself at every boot.
@@ -736,10 +735,12 @@ It reproduces today's behaviour — ask, offer standing answers, remember them �
 asked about and nothing broader, stored under `deny:<gate>` (a key no gate id can have, so the allow keys
 keep their format) and checked before the allows. One button rather than a deny per scope, because the
 prompt was already six options and the case it exists for is a model asking the same thing again;
-broader denials are installation authoring. Like everything else here it is `default-gate`'s: the gate
+broader denials are installation authoring. Like everything else here it is the policy's: the gate
 itself is still yes or no, so an installation authors defaults the ordinary
-way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }`;
-the "names no loaded plugin" warning exempts that one key, since nothing loads it).
+way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }` —
+the name of the package the policy was published as until 0.5.0, kept because stored answers and every
+installation are keyed by it; the "names no loaded plugin" warning exempts that one key, since nothing
+loads it).
 `gate_action` (`get` / `list` / `clear`) reports the standing answers **in effect** and forgets them —
 `list` one entry at a time, each with an id that is a digest of the entry, found by substring because a
 subject's format is its call site's, and `clear` takes the ids back; forgetting a *denial* is itself gated

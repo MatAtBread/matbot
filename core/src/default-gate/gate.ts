@@ -1,9 +1,9 @@
 import { permitted, refused, type FormField, type PermissionGate, type PluginSettings } from '@matatbread/matbot-plugin-api';
 
 /** The settings namespace standing answers live in, and what an installation keys `default_settings:`
- *  by. This package's own name, though it is seeded by the host rather than loaded as a plugin — the
- *  name is what makes the yaml key legible, and the hosts exempt it from the "names no loaded plugin"
- *  warning for exactly that reason. Exported because the host builds the settings facade itself. */
+ *  by. The name of the package this policy was published as before it moved into core: stored answers
+ *  and every installation's yaml are keyed by it, so it stays. Nothing loads under it, so
+ *  `assembleMachine` exempts it from the "names no loaded plugin" warning. */
 export const DEFAULT_GATE_SETTINGS_NS = '@matatbread/matbot-default-gate';
 
 /**
@@ -35,7 +35,7 @@ export function toStandingAnswer(value: unknown): StandingAnswer | undefined {
 }
 
 /**
- * Serialises every standing-answer write in this package — the gate's and `gate_action`'s — across
+ * Serialises every standing-answer write by this policy — the gate's and `gate_action`'s — across
  * gate instances.
  *
  * Appending a subject is a read-modify-write and `PluginSettings` has no CAS on a value — `set` guards
@@ -70,11 +70,11 @@ const allows = (answer: StandingAnswer | undefined, subject: string, standing: r
 
 /**
  * The policy that reproduces matbot's historical behaviour, generalised from tool names to
- * `(gate, subject)`: ask, offer standing answers, remember them. It lives in its own package — out of
- * core and out of the reserved `__matbot_core__` settings namespace — so an installation can
- * *replace* a policy rather than defeat one.
+ * `(gate, subject)`: ask, offer standing answers, remember them. It keeps its own settings namespace,
+ * out of the reserved `__matbot_core__`, and sits behind the `PermissionGate` seam, so an installation
+ * can *replace* a policy rather than defeat one.
  *
- * Storage is one key per gate id, holding a {@link StandingAnswer}, in this package's own settings
+ * Storage is one key per gate id, holding a {@link StandingAnswer}, in its own settings
  * namespace — so an install authors the floor the ordinary way and needs no tooling of its own:
  *
  *   default_settings:

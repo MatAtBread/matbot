@@ -9,7 +9,7 @@ import {
 } from '@matatbread/matbot-core';
 import type { Vault, FileStore, KnowledgeIndex, CompletionEvent, ProviderAdapter, MatbotPlugin } from '@matatbread/matbot-core';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
 // Both hosts now stand their machine up through `assembleMachine`, so what used to be two hand-kept
@@ -33,7 +33,6 @@ async function machine(t: { after(fn: () => Promise<void>): void }, extra: { res
     bootBackend: boot,
     vault:       vault({ KEY: 'secret-value' }),
     providers:   new ProviderRegistryImpl(new Map()),
-    gate:        defaultGate,
     version:     '9.9.9',
     ...extra,
     host: () => ({
@@ -84,7 +83,7 @@ test('a swap-member is capture-safe and reverts to its boot impl', async t => {
   assert.notEqual(await captured.search([{ term: 'x' }], new AbortController().signal), marker, 'and follows the revert');
 });
 
-test('the core tools arrive with the machine', async t => {
+test('the core tools arrive with a machine given no gate, the default gate\'s gate_action among them', async t => {
   const { services } = await machine(t);
   const names = services.tools.list().map(tool => tool.name);
   for (const name of ['gate_action', 'single_turn', 'about_matbot']) assert.ok(names.includes(name), name);

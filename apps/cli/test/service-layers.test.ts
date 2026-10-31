@@ -9,7 +9,7 @@ import {
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, StorageBackend } from '@matatbread/matbot-core';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import type { Layer } from './fixtures/stacks-service.ts';
 

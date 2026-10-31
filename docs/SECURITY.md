@@ -70,7 +70,8 @@ name, and `gate_action get` reports every gate that has a standing answer, whoev
 A gate is a question with a yes-or-no answer. The plugin doing the work **declares** it: a gate id
 (`http.request`), a subject (the origin), a sentence naming the act, and what to do if nobody can be
 asked. The registered `PermissionGate` **decides** it. The default policy
-(`@matatbread/matbot-default-gate`, always present) decides in this order:
+(core's default gate, always present unless an embedder supplies another — see
+[DEFAULT-GATE.md](DEFAULT-GATE.md)) decides in this order:
 
 1. **A standing denial of exactly this subject** refuses it, without asking.
 2. **A standing answer that covers the subject** allows it, without asking.

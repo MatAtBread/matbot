@@ -19,7 +19,6 @@ import { appendMessage, createMessage,
          CONFIRM_YES, CONFIRM_NO,
          wireDescription}            from '@matatbread/matbot-core';
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
-import { defaultGate }                     from '@matatbread/matbot-default-gate';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { checkProviderModel }              from '@matatbread/matbot-core';
 import { createAlsPrincipalCarrier }       from './principal-als.js';
@@ -890,7 +889,6 @@ async function main(): Promise<void> {
     preScanned,
     vault:           bootVault,
     providers,
-    gate:            defaultGate,
     defaultSettings: matbotConfig.defaultSettings,
     builtinTools:    createBuiltinTools(),
     version:         selfVersion(),

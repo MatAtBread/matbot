@@ -10,7 +10,7 @@ import {
 import type { Vault } from '@matatbread/matbot-core';
 import type { Triggers } from '@matatbread/matbot-triggers';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
 // cognition seeds its skills and triggers once a SkillManager is present, and read `Triggers` only at

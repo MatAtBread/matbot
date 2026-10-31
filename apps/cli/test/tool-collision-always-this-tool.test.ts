@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadPlugins, installSettingsDefaults, makePluginSettings, slugSettingsNamespace } from '@matatbread/matbot-core';
 import type { FormOption, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
 import { optionLabel, optionValue } from '@matatbread/matbot-core';
-import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
+import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-core';
 import { collider, twinCollider, machine } from './fixtures/collision-harness.ts';
 
 // Own file: this is about what ANSWERING "always" writes, and a sibling test in the same file would

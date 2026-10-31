@@ -42,7 +42,6 @@
   },
   "dependencies": {
     "@matatbread/matbot-core": "workspace:^",
-    "@matatbread/matbot-default-gate": "workspace:^",
     "@matatbread/matbot-storage-filesystem": "workspace:^",
     "@matatbread/matbot-tool-plugin": "workspace:^",
     "@matatbread/matbot-provider-anthropic": "workspace:^",

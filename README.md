@@ -113,6 +113,7 @@ skills, workspace files, and provider config all persist in browser storage acro
 - Provider management: add and switch LLM profiles live
 - Principal carrier: ambient identity threaded through every layer
 - Vault: secret resolution with `${NAME}` placeholders
+- Permission gate: privileged operations ask first, and can remember the answer ([DEFAULT-GATE.md](docs/DEFAULT-GATE.md))
 - Basic implementations for storage (files) and UI (CLI) are created by "apps" like the CLI.
 
 ### Plugins

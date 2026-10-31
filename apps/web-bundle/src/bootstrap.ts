@@ -6,7 +6,6 @@ import {
 import type {
   MatbotMachine, ProviderConfig, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
 } from '@matatbread/matbot-plugin-api';
-import { defaultGate } from '@matatbread/matbot-default-gate';
 import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
@@ -259,7 +258,6 @@ export async function boot(env: BootEnv): Promise<void> {
     preScanned,
     vault:           bootVault,
     providers,
-    gate:            defaultGate,
     defaultSettings: config.defaultSettings !== undefined ? new Map(Object.entries(config.defaultSettings)) : undefined,
     // A missing secret is asked for, once, and persisted — the browser has no .env to edit.
     resolveSecret:   resolveInteractive,

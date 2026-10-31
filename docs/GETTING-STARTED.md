@@ -376,14 +376,14 @@ connecting an MCP server are the others.
 
 A gate says *what* is being asked and what happens when nobody can be asked; the installation's
 **permission policy** decides how the acceptance is obtained. The one matbot ships
-(`@matatbread/matbot-default-gate`) asks, offers to remember the answer, and honours what it
+(core's default gate — see [DEFAULT-GATE.md](DEFAULT-GATE.md)) asks, offers to remember the answer, and honours what it
 remembered. It is built in — like the `plugin` and `provider` tools, it is there on every install,
 including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is *Deny* / *Allow* / *Always allow "<subject>"* / *Always allow
 every `<gate>`*; non-interactively — a boot, an HTTP install — each call site's own stated answer
 applies, which for a tool collision is "overwrite" (what lets a deliberate override win with nobody
 there to answer) and for everything else is "no".
 
-Standing answers live in that plugin's own settings namespace, one key per gate id, so an
+Standing answers live in its own settings namespace, `@matatbread/matbot-default-gate`, one key per gate id, so an
 installation can author them up front — the same thing the two *Always* options write:
 
 ```yaml

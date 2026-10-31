@@ -29,16 +29,23 @@ churn and less likely to affect a consumer who doesn't use them.
   explicit load, a skip recorded in `plugin list`'s `failed` at boot — where it used to import it on
   trust. A third-party plugin without the field must add it, e.g. `"matbotRuntime": ["node", "browser"]`.
   `plugin add` already refused such a package on the npm and http routes; `discover_local` now passes over
-  one without importing it. core, plugin-api, the apps and the library packages `default-gate` and
-  `tool-plugin` no longer declare it, since they are not plugins. A host whose `PluginResolver` has no
+  one without importing it. core, plugin-api, the apps and the library package `tool-plugin` no longer
+  declare it, since they are not plugins. A host whose `PluginResolver` has no
   `runtimes` has nothing to check, and imports as before.
 - **Two migration warnings are removed.** `default_settings.__matbot_core__.overwriteToolsOnCollision` (moved
   to `'@matatbread/matbot-default-gate': { 'tools.overwrite': … }` in 0.4.14) and the CLI's top-level
   `function_timeout_ms` / `function_imports` (moved to `@matatbread/matbot-function-runner-node`'s
   `timeout_ms` / `permit_imports` in 0.4.20) were already unread; they are now unread silently.
+- **The default permission policy is core's, and `@matatbread/matbot-default-gate` is no longer
+  published.** `defaultGate`, `createDefaultGate`, `makeGateActionTool`, `createGateTools`, `denyKey`,
+  `toStandingAnswer` and `DEFAULT_GATE_SETTINGS_NS` are exported from `@matatbread/matbot-core`; import them
+  from there. Behaviour is unchanged, and so is the settings namespace, `@matatbread/matbot-default-gate`:
+  stored answers and `default_settings:` keyed by it keep working.
 
 ### API gaps filled
 
+- **`assembleMachine`'s `gate` is optional**, defaulting to core's `defaultGate`, so an embedder that wants
+  matbot's ordinary policy passes nothing.
 - **`splitContract`, `parseContractArms`, `splitTypeText`** (plugin-api, beside `contractArms`) — a
   `ToolContract<…>` string flattened to the wire's `params`/`result` text without a compiler. Both
   `ToolTypeIndex` implementations had a copy, neither of which knew a string literal or an arrow, so

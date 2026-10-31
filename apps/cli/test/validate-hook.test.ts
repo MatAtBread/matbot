@@ -9,7 +9,7 @@ import {
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, Tool, ToolEvent, ToolInputError } from '@matatbread/matbot-core';
 import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
 // Validators are `validate` hooks: several co-exist with no reference to one another, every one is asked,

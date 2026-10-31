@@ -29,9 +29,6 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:^
         version: link:../../core
-      '@matatbread/matbot-default-gate':
-        specifier: workspace:^
-        version: link:../../plugins/default-gate
       '@matatbread/matbot-provenance':
         specifier: workspace:^
         version: link:../../plugins/provenance
@@ -96,9 +93,6 @@ importers:
       '@matatbread/matbot-core':
         specifier: workspace:^
         version: link:../../core
-      '@matatbread/matbot-default-gate':
-        specifier: workspace:^
-        version: link:../../plugins/default-gate
       '@matatbread/matbot-frontend-web':
         specifier: workspace:^
         version: link:../../plugins/frontend/web
@@ -224,15 +218,6 @@ importers:
       '@matatbread/matbot-triggers':
         specifier: workspace:^
         version: link:../triggers
-      typescript:
-        specifier: 'catalog:'
-        version: 6.0.3
-
-  plugins/default-gate:
-    devDependencies:
-      '@matatbread/matbot-plugin-api':
-        specifier: workspace:^
-        version: link:../../plugin-api
       typescript:
         specifier: 'catalog:'
         version: 6.0.3

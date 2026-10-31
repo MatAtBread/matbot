@@ -45,8 +45,8 @@ export function announcePluginLoaded(services: MatbotMachine, name: string): voi
  * decides how acceptance is obtained. Core used to own the whole policy here — a settings key in a
  * reserved `__matbot_core__` namespace, a cached memo, a per-tool allowlist and two "always" options —
  * which is an installation policy living in core and keyed in an LLM-writable store, and which an
- * alternative installation could only defeat rather than replace. Remembering answers is now
- * `@matatbread/matbot-default-gate`'s, out of its own plugin settings namespace.
+ * alternative installation could only defeat rather than replace. Remembering answers is now the
+ * default policy's (`./default-gate`), behind the `PermissionGate` seam and in its own settings namespace.
  *
  * `fallback: true` is load-bearing: with no gate and no prompt (a boot load), a collision overwrites,
  * preserving matbot's last-registration-wins behaviour and the deliberate override documented in

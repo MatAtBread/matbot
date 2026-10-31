@@ -23,6 +23,7 @@ import { createSessionAppender } from './session-append.js';
 import { createSingleTurnTool } from './single-turn.js';
 import { createAboutMatbotTool } from './about.js';
 import { addUsage } from './usage.js';
+import { defaultGate } from './default-gate/index.js';
 
 /** A storage backend a configured plugin's manifest supplied at boot, and the config entry it came from. */
 export interface PreScannedStorage {
@@ -48,7 +49,7 @@ export async function preScanStorage(
   return undefined;
 }
 
-/** The host's default permission policy, and the tools that inspect it (`@matatbread/matbot-default-gate`). */
+/** A permission policy, and the tools that inspect it. Core's own is `defaultGate`. */
 export interface HostGate {
   namespace: string;
   create(settings: PluginSettings): PermissionGate;
@@ -66,7 +67,8 @@ export interface AssembleOptions {
   /** The boot vault, behind a swappable proxy like every other swap-member. */
   vault:            Vault;
   providers:        ProviderRegistryImpl;
-  gate:             HostGate;
+  /** The installation's permission policy; `defaultGate` (ask, remember, honour) when absent. */
+  gate?:            HostGate;
   defaultSettings?: ReadonlyMap<string, Readonly<Record<string, unknown>>> | undefined;
   builtinTools?:    Tool[];
   /** Resolve one `${NAME}` reference; the browser prompts for a missing secret. Defaults to the vault. */
@@ -205,8 +207,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // to replace a policy is to capture the one displaced and delegate to it, and a capture-safe proxy
   // would make that capture resolve to the capturing gate itself — which then calls itself until the
   // stack overflows. A getter keeps the member read late-bound; every consumer resolves it per call.
-  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), opts.gate.namespace);
-  let activeGate = opts.gate.create(gateSettings);
+  const gate = opts.gate ?? defaultGate;
+  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), gate.namespace);
+  let activeGate = gate.create(gateSettings);
 
   const boot = { vault: activeVault, knowledge: knowledgeImpl, notifier: activeNotifier, gate: activeGate };
 
@@ -370,18 +373,18 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
 
   // Seeded rather than carried by configured plugins: `gate_action` because a minimal install's first act
   // (adding a plugin or provider) is gated, so inspecting an answer cannot depend on a config line.
-  for (const tool of opts.gate.tools(gateSettings)) tools.register(tool);
+  for (const tool of gate.tools(gateSettings)) tools.register(tool);
   tools.register(createSingleTurnTool(services));
   // The harness is not a plugin (no `plugin list` row), so its version gets a tool of its own.
   tools.register(createAboutMatbotTool(opts.version, services));
 
   const loaded = (): void => {
     // A defaults key is a plugin NAME — loader-derived, not necessarily what `plugins:` spells. One
-    // naming nothing loaded is the feature's one silent failure. The gate's namespace is seeded by the
-    // host rather than a plugin, and reserved dunder namespaces are not plugins; both are exempt.
+    // naming nothing loaded is the feature's one silent failure. The gate's namespace is seeded at boot
+    // rather than by a plugin, and reserved dunder namespaces are not plugins; both are exempt.
     const names = new Set(getRegisteredPlugins().map(p => p.name));
     for (const ns of settingsDefaultNamespaces()) {
-      if (names.has(ns) || ns === opts.gate.namespace || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      if (names.has(ns) || ns === gate.namespace || (ns.startsWith('__') && ns.endsWith('__'))) continue;
       console.warn(
         `[matbot] default settings name "${ns}", which is not a loaded plugin — they apply only once a plugin ` +
         `of that name loads. Key them by the plugin's package name (\`plugin list\` reports them).`,

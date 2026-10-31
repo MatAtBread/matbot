@@ -1,7 +1,6 @@
 ---
 "@matatbread/matbot-plugin-api": patch
 "@matatbread/matbot-core": patch
-"@matatbread/matbot-default-gate": patch
 "@matatbread/matbot-tool-plugin": patch
 "@matatbread/matbot-tool-mcp": patch
 "@matatbread/matbot-mcp-http": patch
