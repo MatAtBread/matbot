@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installPrincipalCarrier, runAs, isReadOnlyError } from '@matatbread/matbot-core';
 import { ProfilesStorageBackend } from '@matatbread/matbot-storage-profiles';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // The base partition's id is the empty string (`BASE = ''`) — an internal routing sentinel, and the right
 // one: it is the path segment that isn't there. `readOnlyError` renders it (`owner || 'global'`), so the

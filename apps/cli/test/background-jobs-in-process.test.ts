@@ -8,8 +8,8 @@ import type {
 import { MemoryStore } from '@matatbread/matbot-core/storage-base';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
 import { inProcessRunner, createBackgroundJobsPlugin } from '../../../plugins/background-jobs/src/index.ts';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

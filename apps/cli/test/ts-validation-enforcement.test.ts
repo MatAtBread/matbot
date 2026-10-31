@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MatbotMachine, Hook } from '@matatbread/matbot-plugin-api';
 import { ItemChangeKind, runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 import type { ToolValidator } from '@matatbread/matbot-tool-types';

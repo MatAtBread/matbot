@@ -8,7 +8,7 @@ import {
   installUsageCarrier, onContextQuiesce,
 } from '@matatbread/matbot-core';
 import type { Vault, FileStore, KnowledgeIndex, CompletionEvent, ProviderAdapter, MatbotPlugin } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 

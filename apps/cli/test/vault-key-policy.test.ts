@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { VaultImpl, isInvalidSecretNameError, isMissingSecretError, unreferenceableKey } from '@matatbread/matbot-core';
-import { EnvFileVault } from '../src/env-vault.ts';
+import { EnvFileVault } from '@matatbread/matbot-host-node';
 
 // What is storable is the BACKEND's business, and it is the only thing that knows: a .env-backed
 // vault takes environment-variable names, and everything else it writes is dropped by whoever reads

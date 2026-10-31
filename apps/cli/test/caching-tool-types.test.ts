@@ -8,7 +8,7 @@ import type { PluginSettings } from '@matatbread/matbot-plugin-api';
 import { cachingFill } from '@matatbread/matbot-caching-tool-types';
 import { buildToolTypesData, compileToolValidators, filterToolTypesData } from '@matatbread/matbot-tool-types';
 import type { ToolTypesData, ToolTypesFill, ToolTypesInputs } from '@matatbread/matbot-tool-types';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 

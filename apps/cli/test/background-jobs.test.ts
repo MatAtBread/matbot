@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { runAs, installPrincipalCarrier, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { AppendMessage, MatbotMachine, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs-node/src/channel.ts';
 import { plugin as jobsPlugin, superviseChild } from '../../../plugins/background-jobs-node/src/index.ts';
 

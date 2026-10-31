@@ -42,6 +42,7 @@
   },
   "dependencies": {
     "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-host-node": "workspace:^",
     "@matatbread/matbot-storage-filesystem": "workspace:^",
     "@matatbread/matbot-provider-anthropic": "workspace:^",
     "@matatbread/matbot-provider-openai-compat": "workspace:^",

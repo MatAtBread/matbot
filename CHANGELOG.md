@@ -49,6 +49,14 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`@matatbread/matbot-host-node`** (new) — what a Node application needs to embed matbot that core
+  cannot hold, being Node-only, until now inside the CLI: the `AsyncLocalStorage` principal and usage
+  carriers (so a server authenticating its own users can set a principal per request), `nodePluginMembers`
+  (`loadPlugin`/`unloadPlugin`/`resolver` for plugins already on disk; nothing fetched or installed), and
+  `EnvFileVault`. `node --import @matatbread/matbot-host-node/register` registers the module hooks loading
+  matbot's TypeScript-source packages needs (a `.js` import resolved to its `.ts`; types stripped under
+  `node_modules`); `/typescript-hooks` exports them for a host with hooks of its own, and the CLI now
+  registers them beneath its own.
 - **`MemoryStorageBackend`, `MemoryFileStore`** (`core/storage-base`) — a backend that persists nothing,
   so core alone can stand a machine up: with `VaultImpl` and the constant principal carrier it needs no
   other package, for a test, a short-lived embedder, or a single-principal one. `MemoryStore` gains `size`.
@@ -74,6 +82,14 @@ churn and less likely to affect a consumer who doesn't use them.
   and the report's new `parameters` gives each one's parameters (`ToolCheckParameter`: name, optional, and
   the JSON Schema its resolved type projects to), read from the program the check just ran. An index that
   cannot resolve types (the browser) omits it.
+
+### Bug fixes
+
+- **A secret stored in the `.env` vault comes back as it was written.** The writer and the reader of the
+  file lived in different packages and disagreed: a value was written bare and read with comment and quote
+  rules, so `abc #1` came back as `abc`, `"x"` as `x` and ` padded ` as `padded` after a restart.
+  `EnvFileVault` now reads its own file (`EnvFileVault.open`), quotes a value the reader would otherwise
+  reinterpret, and refuses one containing a line break rather than writing it broken.
 
 ### Optional
 

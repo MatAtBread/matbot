@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import type { MatbotMachine, Message, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { plugin as editSessionPlugin } from '../../../plugins/edit-session/src/index.ts';
 import { heldRunner } from './fixtures/held-runner.ts';
 

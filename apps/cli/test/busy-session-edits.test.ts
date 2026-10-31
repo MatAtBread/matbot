@@ -8,8 +8,8 @@ import type {
   ProviderConfig, CompletionEvent, Principal, MessageContent,
 } from '@matatbread/matbot-core';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { plugin as editSessionPlugin } from '../../../plugins/edit-session/src/index.ts';
 import { heldRunner } from './fixtures/held-runner.ts';
 

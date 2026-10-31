@@ -8,7 +8,7 @@ import {
   loadPlugins, unloadPlugin, quiesced,
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, StorageBackend } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import type { Layer } from './fixtures/stacks-service.ts';

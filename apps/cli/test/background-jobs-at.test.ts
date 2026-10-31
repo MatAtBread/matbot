@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { MatbotMachine, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { createBackgroundJobsPlugin } from '../../../plugins/background-jobs/src/index.ts';
 
 // A runner that runs nothing: every job here is in the future, and teardown stops the scheduler before one is due.

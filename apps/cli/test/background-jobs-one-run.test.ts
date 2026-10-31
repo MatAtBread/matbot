@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import { MemoryStore } from '@matatbread/matbot-core/storage-base';
 import type { MatbotMachine, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // Several matbots share one job store — every open browser tab loads this plugin over the same IndexedDB —
 // and each used to arm every stored job in a per-job loop of its own, so a job fired once per tab: N turns

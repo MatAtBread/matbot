@@ -8,7 +8,7 @@ import {
   loadPlugins, unloadPlugin, TOOL_INPUT_INVALID,
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, Tool, ToolEvent, ToolInputError } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 

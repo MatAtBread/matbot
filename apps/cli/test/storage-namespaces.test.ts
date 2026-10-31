@@ -9,7 +9,7 @@ import type { StorageBackend } from '@matatbread/matbot-plugin-api';
 import { FilesystemStorageBackend } from '../../../plugins/storage/filesystem/src/backend.ts';
 import { SQLiteStorageBackend }     from '../../../plugins/storage/sqlite/src/backend.ts';
 import { ProfilesStorageBackend }   from '../../../plugins/storage/profiles/src/backend.ts';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // `StorageBackend.createStore` is addressed BY name, so a backend could only ever be read by a caller
 // that already knew what to ask for. `namespaces()` is what makes one traversable — copying a backend

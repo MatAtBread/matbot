@@ -3,7 +3,7 @@ import { spawn }                        from 'node:child_process';
 import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
-import { backfillPluginDescription }    from './plugin-description.js';
+import { backfillPluginDescription }    from '@matatbread/matbot-host-node';
 import { addFlags, declaredDependencies, detectPackageManager, isPackageName, writeInstallRecord } from './plugins/index.js';
 
 // ── Shell runner ───────────────────────��───────────────────────────────���──────

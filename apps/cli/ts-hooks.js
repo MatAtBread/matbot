@@ -1,25 +1,16 @@
 // Node-only module-customization hooks, registered by register.js through `module.registerHooks()`:
-// synchronous, and in-thread. Four concerns:
+// synchronous, and in-thread. They sit ABOVE host-node's `typescriptHooks()` (registered first, so it
+// runs after these and answers every `nextResolve`/`nextLoad` they make), which does what any Node host
+// needs to load matbot's TypeScript source: a `.js` import resolved to its `.ts`, and types stripped
+// under node_modules too. What is here is the CLI's own:
 //
-//   1. Remap *.js imports to *.ts for TypeScript source that ships no compiled
-//      output. Required because Node's native strip-types does not perform this
-//      remapping across pnpm workspace symlinks.
-//
-//   2. Strip TypeScript types ourselves in a `load` hook. matbot ships raw .ts and
-//      relies on type stripping — but Node's *native* stripper refuses files under
-//      node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), which is exactly
-//      where every dependency lives once published. Returning already-stripped source
-//      from a load hook bypasses that path, so installed packages load the same as
-//      workspace ones. The code is erasable-only (enforced by tsconfig
-//      `erasableSyntaxOnly`), so `mode: 'strip'` suffices — no transform, columns
-//      preserved, no source map needed.
-//
-//   3. Plugin hot-reload freshness. When a plugin is reloaded, the core loader
+//   1. Plugin hot-reload freshness. When a plugin is reloaded, the core loader
 //      stamps the plugin entry URL with `?mbfresh=<gen>` (see FRESH_PARAM in
 //      core/src/loader.ts). On its own that re-evaluates only the
 //      entry; its static imports stay cached. Here we propagate that stamp from a
 //      stamped parent onto its first-party children, so the whole plugin subtree
-//      re-evaluates — "fresh all the way down".
+//      re-evaluates — "fresh all the way down". (The layer below strips a stamped
+//      `.ts` the same as any other: a query string is not part of the file name.)
 //
 //      The stamp deliberately stops at the host-shared singleton boundary: any
 //      module the plugin API itself loaded (e.g. @matatbread/matbot-plugin-api,
@@ -27,7 +18,7 @@
 //      duplicated, or cross-boundary identity silently breaks. Those package
 //      directories arrive as `createHooks({ exclude })` from register.js.
 //
-//   4. On-demand fetching for a plugin fetched over http (see remote-loader.js).
+//   2. On-demand fetching for a plugin fetched over http (see remote-loader.js).
 //      A module inside `.plugins/<host>/…` gets its relative and root-relative
 //      imports resolved against where it CAME from and fetched if absent, so Node
 //      drives that graph instead of a regex predicting it. An absolute-URL import
@@ -37,8 +28,6 @@
 //      "bare = the host's copy" means once the symlink farm is gone.
 
 import { stripTypeScriptTypes } from 'node:module';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { resolveFetchedSync, bareAnchor, isFetched, loadStored } from './remote-loader.js';
 
 // stripTypeScriptTypes is still flagged experimental, so it emits an ExperimentalWarning the
@@ -75,7 +64,7 @@ export function createHooks({ exclude = [] } = {}) {
   }
 
   // `registerHooks()` also runs for `require()`, which `register()`'s hooks never saw, and CommonJS has rules
-  // of its own for all four concerns: `require('/abs/x.json')` is a file, not a path on the plugin's origin,
+  // of its own for each of these: `require('/abs/x.json')` is a file, not a path on the plugin's origin,
   // a query string is not part of a file name, and a `.ts` it loads is not an ES module by fiat. Found in
   // the plugin tool's dependency notes, whose absolute-path require from inside a fetched tree became a fetch.
   // So a require passes through, as it always has.
@@ -84,9 +73,9 @@ export function createHooks({ exclude = [] } = {}) {
   function resolve(specifier, context, nextResolve) {
     if (isRequire(context)) return nextResolve(specifier, context);
 
-    // (4) A module fetched over http: resolve its non-bare imports against its origin, fetching on demand.
-    // Checked before the .js->.ts remap below because that remap asks the FILESYSTEM which of the two
-    // exists, and for a module we have not fetched yet the answer is neither.
+    // (2) A module fetched over http: resolve its non-bare imports against its origin, fetching on demand.
+    // Answered here, never passed down, because the layer below asks the FILESYSTEM whether a `.js` or a
+    // `.ts` exists, and for a module we have not fetched yet the answer is neither.
     // Stamped like any other result: a refresh re-fetches a changed import to disk, and unstamped it would come
     // back as the copy Node already evaluated under the same URL.
     const fetched = resolveFetchedSync(specifier, context.parentURL);
@@ -97,24 +86,14 @@ export function createHooks({ exclude = [] } = {}) {
     const anchor = bareAnchor(context.parentURL);
     const from = anchor === undefined ? context : { ...context, parentURL: anchor };
 
-    // (1) .js -> .ts remap.
     let result;
-    if (specifier.endsWith('.js')) {
-      try {
-        result = nextResolve(specifier.slice(0, -3) + '.ts', from);
-      } catch {
-        try { result = nextResolve(specifier, from); }
-        catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
-      }
-    } else {
-      try { result = nextResolve(specifier, from); }
-      catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
-    }
+    try { result = nextResolve(specifier, from); }
+    catch (e) { result = resolveAsHost(specifier, from, nextResolve, e, context.parentURL); }
 
     return fresh(result, context.parentURL);
   }
 
-  // (2) Freshness propagation. Fast path: the marker only exists during a reload,
+  // (1) Freshness propagation. Fast path: the marker only exists during a reload,
   // so 99% of resolutions (startup, normal runs) bail on this cheap string test
   // before any URL parsing.
   function fresh(result, parent) {
@@ -133,14 +112,7 @@ export function createHooks({ exclude = [] } = {}) {
 
   function load(url, context, nextLoad) {
     if (isRequire(context)) return nextLoad(url, context);
-    // Strip .ts ourselves (concern 2). Match a file: URL ending in .ts, allowing a
-    // trailing ?mbfresh query. Everything else (real .js, node:, data:) passes through.
-    if (url.startsWith('file:') && /\.ts(\?.*)?$/.test(url)) {
-      const source = readFileSync(fileURLToPath(url.split('?')[0]), 'utf8');
-      const code = stripTypeScriptTypes(source, { mode: 'strip', sourceUrl: url });
-      return { format: 'module', source: code, shortCircuit: true };
-    }
-    // (4) A module imported by URL: its source is in the cache, under the URL it answered at.
+    // (2) A module imported by URL: its source is in the cache, under the URL it answered at.
     const stored = /^https?:/.test(url) ? loadStored(url) : undefined;
     if (stored !== undefined) {
       const ts = /\.m?ts$/.test(new URL(url).pathname);

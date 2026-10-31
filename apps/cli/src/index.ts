@@ -2,8 +2,8 @@
 import { loadConfig, loadConfigFromText, loadDotEnv, readDotEnv, withholdDotEnv } from './config.js';
 import { installPlugin }                    from './install.js';
 import { MemoryStore }                     from '@matatbread/matbot-core/storage-base';
-import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from './plugin-description.js';
-import { nodePluginResolver }               from './plugin-resolver.js';
+import { loadPluginsWithDescriptions, readPluginMeta, type PluginLoadRequest } from '@matatbread/matbot-host-node';
+import { nodePluginResolver }               from '@matatbread/matbot-host-node';
 import type { Principal, ProviderConfig, MatbotPluginSpec, Session,
               Store,
               MessageContent, UserContent, Usage } from '@matatbread/matbot-core';
@@ -21,9 +21,9 @@ import { appendMessage, createMessage,
 import type { Vault, SessionRunner, PromptFn, FormField } from '@matatbread/matbot-core';
 import { systemPrincipal }                 from '@matatbread/matbot-core';
 import { checkProviderModel }              from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier }       from './principal-als.js';
-import { createAlsUsageCarrier }           from './usage-als.js';
-import { EnvFileVault }                     from './env-vault.js';
+import { createAlsPrincipalCarrier }       from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier }           from '@matatbread/matbot-host-node';
+import { EnvFileVault }                     from '@matatbread/matbot-host-node';
 import { answerSelect, renderSelect }        from './select.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,

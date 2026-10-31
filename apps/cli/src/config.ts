@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseConfig, parseYaml } from '@matatbread/matbot-core';
 import type { MatbotConfig } from '@matatbread/matbot-core';
+import { readEnvFile } from '@matatbread/matbot-host-node';
 
 export type { MatbotConfig };
 
@@ -34,36 +35,12 @@ export async function loadConfigFromText(
   return { config: parseConfig(text, baseText), projectDir };
 }
 
-function parseDotEnv(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    const stripped = line.startsWith('export ') ? line.slice(7).trimStart() : line;
-    const eq = stripped.indexOf('=');
-    if (eq === -1) continue;
-    const key = stripped.slice(0, eq).trimEnd();
-    if (!key) continue;
-    let val = stripped.slice(eq + 1);
-    if ((val.startsWith('"') && val.endsWith('"')) ||
-        (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    } else {
-      const commentIdx = val.search(/\s+#/);
-      if (commentIdx !== -1) val = val.slice(0, commentIdx);
-      val = val.trim();
-    }
-    out[key] = val;
-  }
-  return out;
-}
-
 /** matbot's own settings that are read from the environment, and so may come from `.env` too. Everything
  *  else in `.env` is the vault's, and never reaches `process.env` (see {@link withholdDotEnv}). */
 const CONFIG_VARS = new Set(['MATBOT_WEB_PORT', 'MATBOT_PRINCIPAL']);
 
 export async function readDotEnv(dir: string): Promise<Record<string, string>> {
-  try { return parseDotEnv(await readFile(path.join(dir, '.env'), 'utf8')); } catch { return {}; }
+  return readEnvFile(path.join(dir, '.env'));
 }
 
 /** Apply the matbot settings a `.env` carries, where the environment does not already say otherwise. The

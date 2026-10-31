@@ -41,7 +41,13 @@ core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plu
                      (`default-gate/` — see "Permission gates"). Author-facing subpath exports — link against without
                      pulling the runtime:
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
-                       ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
+                       ./storage-base   — filter/sort engine, StoreQuery (write a storage backend);
+                                          MemoryStorageBackend (persists nothing)
+host-node/         — @matatbread/matbot-host-node: what a Node HOST needs that core cannot hold, being
+                     Node-only — the AsyncLocalStorage carriers, the TS-source module hooks (./register,
+                     ./typescript-hooks), plugin loading from disk (nodePluginMembers), EnvFileVault. Not a
+                     plugin, and assumes no config file, directory layout or way of acquiring plugins:
+                     each piece takes the path it works on
 plugins/            — one directory per package, flat but for the frontend/providers/storage groups
     rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
@@ -92,7 +98,7 @@ apps/
   web-bundle/      — browser-only matbot.html
 ```
 
-**Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`. Nothing in `plugin-api/`, `core/`, or `plugins/` may depend on `apps/`.
+**Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`, and `apps` → `host-node` → `core`. Nothing in `plugin-api/`, `core/`, `host-node/` or `plugins/` may depend on `apps/`, and no plugin imports `host-node`: it is for whoever stands a machine up. A storage backend lives in its plugin (`storage-filesystem`, `plugins/browser`, `storage-sqlite`), which a host imports to boot on. `apps/cli/test/core-alone.test.ts` and `embedder.test.ts` are a machine from core alone and from core + host-node + a storage plugin, each refusing to import anything else.
 
 ### Acquisition vs. management
 
@@ -500,7 +506,7 @@ pull is not holding across the stream (and would re-enter the admit barrier ever
 rolls up on settle, so a later pull's entries would land after the roll-up. `contextSwitch(p, () => gen())`
 therefore gets the right identity and still releases the hold early.
 
-**Platform split:** node uses `AsyncLocalStorage`-backed carrier (in `apps/cli`); browser/single-principal uses constant carrier (in plugin-api).
+**Platform split:** node uses `AsyncLocalStorage`-backed carrier (in `host-node`); browser/single-principal uses constant carrier (in plugin-api).
 
 **Establishment points:** entry-only — CLI `enterPrincipal`s boot principal; web server `runAs` per request; telegram `runAs` per message; `SessionRunner.pump` wraps each turn in `runAs(submitter)`.
 

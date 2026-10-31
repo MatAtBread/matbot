@@ -9,7 +9,7 @@ import {
 } from '@matatbread/matbot-core';
 import type { Vault } from '@matatbread/matbot-core';
 import type { Triggers } from '@matatbread/matbot-triggers';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 

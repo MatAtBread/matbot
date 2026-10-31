@@ -1,6 +1,7 @@
 packages:
   - 'plugin-api'
   - 'core'
+  - 'host-node'
   - 'plugins/*'
   - 'plugins/*/*'
   - 'apps/*'

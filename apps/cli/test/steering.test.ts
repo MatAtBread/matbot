@@ -5,8 +5,8 @@ import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
   Message, PipelineEvent, Principal, MessageContent, MediaStore, FileHandle, MimeType,
 } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 // The runner scopes each turn in contextSwitch/withUsageScope, which need host carriers installed at
 // boot — same as apps/cli does. Use the production ALS carriers so the two turns stay isolated.

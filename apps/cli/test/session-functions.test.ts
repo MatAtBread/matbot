@@ -9,8 +9,8 @@ import type {
 } from '@matatbread/matbot-core';
 import { createFunctionToolsPlugin } from '@matatbread/matbot-function-tools';
 import { createToolTypesPlugin } from '@matatbread/matbot-tool-types';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
-import { createAlsUsageCarrier } from '../src/usage-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

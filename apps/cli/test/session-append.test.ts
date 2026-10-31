@@ -8,8 +8,8 @@ import type {
   CompletionEvent, Notifier, ProviderAdapter, ProviderConfig, Session, SessionAppender, SessionRunner, Store, Tool, ToolContext,
 } from '@matatbread/matbot-plugin-api';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());
