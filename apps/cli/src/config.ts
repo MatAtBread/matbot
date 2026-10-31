@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseConfig, type MatbotConfig } from './config-parse.js';
 import { parseYaml } from './yaml.js';
@@ -16,6 +16,18 @@ async function loadBase(
   const basePath = path.resolve(fromDir, ext);
   const baseText = await readFile(basePath, 'utf8');
   return { baseText, projectDir: path.dirname(basePath) };
+}
+
+/** Walk up from `start` until we find a file named `filename`, or return null. */
+export async function findUp(filename: string, start = process.cwd()): Promise<string | null> {
+  let dir = path.resolve(start);
+  while (true) {
+    const candidate = path.join(dir, filename);
+    try { await access(candidate); return candidate; } catch { /* not here */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;  // filesystem root
+    dir = parent;
+  }
 }
 
 export async function loadConfig(

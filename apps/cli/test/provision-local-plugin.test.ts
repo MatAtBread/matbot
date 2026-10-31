@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planProvision, applyProvision, discardProvision, isRegistryRange,
-         hostOwnPackageDir } from '../src/plugins/index.js';
+import { planProvision, applyProvision, discardProvision, isRegistryRange } from '../src/plugins/provision.js';
+import { hostOwnPackageDir } from '../src/plugins/remote-cache.js';
 import { spawn } from 'node:child_process';
 
 const runNpm = (args: string[], cwd: string): Promise<void> => new Promise((res, rej) => {

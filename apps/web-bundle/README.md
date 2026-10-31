@@ -54,7 +54,7 @@ together by an import map at runtime. The mechanism is the browser mirror of the
    only for *runtime* remote `.ts` plugin loading — see the caveat below — never for the baseline
    boot.)
 3. **`src/bootstrap.ts`** is just another inlined module. It builds `MatbotServices` (the browser
-   analogue of `apps/cli/src/index.ts`), installs the constant principal carrier, and runs the real
+   analogue of `apps/cli/src/boot.ts`), installs the constant principal carrier, and runs the real
    `loadPlugins` / resolver / `SessionRunner` unchanged. The whole architecture runs as-is.
 
 Because everything is in-memory (blobs + an injected import map, no service worker, no `fetch`, no

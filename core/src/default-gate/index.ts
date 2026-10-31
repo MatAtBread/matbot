@@ -25,7 +25,7 @@ export { makeGateActionTool } from './tool.js';
 export type { GateAnswer, GateEntry } from './tool.js';
 
 /** The tools a host seeds alongside the default gate. One today; a list because that is what a host's
- *  builtin seeding takes, and what `createBuiltinTools` next door already is. */
+ *  builtin seeding (`builtinTools`) takes. */
 export function createGateTools(settings: PluginSettings): Tool[] {
   return [makeGateActionTool(settings)];
 }

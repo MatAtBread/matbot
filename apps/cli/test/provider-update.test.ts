@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { parseYaml } from '../src/yaml.js';
 import { applyProviderPatch, movedCredentialKeys, patchedFields, ProviderRegistryImpl, bindGate, refused, refusalMessage,
          CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
-import { writeProviderBlock, createProviderTool } from '../src/plugins/index.js';
+import { writeProviderBlock, createProviderTool } from '../src/plugins/tools/provider.js';
 import type { ProviderConfig, PromptFn, ToolContext, ToolEvent, FormField } from '@matatbread/matbot-plugin-api';
 
 const noKeys = { hasKey: (): boolean => false };
@@ -22,7 +22,7 @@ const noKeys = { hasKey: (): boolean => false };
 // comes out the other side unchanged — the credential above all, which no part of update may touch.
 
 const CONFIG = `plugins:
-  - '../src/plugins/index.js'
+  - './plugins/hook-logger'
 
 providers:
   keep-me:
@@ -92,7 +92,7 @@ test('every other section and profile survives the rewrite', async () => {
   await writeProviderBlock(file, applyProviderPatch(stored('deepseek'), { model: 'x' }, noKeys));
 
   const doc = parseYaml(await readFile(file, 'utf8'));
-  assert.deepEqual(doc['plugins'], ['../src/plugins/index.js']);
+  assert.deepEqual(doc['plugins'], ['./plugins/hook-logger']);
   assert.deepEqual(doc['default_settings'], { '@matatbread/matbot-rumsfeld': { reranker: 'bge' } });
   // The untouched sibling profile keeps its own definition, not a copy of anything.
   assert.deepEqual(await readBack(file, 'keep-me'), {

@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import type { ToolContext, ToolEvent } from '@matatbread/matbot-core';
-import { createPluginTool, pluginFingerprint, recordLoaded } from '../src/plugins/index.js';
+import { createPluginTool } from '../src/plugins/tools/plugin.js';
+import { pluginFingerprint, recordLoaded } from '../src/plugins/fingerprint.js';
 
 // A reload imports whatever is on disk now, or freshly fetched upstream — and the model can change both. So
 // reloading a resident plugin is unasked only while its code is what was loaded; changed code is the

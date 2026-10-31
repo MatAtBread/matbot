@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createPluginTool } from '../src/plugins/index.js';
+import { createPluginTool } from '../src/plugins/tools/plugin.js';
 import type { ToolContext } from '@matatbread/matbot-plugin-api';
 
 // `discover_local` answers "is this already configured?", and it used to answer it by string-matching the

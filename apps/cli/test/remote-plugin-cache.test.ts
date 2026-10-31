@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision } from '../src/plugins/index.js';
+import { materializeRemote, remoteDependencyNotes, restoreRemote, discardRestore } from '../src/plugins/remote-cache.js';
+import { missingPackageOf } from '../src/plugins/tools/plugin/add.js';
+import { planProvision, applyProvision } from '../src/plugins/provision.js';
 import { mirrorPath } from '../src/plugins/cache-layout.js';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the

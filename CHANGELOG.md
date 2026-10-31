@@ -173,6 +173,9 @@ churn and less likely to affect a consumer who doesn't use them.
   only because a CLI test imports it, so an npm install of the CLI carried it while every other plugin
   needed `plugin add`. An installation whose `plugins:` names `@matatbread/matbot-provenance` adds it
   (`plugin add @matatbread/matbot-provenance`); a source checkout is unaffected.
+- **`matbot install` adds a plugin whose name is a prefix of one already configured.** It took
+  `- ./plugins/foo` as present when `- ./plugins/foobar` was listed, and wrote nothing — the fix `plugin
+  add` already had; the two now share one writer. `matbot --help` lists the `install` subcommand.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
 - **`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`
