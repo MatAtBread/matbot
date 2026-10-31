@@ -705,8 +705,8 @@ export function createTriggersPlugin(): MatbotPluginSpec {
       manager  = await setupTriggers(services);
       if (services.providers.has(RETIRED_CLASSIFIER) && await services.settings().get('classifierProvider') === undefined) {
         console.warn(`[triggers] a provider named "${RETIRED_CLASSIFIER}" is configured, but since 0.5.0 the classifier `
-          + 'no longer uses it by name — it uses the turn\'s provider. To keep it, add to matbot.yaml: '
-          + `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: ${RETIRED_CLASSIFIER} } }`);
+          + 'no longer uses it by name — it uses the turn\'s provider. To keep it, set this plugin\'s classifierProvider '
+          + `setting (in the CLI's matbot.yaml: default_settings: { '@matatbread/matbot-triggers': { classifierProvider: ${RETIRED_CLASSIFIER} } })`);
       }
     },
 

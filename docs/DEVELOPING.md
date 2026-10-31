@@ -452,7 +452,8 @@ interface MatbotRuntime {
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
   readonly workdir?:        string;
-  readonly configPath?:     string;
+  readonly projectDir?:     string;   // where the host resolves packages and relative plugin specifiers from
+  readonly dataDir?:        string;   // where plugins keep state on disk
 }
 
 // MatbotServices — the registry bucket (registerable / swappable keys):
@@ -747,7 +748,6 @@ interface ToolContext {
   vault:       Vault;
   provider?:   string;       // the provider key driving the current turn
   workdir?:    string;
-  configPath?: string;
   files?:      FileStore;
   prompt:      PromptFn;     // (question, default?) | (field: FormField) => Promise<string>
   gate(req: PermissionRequest): Promise<boolean>;   // ask permission — see Declaring a gate
@@ -952,18 +952,17 @@ class MyBackend implements StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T> { /* … */ }
   get fileStore(): FileStore { /* … */ }
   async close(): Promise<void> { /* … */ }
-  static async open(dotData: string): Promise<MyBackend> { return new MyBackend(); }
+  static async open(dataDir: string): Promise<MyBackend> { return new MyBackend(); }
 }
 
 export const plugin: MatbotPluginSpec = {
   apiVersion:     PLUGIN_API_VERSION,
-  storageBackend: { open: (dotData) => MyBackend.open(dotData) },
+  storageBackend: { open: (dataDir) => MyBackend.open(dataDir) },
   async setup(services) {
     if (services.StorageBackend instanceof MyBackend) return;
-    if (!services.configPath) return;
-    const { join, dirname } = await import('node:path');
-    const dotData = join(dirname(services.configPath), '.data');
-    await services.register('StorageBackend', await MyBackend.open(dotData));
+    // The host's data directory — the one the boot pre-scan passes `open()` too. Never derive one.
+    if (services.dataDir === undefined) return;
+    await services.register('StorageBackend', await MyBackend.open(services.dataDir));
   },
 };
 ```
@@ -1457,7 +1456,12 @@ app.post('/whoami', (req, res) => runAs({ id: req.user.id, type: 'user' }, async
 ```
 
 Nothing here is a matbot convention: each piece takes the path it works on, and none assumes a
-`matbot.yaml`, a `.data` directory or a way of acquiring plugins — those are the CLI's. `gate` defaults
+`matbot.yaml`, a `.data` directory or a way of acquiring plugins — those are the CLI's. Two directories
+are the host's to give, as members alongside `nodePluginMembers` (which supplies the first as its own
+base): `projectDir`, where packages and relative plugin specifiers resolve from, and `dataDir`, where
+plugins keep state on disk — a storage plugin hot-loaded at run time, `docker-bash`'s mount. Give
+`dataDir: '/var/lib/myapp/data'` and those plugins work; leave it out and they do nothing rather than
+guess. `gate` defaults
 to core's permission policy, which asks through whatever prompt channel a call has and, with none,
 answers each gate's own non-interactive default (see [DEFAULT-GATE.md](DEFAULT-GATE.md)); pass your own to
 decide differently. A turn is `services.run.open({ sessionId, provider, principal, content, signal })`

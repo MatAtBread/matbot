@@ -295,7 +295,7 @@ export const plugin: MatbotPluginSpec = {
           },
           provider: {
             type:        'string',
-            description: 'Provider name as defined in matbot.yaml (set only).',
+            description: 'Provider profile name, as configured (set only).',
           },
         },
       },

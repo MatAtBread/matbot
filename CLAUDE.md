@@ -232,14 +232,23 @@ stored one — a `*_config get` action reports what is *in effect*, not what is 
 which is CAS'd, per-principal and notifiable; authoring the floor is installation authoring, and a tool
 for it would be a second way to do one thing, with restart semantics and no CAS. Which file holds it is
 a host concern by construction — core takes a map, never a path — so a second location stays a ~10-line
-host change. `extends:` is NOT that mechanism today: the CLI chdirs to the base's directory and rewrites
-`configPath`, so a shared base becomes the project (`.data`, `.env`, and every yaml write land there).
+host change. `extends:` is NOT that mechanism today: the CLI chdirs to the base's directory and takes
+its own config path from there, so a shared base becomes the project (`.data`, `.env`, and every yaml write land there).
 
 ---
 
 ## Data layout
 
-All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
+**A plugin never derives a directory; the host hands it two.** `projectDir` is where the host resolves
+packages and relative plugin specifiers from — a plugin writing code for the host to load (a compiled
+skill), typing against what is installed, or telling a user where to install a package uses it. `dataDir`
+is where plugins keep state on disk — a storage backend's files, a sandbox's mount. Both are optional
+`MatbotMachine` members, absent in a browser; a plugin that needs one degrades without it. Nothing is
+derived from a config file's location, the working directory or a fixed name: that is a host's layout,
+and what follows is the CLI's.
+
+The CLI's: `projectDir` is the directory holding `matbot.yaml`, and `dataDir` is `.data/` beside it —
+all runtime state, never in source:
 
 ```
 .data/
@@ -248,8 +257,10 @@ All runtime state under `.data/` **next to `matbot.yaml`**, never in source:
 ```
 
 `.data/` is gitignored. Plugins may add subdirectories. Other storage providers (e.g. SQLite) differ.
+The CLI publishes the config it booted with as `MATBOT_CONFIG`, beside `IS_SUB_AGENT` and
+`MATBOT_PRINCIPAL` — the command-line contract `background-jobs-node` starts a job with.
 
-**`.plugins/`** — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it. A dot-directory in there is matbot's own bookkeeping rather than a mirrored host (`.restore` holds the copy a refresh set aside, so a failed reload can put the working one back; `.urls` holds what plugins import by URL, below; `.installs` records what `plugin add` changed in the project, so `remove` takes back only that), which is why the cache scan skips them.
+**`.plugins/`** (the CLI's) — fetched remote-module cache, **separate** from `.data/`. `.data/` is LLM read-write runtime state; `.plugins/` is matbot-writes / LLM-reads-only (mounted read-only into docker-bash). Never relocate it. Gitignored. It holds remote *plugins* — and only those: a `tool_function` body cannot import a URL (see *Module access from a `tool_function`*). One cache, because a second fetch-and-materialise directory is the thing that drifts — and the contract is unchanged either way: matbot writes it, the model only reads it. A dot-directory in there is matbot's own bookkeeping rather than a mirrored host (`.restore` holds the copy a refresh set aside, so a failed reload can put the working one back; `.urls` holds what plugins import by URL, below; `.installs` records what `plugin add` changed in the project, so `remove` takes back only that), which is why the cache scan skips them.
 
 **Two identities in it, by what the thing is.** A plugin's own files are *mirrored*, `.plugins/<host>/<path…>`, and load as `file:` — a package was a file tree before it was served, so the mirror loses nothing, and it is what lets a dependency `plugin add` installs beside it resolve and a Node-only plugin read its files through `import.meta.url`. A module a plugin imports by absolute URL keeps that URL as its identity, as it does in the browser, and is stored by hash under `.urls`. A CDN's URL space is not a file tree — one path is a module and the parent of others, a response redirects, the query is part of the name — and mirroring it turned each of those into a special case of the path mapping (the `ENOTDIR` of issue #89 was the first). Do not route URL imports back into the mirror to make them browsable; a hash is the point.
 
