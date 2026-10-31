@@ -15,7 +15,7 @@
     "check:contracts": "node scripts/check-tool-contracts.mjs",
     "repl": "pnpm --filter @matatbread/matbot-cli repl",
     "start": "pnpm --filter @matatbread/matbot-cli start",
-    "web-build": "pnpm --filter @matatbread/matbot-web-bundle assemble && pnpm --filter @matatbread/matbot-web-bundle assemble:demo",
+    "web-build": "pnpm --filter @matatbread/matbot-web-bundle assemble",
     "web-server": "pnpm --filter @matatbread/matbot-web-bundle serve",
     "changeset": "changeset",
     "version-packages": "changeset version && node scripts/publish.mjs --align",

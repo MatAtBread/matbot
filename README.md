@@ -160,7 +160,6 @@ And a **Status**:
 | | `persist-ki-bge` | Functional | `KnowledgeIndex`: persistent, with optional BGE reranker |
 | | `web-principal-user` | Example | `WebPrincipalResolver`: the web frontend's fallback principal becomes the host OS user (`$USER`) — a template for a real resolver |
 | **frontend** | `frontend/web` | Functional | HTTP + SSE web UI with session management (Node); in-process in the browser |
-| | `frontend/dom` | Functional | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | | `frontend/telegram` | Functional | Telegram bot frontend |
 | **provider** | `anthropic` | Functional | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
 | | `openai-compat` | Functional | OpenAI-compatible chat completions |

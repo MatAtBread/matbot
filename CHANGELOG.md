@@ -96,6 +96,10 @@ churn and less likely to affect a consumer who doesn't use them.
   stops. `Classified`'s `http` arm loses `url` and `advice`; `githubToHttps` is exported instead.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
+- **`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`
+  web bundle it was the frontend of (`matbot.web-demo.json`, `assemble:demo`). In the browser, use
+  `frontend-web`'s browser entry, which `matbot.html` already loads. The versions already on npm are left
+  there.
 - **`@matatbread/matbot-files-node` is no longer published.** Its one export, `FilesystemFileStore`, moved
   into `storage-filesystem`, its only user, and is exported from `@matatbread/matbot-storage-filesystem`.
   Import it from there. The versions already on npm are left there.

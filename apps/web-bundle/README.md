@@ -18,7 +18,7 @@ build on.
 ## Build & run
 
 ```bash
-pnpm web-build    # → dist/matbot.html (rich UI) + dist/matbot-demo.html (minimal dom demonstrator)
+pnpm web-build    # → dist/matbot.html
 open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
@@ -70,8 +70,7 @@ The web defaults are plugins, never core packages. The **auto-load core** (`matb
   the `LocalStorageVault`, and the browser `plugin` management tool. It also persists user-added
   plugins and replays them on reload.
 - **`@matatbread/matbot-frontend-web`** (browser entry) — the full-featured in-process UI: the same
-  `index.html` + `app.js` the Node server serves, mounted with no wire. (The `matbot-demo.html`
-  bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
+  `index.html` + `app.js` the Node server serves, mounted with no wire.
 
 Everything else browser-safe — `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
 `rumsfeld`, `triggers`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`,
@@ -109,6 +108,6 @@ you don't want the wizard.
 - **Runtime remote plugin loading** (`plugin add <url>`) requires http (not `file://`) and a recent
   browser; it fetches raw `.ts` and type-strips it in-page, lazy-loading sucrase from a CDN on first
   use (so that one path needs network). The inlined baseline has neither requirement.
-- **Size**: ~530 KB for the full UI (`matbot.html`), ~270 KB for the minimal `matbot-demo.html` —
+- **Size**: ~530 KB —
   the build-time-stripped JS modules and the loader, nothing else. No compiler is inlined.
 - Secrets persist in `localStorage` in plaintext — single-user local use only.

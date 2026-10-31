@@ -72,24 +72,12 @@ the baked scaffold + `app.js`, and mounts.
 
 ---
 
-## Two bundles
+## Building
 
-`pnpm web-build` produces both artifacts (each from its own config in
-[apps/web-bundle/](../apps/web-bundle/)):
-
-| Output | Config | Frontend | Purpose |
-|---|---|---|---|
-| **`dist/matbot.html`** | `matbot.web.json` | `frontend/web` (browser entry) | The default, full-featured UI — sessions sidebar, files, plugin manager, markdown, the works. |
-| **`dist/matbot-demo.html`** | `matbot.web-demo.json` | `frontend/dom` | A minimal ~450-line in-process demonstrator, kept deliberately simple. |
-
-```bash
-pnpm web-build          # both bundles
-# under the hood:
-#   assemble.mjs                       → dist/matbot.html
-#   assemble.mjs matbot.web-demo.json  → dist/matbot-demo.html
-```
-
-A given bundle hosts exactly one frontend; the two never coexist.
+`pnpm web-build` produces **`dist/matbot.html`** from `matbot.web.json` in
+[apps/web-bundle/](../apps/web-bundle/): `frontend/web`'s browser entry — sessions sidebar, files,
+plugin manager, markdown, the works. `assemble.mjs <config>` builds from another config, which is how an
+installation ships a bundle of its own.
 
 ---
 

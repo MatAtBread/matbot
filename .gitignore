@@ -23,11 +23,10 @@ matbot.*.yaml
 # though dist/ is ignored everywhere else. Re-including the directory is required
 # before the files (per gitignore precedence), but on its own it un-ignores the
 # directory's *entire* contents; re-ignore them with the wildcard, then carve out
-# just the shipped html (the rich UI and the dom demonstrator).
+# just the shipped html.
 !apps/web-bundle/dist/
 apps/web-bundle/dist/*
 !apps/web-bundle/dist/matbot.html
-!apps/web-bundle/dist/matbot-demo.html
 
 # local tool-search eval artifacts (contain private session-derived request text)
 research/tool-search/*.local.*

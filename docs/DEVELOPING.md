@@ -1408,7 +1408,6 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
 | `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload. In the repo only; not published |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
-| `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |
 | `@matatbread/matbot-web-principal-user` | `WebPrincipalResolver` | Override the web frontend's request principal with the host OS user (`$USER`) |
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
@@ -1452,16 +1451,9 @@ behind `window.matbotTransport`:
 Node resolves to `index.ts` (the HTTP server); the assembler prefers `browser.js` (the
 in-process mount). One package, two runtimes, no duplicated UI.
 
-### Two bundles
+### Building
 
-| Output | Frontend | Purpose |
-|---|---|---|
-| `dist/matbot.html` | `frontend/web` (browser entry) | Full-featured UI — sessions, files, plugin manager |
-| `dist/matbot-demo.html` | `frontend/dom` | Minimal ~450-line demonstrator |
-
-```sh
-pnpm web-build    # builds both
-```
+`pnpm web-build` writes `dist/matbot.html`: `frontend/web`'s browser entry — sessions, files, plugin manager.
 
 ### The plugin model
 

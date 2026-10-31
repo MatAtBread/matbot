@@ -77,7 +77,6 @@ plugins/            — one directory per package, flat but for the frontend/pro
     mcp-http/      — HTTP/SSE MCP servers (cross-runtime); mcp/ adds stdio (node)
     frontend/
       web/         — HTTP+SSE server (node) + in-process (browser)
-      dom/         — minimal in-process browser chat
       telegram/    — Telegram bot frontend
     providers/
       anthropic/   — Anthropic Messages API adapter
