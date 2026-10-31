@@ -4,7 +4,7 @@ import type { ToolContract } from './tools.js';
 
 /*
  * Call contracts for the two builtin admin tools that have BOTH a node and a browser implementation —
- * `plugin` (@matatbread/matbot-tool-plugin, @matatbread/matbot-browser) and `provider` (likewise).
+ * `plugin` (@matatbread/matbot-cli, @matatbread/matbot-browser) and `provider` (likewise).
  *
  * They live here, rather than beside either implementation, for three reasons.
  *

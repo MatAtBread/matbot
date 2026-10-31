@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
 import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
-import { mirrorPath } from '@matatbread/matbot-tool-plugin/cache-layout';
+         planProvision, applyProvision } from '../src/plugins/index.js';
+import { mirrorPath } from '../src/plugins/cache-layout.js';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every

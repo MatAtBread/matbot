@@ -77,7 +77,7 @@ export function createHooks({ exclude = [] } = {}) {
   // `registerHooks()` also runs for `require()`, which `register()`'s hooks never saw, and CommonJS has rules
   // of its own for all four concerns: `require('/abs/x.json')` is a file, not a path on the plugin's origin,
   // a query string is not part of a file name, and a `.ts` it loads is not an ES module by fiat. Found in
-  // tool-plugin's dependency notes, whose absolute-path require from inside a fetched tree became a fetch.
+  // the plugin tool's dependency notes, whose absolute-path require from inside a fetched tree became a fetch.
   // So a require passes through, as it always has.
   const isRequire = context => context.conditions?.includes('require') ?? false;
 
@@ -154,7 +154,7 @@ export function createHooks({ exclude = [] } = {}) {
 
 // A bare import from inside a fetched plugin means "the host's copy". Node resolves it by walking up from
 // the cache directory, which finds a sibling plugin's self-link and the host singletons linked in beside it
-// (see linkHostSingletons in tool-plugin's remote-cache). This retry covers the rest: any other package the
+// (see linkHostSingletons in src/plugins/remote-cache.ts). This retry covers the rest: any other package the
 // HOST has that the cache tree cannot see, resolved as this file would resolve it.
 //
 // Deliberately NOT the mechanism for the singletons, which it cannot be: the only anchor available here is

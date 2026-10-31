@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, githubToHttps } from '@matatbread/matbot-tool-plugin';
+import { classifySpecifier, canonicalLocalSpecifier, fetchRemoteManifest, githubToHttps } from '../src/plugins/index.js';
 
 // Five acquisition kinds collapsed to three routes, each delegating resolution to whoever owns it:
 // local → the filesystem, npm → the package manager, http → the URL itself. Two of the old five were the

@@ -55,7 +55,7 @@ async function resolveAttachments(
  * This is the general case — name a provider to switch models, or leave it off to relay through the
  * model already in use. It lives in core (not in any plugin) because it is the model-facing surface of
  * a core service (`singleTurn`); core is also the one cross-runtime home both the node app and the
- * browser bundle register it from — the tool-plugin barrel (where `plugin`/`provider` live) is node-only.
+ * browser bundle register it from — the node `plugin`/`provider` tools live in the CLI, which a browser cannot import.
  */
 export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf<'single_turn'>> {
   const executor: ToolExecutor<ToolResultOf<'single_turn'>> = {

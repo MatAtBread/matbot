@@ -28,7 +28,7 @@ import { answerSelect, renderSelect }        from './select.js';
 import { FilesystemStorageBackend }        from '@matatbread/matbot-storage-filesystem';
 import { createBuiltinTools, createProviderTool, classifySpecifier, materializeRemote, remoteDependencyNotes,
          findDuplicateSingletons, describeDuplicateSingleton, pluginFingerprint, recordLoaded,
-         type MaterializedRemote } from '@matatbread/matbot-tool-plugin';
+         type MaterializedRemote } from './plugins/index.js';
 import { access, mkdir, readFile, writeFile }          from 'node:fs/promises';
 import { readFileSync, realpathSync }       from 'node:fs';
 import { createInterface }                 from 'node:readline/promises';

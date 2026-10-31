@@ -734,13 +734,18 @@ async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, 
 // (`resolveBase`, where the user's own deps live) first, then this module's own location — which can
 // always reach the core singletons (`@matatbread/matbot-core`/`-plugin-api`) that the host resolves
 // transitively but that may not be directly installed at the root under pnpm.
+// The host's own resolution: this module's, then core's. The CLI depends on core and not on plugin-api, so
+// the plugin-api the host runs is the copy CORE resolves (as register.js finds it too); asking from here
+// alone would find none and report every singleton as missing.
+const ownRequire       = createRequire(import.meta.url);
+const hostOwnRequires  = [ownRequire, createRequire(ownRequire.resolve('@matatbread/matbot-core'))];
+
 function hostRequires(resolveBase: string): NodeRequire[] {
-  return [createRequire(path.join(resolveBase, '_')), createRequire(import.meta.url)];
+  return [createRequire(path.join(resolveBase, '_')), ...hostOwnRequires];
 }
 
 /**
- * The copy of `name` THIS MODULE resolves — which is the copy the running host uses, since tool-plugin is
- * loaded by the host and peer-depends on the singletons.
+ * The copy of `name` the running host uses — the one this module, or core on its behalf, resolves.
  *
  * Deliberately not `hostPackageDirFrom(name, configDir)`: that chain tries the config dir first, which
  * answers "what would a plugin there get" — the opposite question. Asking it about the host mistakes a
@@ -748,7 +753,11 @@ function hostRequires(resolveBase: string): NodeRequire[] {
  * likely place for one to be.
  */
 export function hostOwnPackageDir(name: string): string | undefined {
-  return hostPackageDir(createRequire(import.meta.url), name);
+  for (const req of hostOwnRequires) {
+    const dir = hostPackageDir(req, name);
+    if (dir !== undefined) return dir;
+  }
+  return undefined;
 }
 
 /** The directory `name` resolves to FROM `resolveBase`, falling back to this module's own resolution.

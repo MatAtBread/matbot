@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderRegistryImpl, bindGate, checkProviderModel, closestIds, modelListed, CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
-import { createProviderTool } from '@matatbread/matbot-tool-plugin';
+import { createProviderTool } from '../src/plugins/index.js';
 import { AnthropicAdapter } from '@matatbread/matbot-provider-anthropic';
 import { OpenAICompatAdapter } from '@matatbread/matbot-provider-openai-compat';
 import { GoogleAdapter } from '@matatbread/matbot-provider-google';

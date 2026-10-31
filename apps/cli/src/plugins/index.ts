@@ -1,4 +1,4 @@
-import type { Tool } from '@matatbread/matbot-plugin-api';
+import type { Tool } from '@matatbread/matbot-core';
 export { pluginTool }           from './tools/plugin.js';
 // Exported to be tested against the error a real unresolved import throws: it reads a MESSAGE, and the
 // one it must read is thrown in apps/cli's ts-hooks, which no compiler ties to this regex.

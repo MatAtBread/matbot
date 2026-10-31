@@ -4,7 +4,7 @@ import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
 import { backfillPluginDescription }    from './plugin-description.js';
-import { addFlags, declaredDependencies, detectPackageManager, isPackageName, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
+import { addFlags, declaredDependencies, detectPackageManager, isPackageName, writeInstallRecord } from './plugins/index.js';
 
 // ── Shell runner ───────────────────────��───────────────────────────────���──────
 

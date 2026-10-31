@@ -41,6 +41,11 @@ churn and less likely to affect a consumer who doesn't use them.
   `toStandingAnswer` and `DEFAULT_GATE_SETTINGS_NS` are exported from `@matatbread/matbot-core`; import them
   from there. Behaviour is unchanged, and so is the settings namespace, `@matatbread/matbot-default-gate`:
   stored answers and `default_settings:` keyed by it keep working.
+- **`@matatbread/matbot-tool-plugin` is no longer published; its code is the CLI's** (`apps/cli/src/plugins`).
+  Both halves were CLI conventions rather than something another host could reuse: the `plugin` and
+  `provider` tools edit `matbot.yaml`, and acquisition fetches into `.plugins/` and installs with npm beside
+  it. Nothing changes for a CLI user. An application that imported it builds its own against its own
+  persistence, as the browser's tools do.
 
 ### API gaps filled
 

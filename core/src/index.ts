@@ -22,7 +22,7 @@ export { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey,
 // The `provider update` patch policy, alongside the vault's: written once in plugin-api so the hosts
 // that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
 // plugin-api dependency to get it.
-export { applyProviderPatch, movedCredentialKeys, movedCredentialNote, patchedFields, checkProviderModel, confirmUnlistedModel, modelListed, closestIds } from '@matatbread/matbot-plugin-api';
+export { applyProviderPatch, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, checkProviderModel, confirmUnlistedModel, modelListed, closestIds } from '@matatbread/matbot-plugin-api';
 export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT, permitted, refused, refusalMessage } from '@matatbread/matbot-plugin-api';
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.

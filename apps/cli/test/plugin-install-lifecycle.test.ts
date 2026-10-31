@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { notAPluginError, type ToolContext, type ToolEvent } from '@matatbread/matbot-core';
-import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '@matatbread/matbot-tool-plugin';
+import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '../src/plugins/index.js';
 
 const execFileP = promisify(execFile);
 

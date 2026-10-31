@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPlugins, isNotAPluginError, getFailedPlugins, recordFailedPlugin } from '@matatbread/matbot-core';
 import type { MatbotMachine } from '@matatbread/matbot-core';
-import { missingPackageOf } from '@matatbread/matbot-tool-plugin';
+import { missingPackageOf } from '../src/plugins/index.js';
 
 // Regression guard for the boot crash-loop: a non-plugin entry in matbot.yaml (a bare library
 // mistaken for a plugin) once threw out of the startup batch, exiting the process — which, under

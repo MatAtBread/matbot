@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile, readFile, access, realpath } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planProvision, applyProvision, discardProvision, isRegistryRange,
-         hostOwnPackageDir } from '@matatbread/matbot-tool-plugin';
+         hostOwnPackageDir } from '../src/plugins/index.js';
 import { spawn } from 'node:child_process';
 
 const runNpm = (args: string[], cwd: string): Promise<void> => new Promise((res, rej) => {

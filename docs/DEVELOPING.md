@@ -134,8 +134,8 @@ keep their type-only `@matatbread/*` imports in `devDependencies`.
 evaluating its top-level code — the only safe path for, e.g., a Node-only plugin reached from the
 browser — and a package that declares none is refused the same way, as not a plugin (since 0.5.0; it was
 imported on trust before). `discover_local` passes over such a package without importing it, and `plugin
-add` refuses one on every route. So a package of shared helpers that sits beside the plugins — matbot's
-own `tool-plugin` is such a library — simply omits the field. Declare it
+add` refuses one on every route. So a package of shared helpers that sits beside the plugins simply
+omits the field. Declare it
 honestly — a plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package
 and its cross-runtime base differ only by this field plus their imports.)
 
@@ -1375,7 +1375,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 
 | Package | Tools / Kind | Description |
 |---|---|---|
-| `@matatbread/matbot-tool-plugin` | `plugin`, `provider` · always loaded | Built-in: manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles |
+| `@matatbread/matbot-cli` (built in) | `plugin`, `provider` · always loaded | Manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles, persisted in `matbot.yaml`. The browser's are in `@matatbread/matbot-browser` |
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed), `bash_config` | Drop-in for bash, runs inside Docker; `bash_config` tunes the container at runtime |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |

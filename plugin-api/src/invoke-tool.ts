@@ -29,7 +29,7 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
  * Bind {@link ToolContext.gate} for a tool call, qualifying the suffix the tool supplies with the name
  * it is registered under: `ctx.gate({ gate: 'add', … })` from the `plugin` tool asks `plugin.add`.
  * Qualifying by TOOL name rather than package is what makes one policy cover both runtimes' versions
- * of a tool (node's `tool-plugin` and the browser's `plugin-tool` both register `plugin`), and what
+ * of a tool (the CLI's and the browser's `plugin-tool` both register `plugin`), and what
  * stops a plugin addressing a gate it does not own — tool-name collision on `register` is already
  * resolved, so the name is not something a second plugin can quietly claim.
  *

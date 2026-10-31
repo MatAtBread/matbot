@@ -1,7 +1,7 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ProviderRegistry, MatbotPlugin,
-              ProviderPatch, ProviderConfig } from '@matatbread/matbot-plugin-api';
+              ProviderPatch, ProviderConfig } from '@matatbread/matbot-core';
 
-import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-core';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';

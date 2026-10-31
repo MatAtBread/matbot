@@ -1,6 +1,6 @@
 import type { Tool, ToolExecutor, ToolEvent, ToolResultOf, ToolContext, MatbotPlugin, Runtime, PluginSource,
-              DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-plugin-api';
-import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-plugin-api';
+              DiscoveredPlugin, PermissionDecision } from '@matatbread/matbot-core';
+import { isIncompatibleRuntimeError, isNotAPluginError, refusalMessage } from '@matatbread/matbot-core';
 import { getRegisteredPlugins, getSpecifierForPlugin, getPluginNameForSpecifier, clearFailedPlugin, describePlugins, storeSecret } from '@matatbread/matbot-core';
 import { readFile, writeFile, access, readdir } from 'node:fs/promises';
 import { pathToFileURL, fileURLToPath }       from 'node:url';

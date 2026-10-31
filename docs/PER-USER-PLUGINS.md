@@ -174,7 +174,7 @@ override them. Their *implementation* lives in the app entry, not core
 But that openness is not a hole, because **`services.loadPlugin` is not reachable by the model** — it
 is plugin-code-facing. The model reaches it only *through a registered tool*
 ([runner.ts](../core/src/runner.ts) wraps it onto `ToolContext`; the built-in `plugin`
-tool calls `ctx.loadPlugin` in [tool-plugin/src/tools/plugin.ts](../plugins/tool-plugin/src/tools/plugin.ts)).
+tool calls `ctx.loadPlugin` in [apps/cli/src/plugins/tools/plugin.ts](../apps/cli/src/plugins/tools/plugin.ts)).
 So the real question is not "is the seam open?" but **"which registered tools reach it?"** In a stock
 config that is the always-present built-in `plugin` tool — which is exactly why Step 1 shadows it. The
 closure rests on one auditable assumption you now control: no manifest-listed plugin re-exposes
@@ -212,7 +212,7 @@ plugin-visibility ceiling is structural.
   sequentially; `registerPlugin` throws on duplicate names and the global `state` mutations don't
   interleave.
 - **Shadow, not omit.** The built-in `plugin` tool is hardcoded into `createBuiltinTools()`
-  ([tool-plugin/src/index.ts](../plugins/tool-plugin/src/index.ts)) and seeded before any config
+  ([apps/cli/src/plugins/index.ts](../apps/cli/src/plugins/index.ts)) and seeded before any config
   plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
   `resolveToolCollision` ([registry.ts](../core/src/registry.ts)), which declares the
   `tools.overwrite` gate with `fallback: true`: **non-interactive** (boot / HTTP installs, no

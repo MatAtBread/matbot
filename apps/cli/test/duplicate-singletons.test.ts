@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { findDuplicateSingletons, describeDuplicateSingleton } from '@matatbread/matbot-tool-plugin';
+import { findDuplicateSingletons, describeDuplicateSingleton } from '../src/plugins/index.js';
 
 // `plugin-api` and `core` are shared across the plugin/host boundary, and a second copy is a different
 // module object. matbot is hardened against that (state on `globalThis`, brand-checked errors), so the

@@ -2,7 +2,7 @@ import type { MatbotPlugin, PluginListResult, ToolContext, ToolSummary } from '@
 import { getRegisteredPlugins, getRegisteredTools, getRegisteredFrontendPlugins, getRegisteredServiceKeys,
          getHookPlugins, getSystemContextPlugins, getFailedPlugins } from './registry.js';
 
-// What the two `plugin` tools — node's in tool-plugin, the browser's in plugins/browser — answer the same
+// What the two `plugin` tools — node's in apps/cli, the browser's in plugins/browser — answer the same
 // way: everything read from the registries and the vault, rather than from a config file, a package
 // manager or an import map. Each was a copy of the other.
 

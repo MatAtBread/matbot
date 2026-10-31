@@ -43,8 +43,6 @@ core/              — @matatbread/matbot-core: agentic loop, hook dispatch, plu
                        ./providers-base — SSE parser, HTTP helpers (write a provider)
                        ./storage-base   — filter/sort engine, StoreQuery (write a storage backend)
 plugins/            — one directory per package, flat but for the frontend/providers/storage groups
-    tool-plugin/   — ALL of node's plugin support (node): the acquisition library the host drives,
-                     plus the `plugin`/`provider` tools over it. See "Acquisition vs. management" below
     rumsfeld/      — contextual_search + find_fact tools; knowledge fault handler
     persist-ki-bge/— persistent KnowledgeIndex + BGE reranker
     triggers/      — data-driven hooks (condition → tool invocation)
@@ -89,7 +87,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
       google-drive/  — Drive-backed StorageBackend (browser)
       profiles/      — per-principal partitioning over filesystem (node); profile_action, share
 apps/
-  cli/             — interactive REPL + single-turn
+  cli/             — interactive REPL + single-turn; node plugin acquisition and the `plugin`/`provider`
+                     tools, which edit matbot.yaml (src/plugins)
   web-bundle/      — browser-only matbot.html
 ```
 
@@ -102,17 +101,19 @@ runtime gate, the import, shape verification, identity stamping, register + setu
 list, name↔specifier mapping. Nothing about that is in a plugin, and core depends on nothing but
 `plugin-api`.
 
-Plugin **acquisition is `tool-plugin`'s**: turning a config string into something importable —
+Plugin **acquisition is the CLI's** (`apps/cli/src/plugins`): turning a config string into something importable —
 `classifySpecifier` (local / npm / http), materialising an http plugin into `.plugins/`, provisioning a
 local one's dependencies with npm, reporting a duplicated singleton. It cannot live in core, because every
 line of it is `node:fs`, `node:child_process`, `createRequire` and symlinks, and **core must run in the
 browser**. The browser's own acquisition is `apps/web-bundle`'s bootstrap (fetch → type-strip → `blob:`),
 and both hosts hand the neutral loader the same pre-resolved `{ spec, importSpec }`.
 
-So `tool-plugin` deliberately holds two things with two audiences: **the acquisition library, whose main
-consumer is `apps/cli`'s boot and not the tools at all**, and the LLM-facing `plugin`/`provider` tools.
-That is not drift awaiting a split — one half without the other has no use, and a package per concern would
-buy a name at the cost of a package. Expect to find ~800 lines in here that no tool calls.
+It is the CLI's rather than a library's because every part of it is a CLI convention, not a platform
+fact: the `plugin`/`provider` tools edit `matbot.yaml`, and acquisition writes `.plugins/` and installs
+with npm beside it. An embedder that wants none of that loads what is already installed (resolving the
+specifier itself — `import.meta.resolve` — and handing core `{ spec, importSpec }`); one that wants
+plugins added at run time builds that against its own persistence, as `plugins/browser`'s tools do against
+an injected list. The acquisition half's main consumer is the CLI's boot, not the tools.
 
 The seam a future split would use already exists and is deliberately short of acquisition:
 `PluginResolver` (`plugin-api/src/plugin.ts`) is the host-injected `identify`/`version`/`runtimes`, for
@@ -156,7 +157,7 @@ configured storage plugin's backend before any store exists, and `loaded()` runs
 **`matbotRuntime` is the plugin marker.** A package under `plugins/` is a plugin if and only if its
 `package.json` declares the runtimes it supports. The loader refuses an undeclared package before importing
 it, and discovery passes over one unimported, so a library that lives beside the plugins
-(`tool-plugin`, or a shared helper of your own) omits the field and is never mistaken for one —
+(a shared helper of your own) omits the field and is never mistaken for one —
 nothing has to run its top-level code to find out. core, plugin-api and the apps do not declare it either.
 
 ---
@@ -657,7 +658,7 @@ answered with the default". `ToolContext.prompt` keeps the stand-in exactly as b
 
 **`ctx.gate` takes the SUFFIX; the host qualifies it with the tool's registered name.** So a plugin
 cannot address a gate it does not own (tool-name collision on `register` closes the impersonation
-route), and one policy covers both runtimes' implementations of a tool — node's `tool-plugin` and the
+route), and one policy covers both runtimes' implementations of a tool — the CLI's and the
 browser's `plugin-tool` both register `plugin`; `mcp` and `mcp-http` both register `mcp_action`. The
 host reserves `tools.*` for core's own gates.
 
