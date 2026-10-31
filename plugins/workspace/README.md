@@ -2,4 +2,4 @@
 
 This is a [matbot](https://github.com/MatAtBread/matbot) plugin.
 
-Read, write, and list files in the session workspace. When the web frontend is running, all workspace files are also served as static read-only downloads at /workspace/<path> on the HTTP server, so you can give the user a direct link to any file you write there.
+Read, show, write, list and delete files in the session workspace. Files written here are viewable: when a frontend that serves files is running, ask it for a file's link (the web frontend's url_for_resource tool) rather than guessing a URL.

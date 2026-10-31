@@ -124,6 +124,9 @@ churn and less likely to affect a consumer who doesn't use them.
   longer removes the `plugin` tool. The list is read from where it was kept, so nothing is re-added. The
   plugin now only makes its backend nameable, and is bundled rather than loaded at start-up; its
   package adds `localExtraPlugins`, the pinned list the bundle uses.
+- **`workspace`** — its package description no longer tells the model files are served at
+  `/workspace/<path>`, a route the web frontend replaced with `/files/…` and which answers 404; it
+  points at the serving frontend's `url_for_resource` instead.
 
 - **`tool-types`** — the tools a host and `assembleMachine` register themselves (`plugin`, `provider`,
   `gate_action`, `about_matbot`, `single_turn`) are typed in an installed matbot. The scan found them only
