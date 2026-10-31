@@ -7,7 +7,7 @@
   "files": [
     "src"
   ],
-  "description": "matbot core runtime: agentic loop, hook dispatch, plugin loader, config, security, and knowledge. Exposes ./providers-base and ./storage-base for plugin authors.",
+  "description": "matbot core runtime: agentic loop, hook dispatch, plugin loader, boot assembly, security and the default permission policy, and knowledge. Exposes ./providers-base and ./storage-base for plugin authors.",
   "keywords": [
     "matbot",
     "matbot-core",
