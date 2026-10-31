@@ -118,6 +118,12 @@ churn and less likely to affect a consumer who doesn't use them.
   working directory and `.data` inside it. A data directory inside the project keeps its place in the
   container, so under the CLI scripts see `/app/.data/bash-cwd` as before; one outside it is mounted at
   `/data`.
+- **`browser`** / **web bundle** — the `plugin` tool and the list of plugins a user added are the web
+  bundle's, as the CLI's are, rather than the `browser` plugin's. The plugins a user added load after the
+  configured ones instead of inside the `browser` plugin's own load, and removing the `browser` plugin no
+  longer removes the `plugin` tool. The list is read from where it was kept, so nothing is re-added. The
+  plugin now only makes its backend nameable, and is bundled rather than loaded at start-up; its
+  package adds `localExtraPlugins`, the pinned list the bundle uses.
 
 - **`tool-types`** — the tools a host and `assembleMachine` register themselves (`plugin`, `provider`,
   `gate_action`, `about_matbot`, `single_turn`) are typed in an installed matbot. The scan found them only

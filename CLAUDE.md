@@ -120,8 +120,8 @@ It is the CLI's rather than a library's because every part of it is a CLI conven
 fact: the `plugin`/`provider` tools edit `matbot.yaml`, and acquisition writes `.plugins/` and installs
 with npm beside it. An embedder that wants none of that loads what is already installed (resolving the
 specifier itself — `import.meta.resolve` — and handing core `{ spec, importSpec }`); one that wants
-plugins added at run time builds that against its own persistence, as `plugins/browser`'s tools do against
-an injected list. The acquisition half's main consumer is the CLI's boot, not the tools.
+plugins added at run time builds that against its own persistence, as the web bundle's bootstrap does with
+`plugins/browser`'s `plugin` tool over a list in IndexedDB. The acquisition half's main consumer is the CLI's boot, not the tools.
 
 The seam a future split would use already exists and is deliberately short of acquisition:
 `PluginResolver` (`plugin-api/src/plugin.ts`) is the host-injected `identify`/`version`/`runtimes`, for
@@ -220,7 +220,7 @@ merge has no bounded semantics). No `${NAME}` resolution — secrets are the Vau
 
 **The defaults are consulted INSIDE `makePluginSettings`, not passed to it.** A parameter is a thing a
 call site forgets with no error and no symptom, and one already would: `plugins/browser` builds its own
-facade over a concrete backend to pin its plugin list across a `StorageBackend` swap. Same reasoning as
+facade over a concrete backend to pin the web bundle's plugin list across a `StorageBackend` swap. Same reasoning as
 the barrier living inside `machineBusy`.
 
 **The one silent failure is a key naming no loaded plugin** (the name is loader-derived and need not

@@ -9,11 +9,11 @@
   },
 
   "plugins": [
-    "plugins/browser",
     "plugins/frontend/web"
   ],
 
   "bundledPlugins": [
+    "plugins/browser",
     "plugins/http",
     "plugins/ask-user",
     "plugins/sessions",

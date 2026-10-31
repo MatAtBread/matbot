@@ -1374,7 +1374,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 
 | Package | Tools / Kind | Description |
 |---|---|---|
-| `@matatbread/matbot-cli` (built in) | `plugin`, `provider` · always loaded | Manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles, persisted in `matbot.yaml`. The browser's are in `@matatbread/matbot-browser` |
+| `@matatbread/matbot-cli` (built in) | `plugin`, `provider` · always loaded | Manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles, persisted in `matbot.yaml`. The browser's are built by the web bundle from `@matatbread/matbot-browser`'s exports |
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed), `bash_config` | Drop-in for bash, runs inside Docker; `bash_config` tunes the container at runtime |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
@@ -1417,7 +1417,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |
 | `@matatbread/matbot-storage-profiles` | storage backend + `profile_action`, `share` | Partitions selected namespaces per web principal over the filesystem backend, so each profile gets its own slice (Node; list it first in `matbot.yaml`) |
-| `@matatbread/matbot-browser` | storage + `plugin`/`provider` tools | Browser-native backends: IndexedDB Store, OPFS FileStore, WebCrypto vault, and browser plugin/provider management tools |
+| `@matatbread/matbot-browser` | storage | The IndexedDB + OPFS backend as a plugin. Its exports — IndexedDB Store, OPFS FileStore, WebCrypto and localStorage vaults, the browser `plugin`/`provider` tools — are what the web bundle boots on |
 
 ---
 

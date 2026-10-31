@@ -6,6 +6,7 @@ export { WebCryptoVault }        from './webcrypto-vault.js';
 export { LocalStorageVault }     from './local-vault.js';
 export { createBrowserPluginTool } from './plugin-tool.js';
 export type { ExtraPlugins }       from './plugin-tool.js';
+export { localExtraPlugins }       from './extra-plugins.js';
 export { createBrowserProviderTool } from './provider-tool.js';
 export type { ProviderAdmin, ProviderSummary, AvailableProvider, ProviderDraft } from './provider-tool.js';
 export { createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from './tool-types.js';

@@ -81,7 +81,7 @@ plugin add @matatbread/matbot-storage-google-drive
 
 On first activation you're prompted once for the Client ID and the root folder name (both saved to
 localStorage, since they're needed to *reach* Drive and so can't live in the Drive-backed settings).
-The browser plugin replays the activation on every subsequent boot.
+The web bundle loads it again on every subsequent boot, from its list of user-added plugins.
 
 ## Vault (secrets) also sync
 
@@ -102,7 +102,7 @@ Drive is connected.
 
 How it stays consistent with the unchanged local loader:
 
-- The browser build's boot-time loader is **untouched** — it still replays the local `extra-plugins`
+- The browser build's boot-time loader is **untouched** — it still loads the local `extra-plugins`
   list (IndexedDB), which is where this Google Drive plugin itself lives and how it boots.
 - On load, this plugin restores its **Drive** set on top, and installs the shadow `plugin` tool. The
   ordering is deliberate: local loader loads this plugin → this plugin restores its Drive set.

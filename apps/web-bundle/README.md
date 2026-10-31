@@ -63,16 +63,18 @@ host.
 
 ## What's a plugin here (not core)
 
-The web defaults are plugins, never core packages. The **auto-load core** (`matbot.web.json` →
-`plugins`) is kept minimal — just two:
+The **auto-load core** (`matbot.web.json` → `plugins`) is kept minimal — just one:
 
-- **`@matatbread/matbot-browser`** — the storage backend (IndexedDB `Store`s + OPFS `FileStore`),
-  the `LocalStorageVault`, and the browser `plugin` management tool. It also persists user-added
-  plugins and replays them on reload.
 - **`@matatbread/matbot-frontend-web`** (browser entry) — the full-featured in-process UI: the same
   `index.html` + `app.js` the Node server serves, mounted with no wire.
 
-Everything else browser-safe — `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
+What every browser install needs is the host's, not a plugin's: `bootstrap.ts` builds the storage
+backend (IndexedDB `Store`s + OPFS `FileStore`), the `LocalStorageVault`, and the `plugin` and
+`provider` tools from **`@matatbread/matbot-browser`**'s exports, and keeps the list of plugins a user
+adds and loads them again on reload — the same shape as the CLI, which builds its own from the
+filesystem. The `browser` plugin itself is bundled, and only makes that backend nameable.
+
+Everything else browser-safe — `browser`, `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
 `rumsfeld`, `triggers`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`,
 `json-validation`, `tool-store`, `function-tools`, `tool-router`, `cognition`, and the
 `storage/google-drive` backend — is **baked-but-idle** (`bundledPlugins`): in the artifact and the
