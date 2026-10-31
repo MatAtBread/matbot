@@ -96,6 +96,8 @@ apps/
   cli/             — interactive REPL + single-turn; node plugin acquisition and the `plugin`/`provider`
                      tools, which edit matbot.yaml (src/plugins)
   web-bundle/      — browser-only matbot.html
+examples/          — private, never published: programs using matbot as a dependency (minimal-matbot:
+                     core alone, stdin → chatjimmy → stdout). They import published package names only
 ```
 
 **Dependency direction:** `apps` → `plugins/*-node` → `plugins/*` → `core` → `plugin-api`, and `apps` → `host-node` → `core`. Nothing in `plugin-api/`, `core/`, `host-node/` or `plugins/` may depend on `apps/`, and no plugin imports `host-node`: it is for whoever stands a machine up. A storage backend lives in its plugin (`storage-filesystem`, `plugins/browser`, `storage-sqlite`), which a host imports to boot on. `apps/cli/test/core-alone.test.ts` and `embedder.test.ts` are a machine from core alone and from core + host-node + a storage plugin, each refusing to import anything else.

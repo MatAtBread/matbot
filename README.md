@@ -370,6 +370,7 @@ shipped as first-party plugins in this repo).
 | [MEDIA.md](docs/MEDIA.md) | How images, PDFs and audio reach a model — submission, storage and delivery, with the first-party plugins as templates |
 | [SECURITY.md](docs/SECURITY.md) | The threat model: what the permission gates protect, against whom, what remains open, and how to deploy |
 | [SSE-CLIENTS.md](docs/SSE-CLIENTS.md) | Writing a UI client (or reimplementing the server half): what the streams guarantee, and the failures that are invisible in testing |
+| [examples/](examples) | Small programs using matbot as a dependency, starting with a machine from `core` alone |
 | [CLAUDE.md](CLAUDE.md) | Design ethos, hard rules, and architectural intent — written for AI assistants working on the codebase, but essential reading for any contributor |
 
 ---

@@ -5,6 +5,7 @@ packages:
   - 'plugins/*'
   - 'plugins/*/*'
   - 'apps/*'
+  - 'examples/*'
 
 # pnpm >= 10 reads its own settings HERE, not from .npmrc, where these three lived and were silently
 # ignored (`pnpm config get link-workspace-packages` -> undefined). It went unnoticed because every

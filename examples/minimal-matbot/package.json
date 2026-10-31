@@ -1,0 +1,22 @@
+{
+  "name": "minimal-matbot",
+  "private": true,
+  "description": "Example: a machine from @matatbread/matbot-core alone, answering stdin through the chatjimmy provider.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning --import ./register.js index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@matatbread/matbot-core": "workspace:^",
+    "@matatbread/matbot-provider-chatjimmy": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
+  }
+}

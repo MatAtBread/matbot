@@ -1423,6 +1423,73 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 
 ---
 
+## Embedding matbot in a Node application
+
+The CLI is one host, not the only one. An application that wants an extensible interface to an LLM —
+with its own authentication, its own request handling, and perhaps a fixed set of plugins and no
+`plugin` tool at all — builds a machine itself from `@matatbread/matbot-core`, with
+`@matatbread/matbot-host-node` for what only Node can provide and a storage plugin's backend to boot on:
+
+```ts
+import { assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, installUsageCarrier, runAs,
+         invokeTool, toolResult, createSession } from '@matatbread/matbot-core';
+import { createAlsPrincipalCarrier, createAlsUsageCarrier, EnvFileVault, nodePluginMembers } from '@matatbread/matbot-host-node';
+import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
+
+// Carriers first: nothing in assembleMachine reads an identity, but the runner and every plugin will.
+installPrincipalCarrier(createAlsPrincipalCarrier());
+installUsageCarrier(createAlsUsageCarrier());
+
+const { services, loaded } = assembleMachine({
+  bootBackend: new FilesystemStorageBackend('/var/lib/myapp/data'),
+  vault:       await EnvFileVault.open('/var/lib/myapp/secrets.env', process.env),
+  providers:   new ProviderRegistryImpl([['claude', { name: 'claude', module: '@matatbread/matbot-provider-anthropic',
+                 model: 'claude-sonnet-4-6', credentials: { apiKey: '${ANTHROPIC_API_KEY}' } }]]),
+  version:     '1.0.0',
+  // Loads a path or an installed package; nothing is fetched or installed.
+  host: machine => ({ ...nodePluginMembers(machine, process.cwd()), isSubAgent: () => false }),
+});
+await services.loadPlugin('@matatbread/matbot-tool-whoami');
+loaded();
+
+// In a request handler, after your own authentication:
+app.post('/whoami', (req, res) => runAs({ id: req.user.id, type: 'user' }, async () =>
+  res.json(await toolResult(invokeTool(services, 'whoami', {}, { session: createSession(), signal: AbortSignal.timeout(30_000) })))));
+```
+
+Nothing here is a matbot convention: each piece takes the path it works on, and none assumes a
+`matbot.yaml`, a `.data` directory or a way of acquiring plugins — those are the CLI's. `gate` defaults
+to core's permission policy, which asks through whatever prompt channel a call has and, with none,
+answers each gate's own non-interactive default (see [DEFAULT-GATE.md](DEFAULT-GATE.md)); pass your own to
+decide differently. A turn is `services.run.open({ sessionId, provider, principal, content, signal })`
+under `runAs` of the same principal; its events are an `AsyncIterable`. Adding plugins at run time is
+the host's to build against its own persistence, as the CLI's `plugin` tool does against `matbot.yaml`
+and the browser's against a list in its storage. `apps/cli/test/embedder.test.ts` is a working example.
+
+**The floor is core alone.** `host-node` supplies a per-request principal and plugin resolution, and a
+storage plugin a medium; an embedder that wants none of those writes the rest in a few lines.
+`createConstantPrincipalCarrier` is one principal for the process, `VaultImpl` holds secrets from a map,
+and `MemoryStorageBackend` (`@matatbread/matbot-core/storage-base`) persists nothing. `loadPlugins`
+imports what it is given, so **resolve a specifier in your own module** — `import.meta.resolve(spec)` —
+and pass core the result: a bare name core resolved itself would be looked up beside core, where your
+dependencies are not (under pnpm it is simply not found). `import.meta.resolve` exists in browsers too,
+where it resolves through the page's import map. A provider's `module` reaches `loadPlugin` the same
+way, so a package name works and a path must name the entry file, not the directory.
+`apps/cli/test/core-alone.test.ts` is that host, and [examples/minimal-matbot](../examples/minimal-matbot)
+is the same as a program: stdin to a provider, the reply to stdout.
+
+**Running it needs two module hooks.** matbot's packages are published as TypeScript source that imports
+`./x.js` where the file is `./x.ts`. Node strips types itself, but it does not try `.ts` for a `.js` import,
+and it refuses to strip anything under `node_modules`. Run the application with
+`node --import @matatbread/matbot-host-node/register app.ts`; a host with hooks of its own registers the
+pair from `@matatbread/matbot-host-node/typescript-hooks` beneath them, as the CLI does (its own add hot
+reload and plugins fetched over http). The core-alone example writes the twenty lines out
+([register.js](../examples/minimal-matbot/register.js)) so as to need nothing but core. Every other test
+here runs under the CLI's stack, so only `host-node-register.test.ts` would catch an application that
+forgets this.
+
+---
+
 ## The browser bundle
 
 The browser build is a single self-contained `matbot.html` — the same platform-neutral
