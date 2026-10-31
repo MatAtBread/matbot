@@ -26,7 +26,7 @@ test('an undeclared key is named first when the call is refused anyway', async (
   const v = await validatorFor({ type: 'object', required: ['prompt'], properties: { prompt: { type: 'string' } } });
   const errs = await v.validateToolCall('background', { action: 'cancel', id: 'x' });
   assert.deepEqual(errs?.map(e => `${e.path}: ${e.message}`),
-    ['.action: not a declared property', '.id: not a declared property', '.prompt: required property missing']);
+    ['.action: unexpected property', '.id: unexpected property', '.prompt: required property missing']);
 
   // The schema admits undeclared keys, so on a call it otherwise accepts they are still no refusal.
   assert.deepEqual(await v.validateToolCall('background', { prompt: 'p', extra: 1 }), []);

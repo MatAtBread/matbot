@@ -34,11 +34,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Divergences accepted deliberately: `'<tool>.<property>': 'why'`. A check with no way to record an
 // intentional difference gets switched off wholesale the first time one is intentional.
 const ACCEPTED = {
-  'http.method':
-    'The two surfaces have different reach, so the type is deliberately the wider one. json-validation ' +
-    'runs on the `toolcall` hook, which only the model-driven turn loop dispatches — invokeTool (and so ' +
-    'the `tool` proxy a composition calls) goes straight to the executor. The schema enum is therefore a ' +
-    'guardrail on what the MODEL sends; the executor passes any verb to fetch, and a composition may use one.',
   'bash.cwd':
     'One contract serves both `bash` implementations. The local one advertises `cwd`; `docker-bash` runs in ' +
     'a fixed directory inside the container, so its schema omits it and its executor ignores it.',

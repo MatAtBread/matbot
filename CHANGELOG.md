@@ -68,6 +68,12 @@ churn and less likely to affect a consumer who doesn't use them.
   type-check or fit a tool's shape, a name it cannot use, an unknown action) is reported with code 422,
   as a validator's refusal is, so `POST /tools/tool_function` answers 422 instead of 500. A body that
   throws while running, a store failure, or no type-checker being available stays a server error.
+- **`json-validation`** — names an undeclared key in a refused call `unexpected property`, as
+  `ts-validation` does, so with both loaded a wrongly-named parameter (`command` for `bash`'s `script`) is
+  reported once instead of twice, each time with its own copy of the value.
+- **`http`** — the contract's `method` is the schema's seven verbs rather than `string`. Validation runs at
+  the executor since 0.5.0, so a composition's `tool.http({ method: 'PROPFIND' })` (or `'get'`) passed the
+  type-check and was then refused; it is now a type error at definition.
 
 - **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):
