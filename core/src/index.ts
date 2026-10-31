@@ -33,6 +33,9 @@ export { optionValue, optionLabel } from '@matatbread/matbot-plugin-api';
 // Binds `ctx.gate` for a hand-assembled ToolContext — anything standing a tool-invocation door up
 // outside the runner (frontend-web's `POST /tools/:name`) needs it, and gets it through core.
 export { bindGate, bindPluginOps } from '@matatbread/matbot-plugin-api';
+// Calling a tool from outside any turn — an embedding application's own request handler, as a frontend's
+// `POST /tools/:name` does — through every door's validation and gate, with no plugin-api dependency.
+export { invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
 export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';
 // Host boot assembly, from plugin-api's `/host` subpath. An embedding app gets these through core and

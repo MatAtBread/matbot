@@ -44,6 +44,11 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ### API gaps filled
 
+- **`MemoryStorageBackend`, `MemoryFileStore`** (`core/storage-base`) — a backend that persists nothing,
+  so core alone can stand a machine up: with `VaultImpl` and the constant principal carrier it needs no
+  other package, for a test, a short-lived embedder, or a single-principal one. `MemoryStore` gains `size`.
+- **`invokeTool`, `toolResult`, `toolText`** are re-exported by core as values, not only as types, so an
+  application calling a tool from its own request handler needs no direct plugin-api dependency.
 - **`assembleMachine`'s `gate` is optional**, defaulting to core's `defaultGate`, so an embedder that wants
   matbot's ordinary policy passes nothing.
 - **`plugin` and `provider` are declared in `ToolContracts` by plugin-api**, beside the shapes it already
