@@ -113,6 +113,11 @@ function isSeqItem(raw: string): boolean {
   return raw === '-' || raw.startsWith('- ');
 }
 
+// Does `next` start the value of the bare `key:` at `tok` — indented beneath it, or a flush-left sequence?
+function opensBlock(tok: Token, next: Token | undefined): boolean {
+  return next !== undefined && (next.indent > tok.indent || (next.indent === tok.indent && isSeqItem(next.raw)));
+}
+
 function parse(tokens: Token[], pos: number, baseIndent: number): { value: YamlValue; next: number } {
   if (pos >= tokens.length) return { value: null, next: pos };
 
@@ -176,6 +181,11 @@ function parse(tokens: Token[], pos: number, baseIndent: number): { value: YamlV
           ? lines.join('\n') + (lines.length > 0 ? '\n' : '')
           : lines.join(' ');
         i = j;
+      } else if (rest === '' && !opensBlock(tok, tokens[i + 1])) {
+        // `key:` with nothing beneath it is null, as YAML has it. Parsed as a block, the next sibling
+        // ended it at once and the key read as an empty MAPPING, so an emptied `plugins:` failed boot.
+        map[key] = null;
+        i++;
       } else if (rest === '') {
         const sub = parse(tokens, i + 1, tok.indent + 2);
         map[key]  = sub.value;
@@ -189,6 +199,44 @@ function parse(tokens: Token[], pos: number, baseIndent: number): { value: YamlV
   }
 
   return { value: parseScalar(first.raw), next: pos + 1 };
+}
+
+/** Where a top-level key's block sequence lies in `text`, for an editor that changes the list in place
+ *  rather than reprinting the file and losing its comments. Lines are indexes into `text.split('\n')`.
+ *  `items` are the sequence's own entries, with the value the parser reads from each; `end` is the last
+ *  line belonging to the sequence (an item's nested block included), so an append goes after it. */
+export interface SequenceLocation {
+  keyLine: number;
+  /** What follows the key on its own line, comment stripped: '' for a block sequence or an empty key. */
+  inline:  string;
+  items:   { line: number; value: YamlValue }[];
+  end:     number;
+}
+
+export function locateSequence(text: string, key: string): SequenceLocation | undefined {
+  const tokens = tokenize(text);
+  const at = tokens.findIndex(t => t.indent === 0 && !isSeqItem(t.raw) && t.raw.includes(':')
+    && unquote(t.raw.slice(0, t.raw.indexOf(':')).trim()) === key);
+  const keyTok = tokens[at];
+  if (keyTok === undefined) return undefined;
+  const location: SequenceLocation = {
+    keyLine: keyTok.line - 1,
+    inline:  keyTok.raw.slice(keyTok.raw.indexOf(':') + 1).trim(),
+    items:   [],
+    end:     keyTok.line - 1,
+  };
+  const first = tokens[at + 1];
+  if (location.inline !== '' || first === undefined || !isSeqItem(first.raw)) return location;
+  // The same boundary `parse` draws: a shallower token, or a non-item at the items' own column.
+  for (let i = at + 1; i < tokens.length; i++) {
+    const tok = tokens[i]!;
+    if (tok.indent < first.indent || (tok.indent === first.indent && !isSeqItem(tok.raw))) break;
+    if (tok.indent === first.indent) {
+      location.items.push({ line: tok.line - 1, value: tok.raw === '-' ? null : parseScalar(tok.raw.slice(2).trim()) });
+    }
+    location.end = tok.line - 1;
+  }
+  return location;
 }
 
 export function parseYaml(text: string): YamlMap {

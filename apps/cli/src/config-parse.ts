@@ -52,7 +52,7 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
 
   const credsRaw   = raw['credentials'];
   const credentials: Record<string, string> = {};
-  if (credsRaw !== undefined) {
+  if (credsRaw !== undefined && credsRaw !== null) {
     const credsMap = asRecord(credsRaw, `providers.${name}.credentials`);
     for (const [k, v] of Object.entries(credsMap)) {
       credentials[k] = asString(v, `providers.${name}.credentials.${k}`);
@@ -73,7 +73,7 @@ function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
     }
     config.maxRounds = rounds;
   }
-  if (raw['parameters'] !== undefined) {
+  if (raw['parameters'] !== undefined && raw['parameters'] !== null) {
     config.parameters = toModelParameters(asRecord(raw['parameters'], `providers.${name}.parameters`));
   }
 
@@ -134,7 +134,7 @@ export function parseConfig(
   const defaultSettings    = new Map<string, Readonly<Record<string, unknown>>>();
   if (defaultSettingsRaw !== undefined && defaultSettingsRaw !== null) {
     for (const [name, raw] of Object.entries(asRecord(defaultSettingsRaw, 'default_settings'))) {
-      defaultSettings.set(name, { ...asRecord(raw, `default_settings.${name}`) });
+      defaultSettings.set(name, raw === null ? {} : { ...asRecord(raw, `default_settings.${name}`) });
     }
   }
 

@@ -176,6 +176,12 @@ churn and less likely to affect a consumer who doesn't use them.
 - **`matbot install` adds a plugin whose name is a prefix of one already configured.** It took
   `- ./plugins/foo` as present when `- ./plugins/foobar` was listed, and wrote nothing — the fix `plugin
   add` already had; the two now share one writer. `matbot --help` lists the `install` subcommand.
+- **The `plugin` tool reads `matbot.yaml`'s plugin list as boot does.** It used regexes over the text, so
+  a comment line inside `plugins:` ended the list: `list` and `discover_local` missed every entry below
+  it, and `remove` could release cached files a later remote entry still used. A quoted entry was not
+  recognised, so `add` listed it twice, and an entry with a trailing comment could not be removed. Edits
+  still splice the text, keeping comments, and are checked by parsing the result. A key with nothing
+  beneath it (`plugins:` followed by `providers:`) now reads as empty rather than failing boot.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
 - **`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`

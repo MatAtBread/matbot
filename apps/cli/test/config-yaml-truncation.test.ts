@@ -24,6 +24,18 @@ providers:
   assert.deepEqual(doc['providers'], { p: { model: 'm' } });
 });
 
+test('a key with nothing beneath it is null, not an empty mapping', () => {
+  const doc = parseYaml(`plugins:
+providers:
+  p:
+    model: m
+last:
+`);
+  assert.equal(doc['plugins'], null);
+  assert.deepEqual(doc['providers'], { p: { model: 'm' } });
+  assert.equal(doc['last'], null);
+});
+
 test('a bare dash takes the block indented beneath it as its value', () => {
   const doc = parseYaml(`plugins:
   - '@a/b'
