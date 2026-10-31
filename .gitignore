@@ -2,6 +2,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 .NPM_TOKEN
+.nvm*
 
 # Local env files — never commit
 .env
