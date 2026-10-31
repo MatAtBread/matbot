@@ -122,8 +122,7 @@ churn and less likely to affect a consumer who doesn't use them.
   bundle's, as the CLI's are, rather than the `browser` plugin's. The plugins a user added load after the
   configured ones instead of inside the `browser` plugin's own load, and removing the `browser` plugin no
   longer removes the `plugin` tool. The list is read from where it was kept, so nothing is re-added. The
-  plugin now only makes its backend nameable, and is bundled rather than loaded at start-up; its
-  package adds `localExtraPlugins`, the pinned list the bundle uses.
+  plugin now only makes its backend nameable, and is bundled rather than loaded at start-up.
 - **`workspace`** — its package description no longer tells the model files are served at
   `/workspace/<path>`, a route the web frontend replaced with `/files/…` and which answers 404; it
   points at the serving frontend's `url_for_resource` instead.

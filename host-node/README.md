@@ -20,10 +20,10 @@ registers the pair from **`/typescript-hooks`** (`typescriptHooks()`) beneath th
   `createConstantPrincipalCarrier` is the alternative for a single-principal process.
 - `nodePluginMembers(machine, baseDir)` — `loadPlugin`, `unloadPlugin`, `resolver` and
   `TypeScriptStripper` for a host that loads plugins already on disk: a path (relative to `baseDir`), or a
-  package installed where `baseDir` resolves. Nothing is fetched or installed. Built from
-  `resolveInstalledPlugin`, `packageEntry`, `installedEntry`, `loadRequest`,
-  `loadPluginsWithDescriptions`, `unloadNodePlugin` and `nodePluginResolver`, which a host with its own
-  resolution uses directly.
+  package installed where `baseDir` resolves. Nothing is fetched or installed. A host that acquires
+  plugins itself resolves each specifier its own way and loads the result with
+  `loadPluginsWithDescriptions`; `nodePluginResolver`, `readPluginMeta` and `backfillPluginDescription`
+  are the other pieces the matbot CLI builds its own loading from.
 - `EnvFileVault.open(path, env?)` — a vault persisted to an environment file. Values are plaintext,
   readable by anything that can read the file. `parseEnvFile`/`readEnvFile` read the same format.
 

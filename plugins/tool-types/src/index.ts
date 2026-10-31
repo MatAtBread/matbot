@@ -1,12 +1,17 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName, splitContract } from '@matatbread/matbot-plugin-api';
 import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckOptions, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
 import type { ToolValidator } from './validator.js';
+
+// Where to resolve from when the host names no project: this package's own install, from which plugin-api,
+// core and `@types/node` all resolve. Never the working directory — a plugin is handed its directories.
+const OWN_DIR = fileURLToPath(new URL('..', import.meta.url));
 
 export {
   buildMatbotToolsDts, buildToolTypesData, collectToolTypeRoots, compileToolValidators, filterToolTypesData,
@@ -184,7 +189,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // Read before anything is awaited, with the live tool list: a change that lands while this builds
     // leaves the result stale, for the next caller to rebuild, instead of being marked seen.
     const generation = this.generation;
-    const root   = this.machine.projectDir ?? '.';
+    const root   = this.machine.projectDir ?? OWN_DIR;
     // Scan the source each loaded plugin was actually loaded from (its resolvedUrl) — builtin, compiled
     // (.compiled-plugins/), or installed (.plugins/) alike — so every registered tool's real augmentation
     // is read. build-dts UNIONs a glob of the monorepo `plugins/` tree onto these roots (not a fallback:
@@ -390,7 +395,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // relative one to a different string than the hook compares against — so `getSourceFile(virtual)`
     // missed, there were no files to check, and the snippet came back clean whatever was in it. A
     // checker that silently passes everything is the one failure mode this path must not have.
-    const root = resolve(this.machine.projectDir ?? '.');
+    const root = resolve(this.machine.projectDir ?? OWN_DIR);
     // Read ONCE, before anything else: the dts, the `paths`, the worker's restriction and the fingerprint
     // stamped below all have to describe one environment — the one this was graded against — not
     // whatever is current by the time each is computed.

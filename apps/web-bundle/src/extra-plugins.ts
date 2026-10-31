@@ -1,9 +1,9 @@
 import type { StorageBackend } from '@matatbread/matbot-plugin-api';
 import { makePluginSettings, type SettingsDoc } from '@matatbread/matbot-core';
-import type { ExtraPlugins } from './plugin-tool.js';
+import type { ExtraPlugins } from '@matatbread/matbot-browser';
 
 // Where the user's own `plugin add`s are kept: the browser analogue of matbot.yaml's `plugins:`. The
-// namespace is this package's name, which held the list when the plugin kept it rather than the host;
+// namespace is the browser plugin's package name, which held the list when the plugin kept it;
 // browsers that installed plugins then are read from where they wrote.
 const NAMESPACE = '@matatbread/matbot-browser';
 const KEY       = 'extra-plugins';

@@ -58,8 +58,8 @@ export async function loadRequest(spec: string, importSpec: string, baseDir: str
 
 /**
  * Resolve a plugin that is already where Node can import it: a path (relative to `baseDir`), or a package
- * installed where `baseDir` resolves. Nothing is fetched or installed — that is acquisition, which a host
- * opts into with `@matatbread/matbot-host-node/plugins`. A specifier that resolves to nothing passes
+ * installed where `baseDir` resolves. Nothing is fetched or installed — that is acquisition, which is the
+ * host's own (the CLI's is in `apps/cli/src/plugins`). A specifier that resolves to nothing passes
  * through, so the loader reports it.
  */
 export async function resolveInstalledPlugin(spec: string, baseDir: string): Promise<PluginLoadRequest> {

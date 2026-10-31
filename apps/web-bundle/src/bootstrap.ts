@@ -6,7 +6,8 @@ import {
 import type {
   MatbotMachine, ProviderConfig, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
 } from '@matatbread/matbot-plugin-api';
-import { BrowserStorageBackend, LocalStorageVault, createBrowserPluginTool, localExtraPlugins } from '@matatbread/matbot-browser';
+import { BrowserStorageBackend, LocalStorageVault, createBrowserPluginTool } from '@matatbread/matbot-browser';
+import { localExtraPlugins } from './extra-plugins.js';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
 import type { BrowserToolTypeIndexHandle } from '@matatbread/matbot-browser';
