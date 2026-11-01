@@ -1,9 +1,9 @@
 import { PLUGIN_API_VERSION, isReadOnlyError, notifyingStore, renderToolCheck as renderCheck } from '@matatbread/matbot-plugin-api';
 import type {
   JSONSchema, MatbotMachine, MatbotPluginSpec, MessageContent, Session, Store,
-  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckReport,
+  Tool, ToolContext, ToolEvent, ToolContract, ToolResultOf, ToolCheckOptions, ToolCheckReport,
 } from '@matatbread/matbot-plugin-api';
-import { buildAsyncFn, buildBodyFn, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CompiledFn } from './compile.js';
+import { buildAsyncFn, buildBodyFn, importRefusal, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CheckSubject, type CompiledFn } from './compile.js';
 import { DEFINITION_INVALID, DefinitionError, parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
 import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
@@ -156,6 +156,13 @@ function assertNoInjectedClash(params: ParsedParam[]): void {
 /** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
  *  types via {@link ToolTypeIndex.check}. A declared return type is Promise-wrapped and verified against the
  *  body; without one (a session function may omit it) TS infers it, still checking the body and its `tool` calls. */
+/** The check option that keeps a body from being graded against a module the gate refuses it — what the
+ *  call would refuse, for whoever the code runs as (see {@link importRefusal}). Empty with no runner. */
+async function refusedFor(machine: MatbotMachine, ctx: ToolContext, subjects: readonly CheckSubject[]): Promise<Pick<ToolCheckOptions, 'importRefused'>> {
+  const importRefused = await importRefusal(machine, ctx, subjects);
+  return importRefused !== undefined ? { importRefused } : {};
+}
+
 function checkSnippet(sig: ParsedSignature): string {
   if (sig.returnType === undefined) return `async function __fn(${sig.paramsText}) ${sig.body}`;
   const ret = /^Promise\s*</.test(sig.returnType) ? sig.returnType : `Promise<${sig.returnType}>`;
@@ -367,7 +374,10 @@ class FunctionStore {
     let checkedAgainst: string | undefined;
     let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(checkSnippet(sig), { parametersOf: ['__fn'] });
+      const report = await index.check(checkSnippet(sig), {
+        parametersOf: ['__fn'],
+        ...await refusedFor(this.machine, ctx, [{ tool: sig.name, compiled: definition, resolve: this.lineage.resolve }]),
+      });
       if (!report.ok) throw new DefinitionError(globalTypeError(report, sessionNames));
       // An index that cannot check says so, and a clean report from one proves nothing. The browser
       // registers such an index (for `dts()`), so trusting "an index was present" marked its definitions
@@ -413,7 +423,7 @@ class FunctionStore {
    *  makes it worth re-running is that the tool types are LIVE — a tool that changes its contract can
    *  invalidate a function that was sound when it was defined, and nothing else would notice, because a
    *  defined function is only compiled (never re-checked) on reload. */
-  async check(name?: string): Promise<CheckResult[]> {
+  async check(ctx: ToolContext, name?: string): Promise<CheckResult[]> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
 
@@ -435,7 +445,10 @@ class FunctionStore {
       // same treatment as one rather than a shape of its own: one row type, countable the same way.
       if (holder !== undefined) report = findingRow('SHADOWED', shadowedMessage(doc.id, holder, 'a defined function'));
       else {
-        try { report = await index.check(checkSnippet(parseSignature(doc.definition))); }
+        try {
+          report = await index.check(checkSnippet(parseSignature(doc.definition)),
+            await refusedFor(this.machine, ctx, [{ tool: doc.id, compiled: doc.definition, resolve: this.lineage.resolve }]));
+        }
         catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
       results.push({
@@ -551,7 +564,10 @@ class PackageStore {
     let checkedAgainst: string | undefined;
     let inputSchemas: Record<string, JSONSchema> | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(definition, { parametersOf: parsed.exports.map(e => e.name) });
+      const report = await index.check(definition, {
+        parametersOf: parsed.exports.map(e => e.name),
+        ...await refusedFor(this.machine, ctx, parsed.exports.map(e => ({ tool: e.toolName, compiled: definition, resolve: this.lineage.resolve }))),
+      });
       if (!report.ok) throw new DefinitionError(globalTypeError(report, sessionNames));
       checked = report.checked;
       checkedAgainst = report.environment;
@@ -578,7 +594,7 @@ class PackageStore {
     return { tools: parsed.exports.map(e => e.toolName), carried };
   }
 
-  async check(name?: string): Promise<CheckResult[]> {
+  async check(ctx: ToolContext, name?: string): Promise<CheckResult[]> {
     const index = this.machine.ToolTypeIndex;
     if (index === undefined) throw new Error('No type-checker is available here (e.g. the browser), so nothing can be checked.');
     let docs: PackageDoc[];
@@ -593,10 +609,12 @@ class PackageStore {
     for (const doc of docs) {
       let report: ToolCheckReport;
       try {
-        const shadowed = this.shadowed(doc.id, parsePackage(doc.id, doc.definition).exports.map(e => e.toolName));
+        const exported = parsePackage(doc.id, doc.definition).exports.map(e => e.toolName);
+        const shadowed = this.shadowed(doc.id, exported);
         report = shadowed.length > 0
           ? findingRow('SHADOWED', shadowed.map(s => shadowedMessage(s.tool, s.by, `package "${doc.id}"`)).join('\n'))
-          : await index.check(doc.definition);
+          : await index.check(doc.definition,
+              await refusedFor(this.machine, ctx, exported.map(tool => ({ tool, compiled: doc.definition, resolve: this.lineage.resolve }))));
       } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       results.push({
         name: doc.id, package: true, ...verdict(report),
@@ -727,7 +745,10 @@ class SessionFunctions {
     let checkedAgainst: string | undefined;
     let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }), { parametersOf: ['__fn'] });
+      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }), {
+        parametersOf: ['__fn'],
+        ...await refusedFor(this.machine, ctx, [{ tool: sig.name, compiled: definition, resolve: this.lineage.resolve }]),
+      });
       if (!report.ok) throw new DefinitionError(`type error(s) — fix and re-define, or pass noTypeCheck to bypass:\n${renderCheck(report)}`);
       checked = report.checked;
       checkedAgainst = report.environment;
@@ -762,7 +783,8 @@ class SessionFunctions {
       else {
         try {
           const sig = parseSignature(rec.definition);
-          report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: rec.name, contract: contractOf(sig) }));
+          report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: rec.name, contract: contractOf(sig) }),
+            await refusedFor(this.machine, ctx, [{ tool: rec.name, compiled: rec.definition, resolve: this.lineage.resolve }]));
         } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
       results.push({
@@ -857,10 +879,10 @@ WHERE A BODY RUNS
 By default a body is a plain async function inside matbot's own process: nothing bounds how long it runs,
 every global is in scope, and an import reaches the platform's own loader with nobody asked. Checks and
 limits come from a \`FunctionRunner\` — the service an installation registers to compile and run every
-body — which may bound its running time, withhold globals, restrict what it may import, and route each
-import through a permission prompt. The \`types\` action states which of these are in force HERE, and a
-body is type-checked against exactly that: what is not reachable does not type-check, so do not guess,
-and do not reach for \`noTypeCheck\` to get past it.
+body — which may bound its running time, withhold globals, and route each import through a permission
+prompt. The \`types\` action states which of these are in force HERE, and a body is type-checked against
+exactly that, including any module the user has refused it outright: what is not reachable does not
+type-check, so do not guess, and do not reach for \`noTypeCheck\` to get past it.
 \`fetch\`, \`AbortSignal\`, \`WebSocket\`, \`console\` and the timers are ordinary globals in a body, which no
 runner here withholds (\`types\` lists any that are). An HTTP request inside a body is therefore
 \`await fetch(url, { signal: context.signal })\` — not a tool call, and never a reason to install one.
@@ -1053,7 +1075,8 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             // parse and therefore no head to get wrong.
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true) {
-              const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools));
+              const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools),
+                await refusedFor(machine, ctx, [undefined]));
               if (!report.ok) { yield invalid(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
             yield* runFunction(machine, ctx, fn, [], { tool: `${TOOL_NAME} execute`, source: act.definition, gateSubject: EXECUTE_SUBJECT });
@@ -1082,10 +1105,10 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
                 : act.name !== undefined
                   ? (own !== undefined && !await store.has(act.name) ? await sessions.check(ctx, [own]) : none)
                   : await sessions.check(ctx, mine.values());
-              const results = act.package !== undefined ? await packages.check(act.package)
+              const results = act.package !== undefined ? await packages.check(ctx, act.package)
                 : act.name !== undefined
-                  ? (session.results.length > 0 ? session.results : await store.check(act.name))
-                  : [...await store.check(), ...await packages.check(), ...session.results];
+                  ? (session.results.length > 0 ? session.results : await store.check(ctx, act.name))
+                  : [...await store.check(ctx), ...await packages.check(ctx), ...session.results];
               for (const m of session.restamps) yield sessionMarker(m);
               // `ok` is qualified by `checked` here exactly as it is on a row: where no type-checker can
               // run (the browser registers an index that supplies types but checks nothing), every row

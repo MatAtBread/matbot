@@ -57,6 +57,12 @@ a second host's needs.
   additive, so a 0.4.x plugin loads. But each plugin peer-depends on `plugin-api` with a caret range, and
   on 0.x `^0.4.x` excludes 0.5.0, so npm refuses the install (`ERESOLVE`). Plugins with no change of their
   own are republished at 0.5.0 for that reason alone; upgrade them together with the CLI.
+- **`FunctionRunSettings.permittedImports` and `importPermitted` are removed from `plugin-api`.** What a
+  `tool_function` body may import is the permission gate's alone: a module refused outright is a standing
+  denial (`deny:tool_function.import`, e.g. `['* node:child_process']` for every function), not a list the
+  runner carries in front of the gate. `FunctionRunSettings` declares nothing now; a runner's own fields
+  (the node runner's time bound) ride on it as before. A runner that set `permittedImports` should drop
+  it — nothing reads it.
 - **A plugin cannot open the `settings` store, and removes only its own tools.** `settings` holds every
   plugin's settings, the default gate's standing answers among them, so a plugin able to open it could
   grant itself anything, and tool-store's `expose` let a model do exactly that. A plugin reaches its own
@@ -135,6 +141,11 @@ a second host's needs.
 
 ### API gaps filled
 
+- **`ToolCheckOptions.importRefused`** — whether the gate refuses the code being checked an import
+  outright. Whoever owns the import gate supplies it (`function-tools`, from one gate snapshot per check),
+  and a `ToolTypeIndex` declares no types for a refused module and reports a literal `import(…)` of one as
+  `IMPORT-GATE`. "Nobody decided" is not a refusal — that is asked at the call — so it is typed.
+
 - **`@matatbread/matbot-host-node`** (new) — what a Node application needs to embed matbot that core
   cannot hold, being Node-only, until now inside the CLI: the `AsyncLocalStorage` principal and usage
   carriers (so a server authenticating its own users can set a principal per request), `nodePluginMembers`
@@ -179,6 +190,22 @@ a second host's needs.
 
 ### Optional
 
+- **`function-runner-node`** — `permit_imports` is retired, and `function_runner_config` reads and sets
+  `timeoutMs` alone. An installation that authored it gets a warning naming the replacement, a standing
+  denial in the default gate's `default_settings:`, rather than its restriction silently becoming "ask at
+  the call"; `clear` forgets a stored override of it. It duplicated the gate, which can refuse a module
+  outright by rule and, once its "most specific wins" precedence lands, allow narrowly beneath a broad
+  denial.
+- **`tool-types`** — the modules a body is typed against are every builtin less those the gate refuses
+  it, and `IMPORT-GATE` refuses a literal import of any refused module, a package included: a package
+  resolves by ordinary lookup, so leaving it out of `paths` refused nothing. The checker's worker sends the
+  literal specifiers it found back to the main thread once and is told which are refused. The verdict
+  fingerprint no longer carries an import list (stored verdicts read `checkedElsewhere` once, until
+  `check` re-stamps them); a permission is the gate's to report at the call, not a type verdict's claim.
+- **`function-tools`** — every check (define, re-check, package, session, `execute`) passes
+  `importRefused`, asking under the subject the call would use, so the check refuses what the call would.
+  A redefinition is asked under its new version, so a grant or denial for its earlier versions is not
+  consulted until the edit is linked; the call sees both.
 - **`function-runner-node`** gains the **`ImportedModuleWrapper`** service: a seam by which a plugin
   interposes on a module a body is granted, before the body sees it. The import gate decides *whether* a
   body may import `node:fs`; a wrapper decides *what it can do* with it, asking through the importing

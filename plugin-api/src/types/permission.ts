@@ -55,8 +55,8 @@ export interface PermissionRequest {
    *
    * Only a stored subject ending at a boundary matches by prefix, never a bare string prefix, or a grant
    * for the file `/x/notes.txt` would also cover `/x/notes.txt.bak` and one for `lodash` would cover
-   * `lodash-es`. It is the boundary rule `importPermitted` applies to a module restriction. A policy still
-   * parses nothing: it compares strings at boundaries the call site names. A denial matches the same way.
+   * `lodash-es`. A policy still parses nothing: it compares strings at boundaries the call site names.
+   * A denial matches the same way.
    *
    * Set it only where the subjects really nest. An origin or a secret's name is not a hierarchy, and a
    * prefix there would let `https://api.x` cover `https://api.x.evil`.

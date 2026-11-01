@@ -145,13 +145,13 @@ test('a body is recompiled against the current runner, so one arriving later gat
   assert.equal(typeof direct['arch'], 'function', 'it imported node:os itself');
 
   // A runner registered afterwards must reach the same compiled function.
-  current = createVmFunctionRunner(0, { permit: ['node:'] });
+  current = createVmFunctionRunner(0);
   assert.deepEqual(await fn({ importModule: loader }, null, null, {} as never), { tagged: 'node:os' });
   assert.deepEqual(asked, ['node:os'], 'routed to the loader this call supplied');
 });
 
 test('a permitted import is gated, and the subject names the function as well as the module', async () => {
-  const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
+  const runner = createVmFunctionRunner(2000);
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   const ev = await run(host, machine(runner), `probe() { return import('node:os').then(m => typeof m.platform()); }`);
   assert.deepEqual(ev, { type: 'result', value: 'string' });
@@ -184,9 +184,9 @@ test('a submodule offers the directory AND the protocol, not one chosen by its s
     ['probe node:fs/promises', 'probe node:fs/', 'probe node:', '* node:fs/promises']);
 });
 
-test('with NOTHING configured the gate is still asked — a restriction is not a switch', async () => {
-  // The default must reach the prompt. An allow-list defaulting to empty refuses before anyone can be
-  // asked, which is the behaviour a permission prompt exists to replace.
+test('with NOTHING configured the gate is asked, not refused out of hand', async () => {
+  // The default must reach the prompt. A refusal is a standing answer in the gate, never a list in front
+  // of it that refuses before anyone can be asked.
   const runner = createVmFunctionRunner(2000);
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   const ev = await run(host, machine(runner), `probe() { return import('node:os').then(m => typeof m.platform()); }`);
@@ -205,23 +205,8 @@ test('a refused gate stops the import', async () => {
   assert.equal(asked.length, 1, 'the gate was consulted');
 });
 
-test('a configured restriction refuses outside its set without a prompt, and [] switches imports off', async () => {
-  // What a prompt cannot express: "never". A policy has no stored always-deny, so this is the only way.
-  const narrowed = createVmFunctionRunner(2000, { permit: ['node:crypto'] });
-  const outside = await run({ TypeScriptStripper: stripper, FunctionRunner: narrowed }, machine(narrowed),
-    `probe() { return import('node:fs'); }`);
-  assert.match((outside as { message: string }).message, /not permitted.*only: node:crypto/s);
-  assert.equal(asked.length, 0, 'nothing to ask about: asking would teach that answering yes decides it');
-
-  const off = createVmFunctionRunner(2000, { permit: [] });
-  const none = await run({ TypeScriptStripper: stripper, FunctionRunner: off }, machine(off),
-    `probe() { return import('node:os'); }`);
-  assert.match((none as { message: string }).message, /switched off/);
-  assert.equal(asked.length, 0);
-});
-
 test('a computed specifier reaches the gate as the string the body built', async () => {
-  const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
+  const runner = createVmFunctionRunner(2000);
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   const ev = await run(host, machine(runner), `probe() { const n = 'os'; return import('node:' + n).then(m => typeof m.platform); }`);
   assert.deepEqual(ev, { type: 'result', value: 'function' });
@@ -229,7 +214,7 @@ test('a computed specifier reaches the gate as the string the body built', async
 });
 
 test('an execute body keys as `execute`, and its label says the grant is that broad', async () => {
-  const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
+  const runner = createVmFunctionRunner(2000);
   asked.length = 0;
   const fn = await buildBodyFn({ TypeScriptStripper: stripper, FunctionRunner: runner },
     `{ return import('node:os').then(m => typeof m.platform()); }`);
@@ -248,23 +233,6 @@ test('a non-builtin grant says it covers the whole import closure and runs unsha
   await run(host, machine(runner), `probe() { return import('lodash-es').catch(() => 'absent'); }`);
   assert.match(asked[0]!.label, /everything it imports/);
   assert.match(asked[0]!.label, /full access, not the function's/);
-});
-
-test('a permit must match at a boundary, not as a bare string prefix', async () => {
-  // A permit names a thing; a bare startsWith let it admit a sibling whose name merely begins the same
-  // way, which is the whole value of naming one.
-  const runner = createVmFunctionRunner(2000, { permit: ['lodash', 'node:fs'] });
-  const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
-  const refused = async (spec: string): Promise<void> => {
-    const ev = await run(host, machine(runner), `probe() { return import(${JSON.stringify(spec)}); }`);
-    assert.match((ev as { message: string }).message, /not permitted/, spec);
-    assert.equal(asked.length, 0, `${spec} must not even be asked about`);
-  };
-  await refused('lodashhack/x.js');
-  await refused('node:fsx');
-  // …while the subpaths the permit does name still reach the gate.
-  await run(host, machine(runner), `probe() { return import('node:fs/promises').then(() => 1); }`);
-  assert.equal(asked[0]?.subject, 'probe node:fs/promises');
 });
 
 test('one decision per specifier per invocation, so a loop neither re-prompts nor re-reads', async () => {
@@ -314,7 +282,7 @@ test('a redefinition is a new subject: the version is a digest of what was compi
 });
 
 test('the withheld globals are undefined, and a real import() is inert', async () => {
-  const runner = createVmFunctionRunner(2000, { permit: ['node:'] });
+  const runner = createVmFunctionRunner(2000);
   const typeofs = runner.compile(`(async function () { return [typeof process, typeof globalThis, typeof Buffer, typeof require, typeof eval].join(','); })`);
   assert.equal(await typeofs(noLoader), 'undefined,undefined,function,undefined,undefined', 'Buffer is memory, not a capability');
   assert.deepEqual([...runner.withheldGlobals ?? []].slice(0, 2), ['process', 'globalThis'],
@@ -343,17 +311,15 @@ test('a body has no `this`, so the global it would be cannot hand back what is w
 });
 
 test('the synchronous bound still holds with the shadow wrapper in place', async () => {
-  const runner = createVmFunctionRunner(150, { permit: [] });
+  const runner = createVmFunctionRunner(150);
   const spin = runner.compile(`(async function () { while (true) {} })`);
   await assert.rejects(spin(noLoader), /synchronous work without an await/);
 });
 
 test('removing the time bound removes the TIME bound and nothing else', async () => {
   // `function_timeout_ms: 0` used to seed no runner at all, so a line of yaml about how long a body may
-  // compute silently discarded `function_imports.permit` — `permit: []` included, documented as the only
-  // way to say never — along with every withheld global and the inert `import()`.
-  const unbounded = createVmFunctionRunner(0, { permit: ['node:crypto'] });
-  assert.deepEqual([...(await unbounded.settings!()).permittedImports ?? []], ['node:crypto'], 'the restriction is still carried');
+  // compute silently discarded every withheld global and the inert `import()`.
+  const unbounded = createVmFunctionRunner(0);
 
   const typeofs = unbounded.compile(`(async function () { return [typeof process, typeof globalThis, typeof eval, typeof require].join(','); })`);
   assert.equal(await typeofs(noLoader), 'undefined,undefined,undefined,undefined', 'still withheld');
@@ -365,16 +331,16 @@ test('removing the time bound removes the TIME bound and nothing else', async ()
   const slow = unbounded.compile(`(async function () { const until = Date.now() + 250; while (Date.now() < until) {} return 'done'; })`);
   assert.equal(await slow(noLoader), 'done');
 
-  // The gate still runs, and still refuses what the restriction excludes.
-  const ev = await run({ TypeScriptStripper: stripper, FunctionRunner: unbounded }, machine(unbounded),
-    `probe() { return import('node:fs'); }`);
-  assert.match((ev as { message: string }).message, /not permitted.*only: node:crypto/s);
+  // The gate still runs.
+  await run({ TypeScriptStripper: stripper, FunctionRunner: unbounded }, machine(unbounded),
+    `probe() { return import('node:fs').then(() => 1); }`);
+  assert.equal(asked[0]?.subject, 'probe node:fs');
 });
 
-test('a path or a URL is refused without asking, whatever the restriction says', async () => {
-  // Downloading or placing code is a plugin install's job, not a body's. A path also defeats the permit's
-  // string match: `./lib/../../x` "starts with" `./lib/` and resolves outside it.
-  const runner = createVmFunctionRunner(2000, { permit: ['./lib/', 'lodash', 'https:'] });
+test('a path or a URL is refused without asking, whatever a policy has granted', async () => {
+  // Downloading or placing code is a plugin install's job, not a body's. A path also defeats any string
+  // match a standing answer makes: `./lib/../../x` "starts with" `./lib/` and resolves outside it.
+  const runner = createVmFunctionRunner(2000);
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   for (const spec of ['./lib/../../etc/x.mjs', '../x.js', '/etc/x.mjs', 'C:\\x.mjs', 'https://esm.sh/lodash',
                       'file:///etc/x.mjs', 'data:text/javascript,1', 'lodash/../../x', 'lodash/./x',
@@ -438,16 +404,6 @@ test('an unprefixed builtin is asked about as the builtin it loads', async () =>
   // A prefix-only builtin is a package without its prefix, so it is left alone.
   assert.equal(runner.canonicalImport?.('test'), 'test');
   assert.equal(runner.canonicalImport?.('fs/promises'), 'node:fs/promises');
-
-  // A restriction covers both spellings, written either way.
-  for (const permit of [['node:'], ['os'], ['node:os']]) {
-    const narrowed = createVmFunctionRunner(2000, { permit });
-    const h: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: narrowed };
-    for (const spec of ['os', 'node:os']) {
-      const out = await run(h, machine(narrowed), `probe() { return import('${spec}').then(m => typeof m.platform()); }`);
-      assert.deepEqual(out, { type: 'result', value: 'string' }, `${spec} under ${permit.join(',')}`);
-    }
-  }
 });
 
 test('a scoped package root is not offered as its whole scope', async () => {
@@ -461,26 +417,23 @@ test('a scoped package root is not offered as its whole scope', async () => {
     ['probe @aws-sdk/client-s3/dist/x', 'probe @aws-sdk/client-s3/dist/', '* @aws-sdk/client-s3/dist/x']);
 });
 
-test('one invocation reads the settings once, and both the gate and the bound answer from that read', async () => {
+test('one invocation reads the settings once, and the bound answers from that read', async () => {
   // Whose settings they are is the settings store's business — by principal, or not at all — so nothing
   // may be read at boot or cached across invocations. One read per invocation is correct by construction,
   // since an invocation has one principal throughout.
   let reads = 0;
-  let permit: readonly string[] | undefined = ['node:os'];
-  const runner = createVmFunctionRunner(2000, {}, () => { reads++; return Promise.resolve({ timeoutMs: 150, permit }); });
+  let timeoutMs = 2000;
+  const runner = createVmFunctionRunner(2000, {}, () => { reads++; return Promise.resolve({ timeoutMs }); });
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: runner };
   const ok = await run(host, machine(runner),
     `probe() { return Promise.all([import('node:os'), import('os'), import('node:os')]).then(ms => ms.length); }`);
   assert.deepEqual(ok, { type: 'result', value: 3 });
   assert.equal(reads, 1, 'one read for the whole invocation, however many imports it makes');
 
-  // The next invocation reads again, so a change applies with nothing rebuilt.
-  permit = ['node:crypto'];
-  const refused = await run(host, machine(runner), `probe() { return import('node:os'); }`);
-  assert.match((refused as { message: string }).message, /not permitted.*only: node:crypto/s);
-  assert.equal(reads, 2);
-
-  // The bound is the one that invocation read, not the one the runner was built with.
+  // The next invocation reads again, so a change applies with nothing rebuilt — and the bound is the one
+  // that invocation read, not the one the runner was built with.
+  timeoutMs = 150;
   const spun = await run(host, machine(runner), `probe() { for (;;) {} }`);
   assert.match((spun as { message: string }).message, /Stopped after 0.15s/);
+  assert.equal(reads, 2);
 });

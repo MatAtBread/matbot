@@ -33,8 +33,8 @@ export interface TypeScriptStripper {
  *
  * Absent ⇒ a consumer compiles the code itself however it can, which drops every part of this at once
  * and not just the bound: nothing is withheld from the body, `import()` reaches whatever the platform
- * natively resolves rather than the loader it was passed, and {@link FunctionRunSettings.permittedImports} has no carrier and
- * so restricts nothing. That is all a platform with no way to interrupt synchronous code
+ * natively resolves rather than the loader it was passed, and so no {@link PermissionGate} is asked
+ * about it. That is all a platform with no way to interrupt synchronous code
  * and no module hook (the browser) can do, and it is the browser's permanent state rather than a
  * misconfiguration. It is node's DEFAULT too: no host seeds a runner, so until an installation loads one
  * (`@matatbread/matbot-function-runner-node`, or its own) a body runs in the host's process with full
@@ -43,37 +43,17 @@ export interface TypeScriptStripper {
  */
 /**
  * One invocation's reading of a {@link FunctionRunner}'s configuration ({@link FunctionRunner.settings}).
- * A runner may carry its own fields beside these — the node runner's time bound — and reads them back
- * off the value handed to {@link FunctionRunner.compile}'s callable; a consumer reads only what is
- * declared here and otherwise passes the value through untouched.
+ * Opaque to a consumer, which reads nothing off it and passes it through untouched: the runner reads its
+ * own fields back (the node runner's time bound) off the value handed to {@link FunctionRunner.compile}'s
+ * callable.
+ *
+ * It declares nothing, deliberately. What a body may IMPORT was once a field here (`permittedImports`),
+ * which made a second, runner-borne refusal sit in front of the {@link PermissionGate} and duplicate it:
+ * a policy can refuse an import outright with a standing denial (`* node:child_process` for every
+ * function), and the type-check now derives the modules it declares from the policy in force
+ * ({@link ToolCheckOptions.importRefused}) instead of from a list the runner carried.
  */
-export interface FunctionRunSettings {
-  /**
-   * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
-   *
-   * **Absent ⇒ no restriction**, which is the default: every specifier may be asked about, and the
-   * per-import {@link PermissionGate} decision is the control. That way round because a gate that is
-   * never reached is not a gate — an allow-list defaulting to empty refuses before anyone can be asked,
-   * which is precisely the behaviour a permission prompt exists to replace. An empty array means the
-   * opposite of absent: nothing may be imported, and nobody is asked.
-   *
-   * What it is FOR is the case a prompt cannot express: a deployment that wants a module forbidden
-   * outright, with no human able to allow it. A policy has no stored "always deny" — a refusal is a
-   * decision about one act — so this is the only way to say "never", and it is installation authoring.
-   *
-   * It comes from the runner because the runner IS the execution environment, and because two consumers
-   * need one answer: the gate in front of the import, and the type index that declares the reachable set
-   * to the author. Each reads it once per invocation, through {@link FunctionRunner.settings}.
-   *
-   * An entry matches a specifier exactly, or as a prefix ending at a BOUNDARY — its own trailing `/` or
-   * `:`, or the next `/` in the specifier. So `node:` admits every builtin and `node:fs` admits
-   * `node:fs/promises`, while `lodash` does NOT admit `lodashhack`: a bare string prefix would let an
-   * entry admit a sibling whose name merely begins the same way, which is the whole value of naming one.
-   * It bounds what may be ASKED — it grants nothing by itself — and only ever among what
-   * {@link importableByName} admits, so an entry naming a path or a URL admits nothing.
-   */
-  readonly permittedImports?: readonly string[];
-}
+export interface FunctionRunSettings {}
 
 /** What one call of a compiled function is handed besides its own arguments. */
 export interface FunctionCall {
@@ -140,7 +120,7 @@ export interface FunctionRunner {
    * principal throughout, so one read at its start is correct by construction, and every part of it — the
    * gate, the type-check, the time bound — sees the same answer.
    *
-   * Absent ⇒ nothing to configure: no restriction.
+   * Absent ⇒ nothing to configure.
    */
   settings?(): Promise<FunctionRunSettings>;
   /**
@@ -162,8 +142,8 @@ export interface FunctionRunner {
    * The spelling `spec` loads as, where the runner's platform has two for one module: node loads `os` as
    * `node:os` whatever is installed, so asking about `os` and `node:os` separately asked twice about one
    * module, and described a builtin as a package that "runs with matbot's full access" along with
-   * everything it imports. A consumer canonicalises BEFORE deciding, so one grant, one restriction and
-   * one label cover both spellings. Only a runner can answer, because the set of builtins is its
+   * everything it imports. A consumer canonicalises BEFORE deciding, so one grant, one denial and one
+   * label cover both spellings. Only a runner can answer, because the set of builtins is its
    * platform's — `test` is a package to node, `node:test` the builtin.
    *
    * Absent ⇒ `spec` is taken as written.
@@ -187,8 +167,7 @@ export interface FunctionRunner {
    *
    * Stated here because only the runner knows, and a checker grading a body must REJECT them: a name
    * shadowed but not rejected typechecks and fails at the first call, which is the one failure a check
-   * gate exists to prevent. The second consumer of a list is why it is not kept privately, exactly as
-   * for {@link FunctionRunSettings.permittedImports}.
+   * gate exists to prevent. The second consumer of a list is why it is not kept privately.
    *
    * Absent ⇒ nothing is claimed, not that nothing is withheld.
    */
@@ -206,9 +185,9 @@ export const FUNCTION_TIMEOUT = 'FUNCTION_TIMEOUT';
  *
  * Downloading or placing code is what a plugin install is for. It is reviewed and versioned, and it has
  * its own gate. A body is too lightweight a thing to recommend it from. Paths are refused for a second
- * reason: they defeat {@link importPermitted}, which matches strings, so `./lib/../../x` "starts with"
- * `./lib/` and resolves outside it. A `.` or `..` segment in a package subpath is refused for the same
- * reason, because a package with no `exports` map resolves it as a path.
+ * reason: they defeat any rule that matches strings — a standing answer nests by prefix — so `./lib/../../x`
+ * "starts with" `./lib/` and resolves outside it. A `.` or `..` segment in a package subpath is refused
+ * for the same reason, because a package with no `exports` map resolves it as a path.
  *
  * The characters are an ALLOWLIST, because the resolver is a URL parser and decides what a dot segment is
  * by its own rules: `%2e%2e`, `.%2E` and `.<tab>.` are all `..` to it (the parser strips tabs and
@@ -224,23 +203,6 @@ export const importableByName = (spec: string): boolean =>
   && !/^[./]/.test(spec)
   && (spec.startsWith('node:') || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
   && !spec.split('/').some(seg => seg === '.' || seg === '..');
-
-/**
- * Whether {@link FunctionRunSettings.permittedImports} admits `spec` — the boundary rule that interface
- * documents, as a function, because two packages read the same list and must agree: `function-tools`
- * decides whether to ask about an import, and `tool-types` decides which modules to TYPE. They had a copy
- * each, and they drifted exactly where it hurts — `node:fs` admitted `node:fs/promises` at the gate while
- * the checker declared only `node:fs`, so a permitted subpath failed the check and needed `noTypeCheck`
- * to run at all.
- *
- * A prefix must end at a boundary: its own trailing `/` or `:`, or the next `/` in the specifier. A bare
- * `startsWith` let an entry admit a sibling whose name merely begins the same way, which is the whole
- * value of naming one. A specifier {@link importableByName} refuses is never admitted, whatever the list
- * says, since string matching cannot see what `..` does.
- */
-export const importPermitted = (permits: readonly string[], spec: string): boolean =>
-  importableByName(spec) && permits.some(p => spec === p
-    || (p.endsWith('/') || p.endsWith(':') ? spec.startsWith(p) : spec.startsWith(`${p}/`)));
 
 /**
  * One finding from {@link ToolTypeIndex.check} — the record, not a rendering of it.
@@ -323,6 +285,19 @@ export interface ToolCheckOptions {
    *  function or arrow) whose parameters to report on {@link ToolCheckReport.parameters}, read from the same
    *  program the check ran. */
   parametersOf?: readonly string[];
+  /**
+   * Whether an import of `spec` — canonical, as {@link FunctionRunner.canonicalImport} spells it — is
+   * REFUSED outright for the code being checked, by the {@link PermissionGate} in force: a standing
+   * denial, not "nobody decided" (that is asked at the call, and may well be allowed). The index then
+   * declares no types for a refused module and reports a literal `import(…)` of one at the check, so a
+   * body is not graded against a module it will never get.
+   *
+   * Supplied by whoever owns the import gate (`function-tools`), because the question is about one
+   * function's imports under one gate and the index knows neither — it only consults the answer. Taken
+   * from one {@link PermissionGate.snapshot} per check. Absent ⇒ nothing is refused here, which is the
+   * truth wherever no runner routes a body's imports to a gate.
+   */
+  importRefused?: (spec: string) => boolean;
 }
 
 /**
@@ -384,15 +359,16 @@ export interface ToolTypeIndex {
   wireContracts(): Promise<Record<string, { params: string; result: string }>>;
   /**
    * A fingerprint of everything a {@link check} verdict depends on APART from the snippet and the live
-   * tool types — in practice the `FunctionRunner` that will run the code: whether there is one, what it
-   * permits a body to import, and which globals it does not bind. Opaque: a consumer compares it for
-   * equality and never parses it.
+   * tool types — in practice the `FunctionRunner` that will run the code: whether there is one, and
+   * which globals it does not bind. Opaque: a consumer compares it for equality and never parses it.
    *
    * It exists because a stored verdict is a claim about an environment, and the environment can be
-   * swapped out from under it — unload the runner plugin, or narrow its permitted imports, and a body
-   * that passed stays marked as having passed while its `import(…)` is no longer gated, or no longer
-   * allowed at all. The tool types are deliberately NOT in it: those are live and `check` is how a
-   * caller re-verifies against them, whereas this names the thing a re-check cannot be prompted by.
+   * swapped out from under it — unload the runner plugin, and a body that passed stays marked as having
+   * passed while its `import(…)` is no longer gated. The tool types are deliberately NOT in it: those are
+   * live and `check` is how a caller re-verifies against them, whereas this names the thing a re-check
+   * cannot be prompted by. Nor are permissions ({@link ToolCheckOptions.importRefused}): a verdict that
+   * passed refused none of the body's imports, and whether one is refused LATER is the gate's to say at
+   * the call, with a refusal that names its source — a type verdict is not a claim about permission.
    *
    * Stable across restarts, so never identity-derived, and derived at the point of use like everything
    * else read off the runner — there is nothing here to invalidate or subscribe to.

@@ -44,14 +44,14 @@ const SHADOWED = [...WITHHELD, ...PHANTOM] as const;
 // another function before its first await, inside the outer script — each run taking its own thunk.
 const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})].pop()()`, { filename: BODY_FILE });
 
-/** This runner's reading of its settings: the declared restriction, plus the time bound only it reads. */
+/** This runner's reading of its settings: the time bound, which only it reads. */
 export interface VmRunSettings extends FunctionRunSettings {
   readonly timeoutMs: number;
 }
 
 /** Where the settings come from, if not the fixed values the runner was built with. Called once per
- *  invocation ({@link FunctionRunner.settings}); `permit` undefined means no restriction. */
-export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: readonly string[] | undefined }>;
+ *  invocation ({@link FunctionRunner.settings}). */
+export type ReadRunnerSettings = () => Promise<{ timeoutMs: number }>;
 
 /**
  * A {@link FunctionRunner} over `node:vm`: runs in THIS context, so a body keeps the globals it has today
@@ -91,14 +91,12 @@ export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: read
  *
  * `limitMs` of `0` removes the TIME bound and nothing else. That matters because the two were once the
  * same switch: a timeout of `0` seeded no runner at all, which is a documented way to run bodies
- * unbounded — and silently took the import restriction with it, the empty list included, along with the
- * withheld globals and the inert `import()`. One line of yaml about how long a body may compute is not
+ * unbounded — and silently took the withheld globals and the inert `import()` with it. One line of yaml about how long a body may compute is not
  * an answer to what a body may reach.
  */
 export function createVmFunctionRunner(
   limitMs = FUNCTION_SYNC_LIMIT_MS,
   imports: {
-    permit?: readonly string[];
     projectDir?: string;
     /** Mediate a granted module before the body sees it (the `ImportedModuleWrapper` registry's
      *  `apply`). Called with the canonicalised specifier, the loaded module and the importing invocation;
@@ -114,23 +112,10 @@ export function createVmFunctionRunner(
   const canonical = (spec: string): string => !spec.includes(':') && isBuiltin(spec) ? `node:${spec}` : spec;
   const slot = globalThis as unknown as Record<symbol, Array<() => Promise<unknown>> | undefined>;
   const stack = (slot[Symbol.for(PENDING)] ??= []);
-  const settingsOf = (timeoutMs: number, permit: readonly string[] | undefined): VmRunSettings => ({
-    timeoutMs,
-    // Absent must stay ABSENT, not become `[]`: an empty list is the configured "never", while no key at
-    // all means unrestricted-and-ask. Collapsing the two is what made an unconfigured install refuse
-    // every import without a prompt.
-    // Entries are canonicalised as specifiers are, or `['os']` would stop admitting the `os` the gate now
-    // asks about as `node:os`. A trailing `/` is the entry's boundary marker, so it is kept off and back on.
-    ...(permit !== undefined
-      ? { permittedImports: permit.map(p => p.endsWith('/') ? `${canonical(p.slice(0, -1))}/` : canonical(p)) }
-      : {}),
-  });
-  const fixed = settingsOf(limitMs, imports.permit);
+  const fixed: VmRunSettings = { timeoutMs: limitMs };
   return {
-    async settings() {
-      if (read === undefined) return fixed;
-      const { timeoutMs, permit } = await read();
-      return settingsOf(timeoutMs, permit);
+    async settings(): Promise<VmRunSettings> {
+      return read === undefined ? fixed : { timeoutMs: (await read()).timeoutMs };
     },
     // Reached only after the gate has allowed this specifier for this function, so it checks nothing of
     // the gate's. It does refuse a path or a URL, which the gate never passes: a body imports builtins and

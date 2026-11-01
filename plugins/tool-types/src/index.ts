@@ -1,9 +1,9 @@
 import { dirname, join, resolve } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { builtinModules, createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, importPermitted, importableByName, splitContract } from '@matatbread/matbot-plugin-api';
-import type { FunctionRunSettings, FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckOptions, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, RegistryChangeKind, contractArms, splitContract } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckOptions, ToolCheckReport, ToolTypeIndex } from '@matatbread/matbot-plugin-api';
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
@@ -131,16 +131,12 @@ export const buildToolTypes: ToolTypesFill = i =>
  * already declares is skipped, so nothing is declared twice. `declare const tool: ToolProxy` (mapped over
  * the merged `ToolContracts`) plus its override factory `toolInContext` is what generators call.
  */
-/** The two arrays a runner states, printed: a stable fingerprint of the environment a check's verdict
- *  was reached under, for a caller that PERSISTS the verdict (`function-tools` stores one beside each
- *  definition and compares it). Sorted and printed rather than identity-derived, because it has to
- *  survive a restart — unlike the `paths` cache, whose job is the opposite and which keys on the array
- *  itself. */
-function fingerprintOf(runner: FunctionRunner | undefined, settings: FunctionRunSettings | undefined): string {
+/** What a runner states, printed: a stable fingerprint of the environment a check's verdict was reached
+ *  under, for a caller that PERSISTS the verdict (`function-tools` stores one beside each definition and
+ *  compares it). Sorted and printed rather than identity-derived, because it has to survive a restart. */
+function fingerprintOf(runner: FunctionRunner | undefined): string {
   if (runner === undefined) return 'no-runner';
-  const permit = settings?.permittedImports;
-  return `permit=${permit === undefined ? '*' : [...permit].sort().join(',')};`
-       + `withheld=${[...(runner.withheldGlobals ?? [])].sort().join(',')}`;
+  return `withheld=${[...(runner.withheldGlobals ?? [])].sort().join(',')}`;
 }
 
 export class ToolTypeIndexImpl implements ToolTypeIndex {
@@ -163,9 +159,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     //
     // A `FunctionRunner` arriving or leaving deliberately does NOT, though it is the obvious thing to
     // reach for now that the runner is a plugin and can appear after a dts has been handed out. Nothing
-    // derived from it is held: each `dts`/`check`/`environment` reads the runner and its settings once at
-    // its start, and the one cache over them — {@link importPaths} — keys on the permit list's CONTENT,
-    // so a different list is a different key. What IS cached is the source scan, which the
+    // derived from it is held: each `dts`/`check`/`environment` reads the runner once at its start, and
+    // the one cache near it — {@link importPaths} — keys on the refused set's CONTENT, so a different
+    // answer is a different key. What IS cached is the source scan, which the
     // runner has no part in. Subscribing would throw away a good TypeScript build every time the runner
     // was registered or hot-reloaded, to recompute something that was never stale.
     machine.Notifier.consume(() => { this.generation++; }, this.ac.signal,
@@ -220,17 +216,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     this.builtFor   = generation;
   }
 
-  /** The runner and its settings, read once for one invocation of this index — a `dts`, a `check` — and
-   *  passed to everything inside it. Per invocation, never cached: whose settings they are depends on how
-   *  the settings store is partitioned, and the next invocation may be another principal's. */
-  private async runnerNow(): Promise<{ runner: FunctionRunner | undefined; settings: FunctionRunSettings | undefined }> {
-    const runner = this.machine.FunctionRunner;
-    return { runner, settings: await runner?.settings?.() };
-  }
+  async dts(): Promise<string> { return this.dtsUnder(this.machine.FunctionRunner); }
 
-  async dts(): Promise<string> { return this.dtsUnder(await this.runnerNow()); }
-
-  private async dtsUnder(env: { runner: FunctionRunner | undefined; settings: FunctionRunSettings | undefined }): Promise<string> {
+  private async dtsUnder(runner: FunctionRunner | undefined): Promise<string> {
     await this.ensureBuilt();
     // `tool` — the injected proxy `function-tools`/compiled skills call — is a `ToolProxy`, a mapped type
     // over the (augmented) `ToolContracts`: each multi-arm entry becomes an overload set, so `await
@@ -244,7 +232,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // checker agreed. It names what is permitted HERE, from the live set, rather than claiming imports
     // work in general — a module outside the set does not resolve, which is the whole point of scoping
     // the types to it. `require` and the rest are rejected by the env gate, not left to fail at a call.
-    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n${await this.importNote(env.runner, env.settings)}`;
+    return `${this.registryBlock(this.cache!)}\ndeclare const tool: import('@matatbread/matbot-plugin-api').ToolProxy;\ndeclare const toolInContext: import('@matatbread/matbot-plugin-api').ToolBox;\ndeclare const context: import('@matatbread/matbot-plugin-api').ComposedCallContext;\n${this.importNote(runner)}`;
   }
 
   async wireContracts(): Promise<Record<string, { params: string; result: string }>> {
@@ -259,120 +247,46 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
   }
 
   /**
-   * `paths` for the modules this installation permits a body to import, so `await import('node:os')` is
-   * checked against the real signatures and a module outside the permitted set simply does not resolve.
-   *
-   * The set is read off the {@link FunctionRunner}, which is where it lives because the runner IS the
-   * execution environment and two consumers need one answer — the capability that imports, and this,
-   * which types it. An absent restriction means every builtin: a body may ASK for anything and the gate
-   * decides, so refusing to type what it may legitimately ask for would make the prompt unreachable.
-   * Resolved from THIS package, where `@types/node` is a dependency: the program is
+   * `paths` for the builtins a body may import, so `await import('node:os')` is checked against the real
+   * signatures — every builtin, less any the permission gate REFUSES the code being checked
+   * ({@link ToolCheckOptions.importRefused}). Not the set it would ALLOW: anything the gate has not
+   * refused may be asked for, and refusing to type what a body may legitimately ask for would make the
+   * prompt unreachable. Resolved from THIS package, where `@types/node` is a dependency: the program is
    * rooted at the `matbot.yaml` directory, which under pnpm and in any published install has no
    * `node_modules/@types` in its lookup chain, so nothing would resolve from there.
    *
    * A builtin gets its real declaration file. A bare package name is left to ordinary resolution: if it
-   * is installed it types properly, and if it is not, the error is honest.
+   * is installed it types properly, and if it is not, the error is honest. A refused one is IMPORT-GATE's.
    *
    * A path or a URL gets nothing, because a body cannot import one at all (`importableByName`), and
    * IMPORT-GATE says so at the check.
    */
-  /** {@link importPaths} is read twice per check — once for the program's `paths`, once by {@link
-   *  importNote} through the dts — and it walks every builtin with a stat apiece. Cached against the
-   *  CONTENT of the permit list it was computed from: settings are read afresh per invocation, so each
-   *  read is a new array and an identity key would never hit. */
+  /** It walks every builtin with a stat apiece, so it is cached against the CONTENT of the refused set:
+   *  the gate is read afresh per check, and nearly always refuses the same builtins (usually none). */
   private pathsFor?: { key: string; paths: Record<string, string[]> };
 
-  private async importPaths(restricted: readonly string[] | undefined): Promise<Record<string, string[]>> {
-    const key = restricted === undefined ? '*' : JSON.stringify(restricted);
+  private async importPaths(refused: ReadonlySet<string>): Promise<Record<string, string[]>> {
+    const key = [...refused].sort().join(',');
     if (this.pathsFor !== undefined && this.pathsFor.key === key) return this.pathsFor.paths;
-    const paths = await this.computeImportPaths(restricted);
+    const paths = computeImportPaths(refused);
     this.pathsFor = { key, paths };
     return paths;
   }
 
-  private async computeImportPaths(restricted: readonly string[] | undefined): Promise<Record<string, string[]>> {
-    // Absent ⇒ unrestricted, so every builtin is typed and the gate decides each import at the call. A
-    // configured restriction narrows this to its own subset, which is what makes a forbidden module a
-    // COMPILE error rather than something that typechecks and is refused later.
-    if (restricted?.length === 0) return {};
-    const { builtinModules } = await import('node:module');
-    const req = createRequire(import.meta.url);
-    const nodeTypes = dirname(req.resolve('@types/node/package.json'));
-    const out: Record<string, string[]> = {};
-    // Every builtin tested against the shared boundary rule, rather than an entry's own spelling being
-    // expanded here: `node:fs` admits `node:fs/promises` at the gate, so it must TYPE the submodule too.
-    // Emitting the exact specifier alone left a permitted import failing the check, reachable only with
-    // `noTypeCheck` — the one divergence between what runs and what is graded.
-    // What the GATE would allow, which is the only set worth typing: unrestricted admits any spelling, a
-    // restriction admits what its boundary rule admits. Anything else is a divergence between what runs
-    // and what is graded, in one direction or the other.
-    const allowed = (spec: string): boolean => restricted === undefined || importPermitted(restricted, spec);
-    for (const m of builtinModules) {
-      if (m.startsWith('_')) continue;
-      // Some entries ALREADY carry the prefix — node:sea, node:sqlite, node:test, node:test/reporters,
-      // which have no unprefixed spelling — so prefixing unconditionally wrote `node:node:sqlite`, and
-      // those four got no entry at all. `await import('node:sqlite')` then failed the check with tsc's
-      // "install type definitions for node", which is the message IMPORT-GATE exists to replace.
-      const prefixed = m.startsWith('node:');
-      const bare = prefixed ? m.slice('node:'.length) : m;
-      const file = declarationFile(nodeTypes, bare);
-      if (file === undefined) continue;
-      if (allowed(`node:${bare}`)) out[`node:${bare}`] = [file];
-      // The UNPREFIXED spelling too, where node has one: `import('os')` resolves to `node:os` at run
-      // time, and a bare specifier is the spelling a model reaches for first. Allowed by the PREFIXED
-      // spelling, because that is what the gate asks about (`canonicalImport`) — so `['node:']` types
-      // `os`, as the gate admits it.
-      if (!prefixed && allowed(`node:${bare}`)) out[bare] = [file];
-    }
-    return out;
-  }
-
-  /** The part of the dts that is about imports: which modules this install permits AND which of those
-   *  have types, that second half being this package's own knowledge. Everything else about the
-   *  environment — the gate, what is not in scope — is the runner's to state, and is appended verbatim. */
-  private async importNote(runner: FunctionRunner | undefined, settings: FunctionRunSettings | undefined): Promise<string> {
-    const restricted = settings?.permittedImports;
-    const typed = new Set(Object.keys(await this.importPaths(restricted)));
-    // "Switched off" is `permit: []` and nothing else — the one configured "never". Derived from the
-    // TYPED set instead, it fired for any restriction naming no builtin (`permit: ['lodash']`), telling
-    // an author imports were off while the gate was perfectly willing to ask about one.
-    // An entry is typed if it names a declaration itself or admits one — `node:` and `node:fs` both do,
-    // through their submodules. A bare package admits none, which is a stated refusal rather than a fake
-    // type, so the listing says so where the author will read it.
-    const covered = (p: string): boolean => typed.has(p) || [...typed].some(t => importPermitted([p], t));
-    // The EXPANDED set, because a prefix is not an answer: `node:` tells an author nothing about which
-    // builtins exist, and `node:fs` hides that `node:fs/promises` came with it. Restriction entries that
-    // admit no declaration at all are listed after it, marked — a bare package is untypeable here, which
-    // is a stated refusal rather than a fake type, and the author needs to know which it is.
-    // A bare `node` is the one entry that is not merely untypeable but unimportable: the boundary rule
-    // reads it as a PACKAGE of that name (it admits `node/sub`, never `node:os`), so an install meaning
-    // the builtins and missing the colon permits nothing a body can use. Listing it as "untyped —
-    // import it only with noTypeCheck" invited exactly the attempt that cannot work, so it says what it is.
-    // A path or a URL is unimportable outright, whoever's runner listed it: the gate never asks about one.
-    const mark = (p: string): string => p === 'node'
-      ? `${p}   (a PACKAGE of that name — not node's builtins, which are spelled 'node:fs'; nothing here can import it)`
-      : !importableByName(p.replace(/\/$/, ''))
-        ? `${p}   (a path or a URL — a body imports only builtins and packages, by name; nothing here can import it)`
-        : `${p}   (untyped — import it only with noTypeCheck)`;
-    const listing = [
-      ...[...typed].sort(),
-      ...(restricted ?? []).filter(p => !covered(p)).sort().map(mark),
-    ];
-    // Whether an import is GATED is whether a runner routes it, not whether a restriction exists. With no
-    // runner nothing rewrites `import(…)`: it reaches node's own loader, unasked and unchecked. Saying
-    // "you will be asked" there is a promise nothing keeps, and a body discovers the contradiction the
-    // first time it imports something.
+  /** The part of the dts that is about imports. Composed from what the runner STATES — whether there is
+   *  one, and the identifiers it does not bind — never from prose it supplies: the facts are the runner's,
+   *  the wording is this file's, and the same list is what ENV-GATE enforces, so the note cannot drift
+   *  from it. */
+  private importNote(runner: FunctionRunner | undefined): string {
+    // Whether an import is GATED is whether a runner routes it. With no runner nothing rewrites
+    // `import(…)`: it reaches node's own loader, unasked and unchecked. Saying "you will be asked" there
+    // is a promise nothing keeps, and a body discovers the contradiction the first time it imports
+    // something. Which modules the gate REFUSES is not listed: that is an answer about one function, and
+    // this text is shown to every one. A literal import of a refused module fails the check, saying so.
     const gated = runner !== undefined;
-    const subject = gated ? ', each subject to permission at the call' : '';
-    const note = restricted !== undefined && restricted.length === 0
-      ? `// Module imports are switched off on this installation.\n`
-      : restricted === undefined
-        ? `// A body may import node builtins${subject}${gated ? ' — you will be asked\n// the first time' : ''}: const fs = await import('node:fs/promises');\n`
-        : `// A body may import these${subject}:\n`
-          + `${listing.map(p => `//   ${p}`).join('\n')}\n`;
-    // Composed from what the runner STATES — the permitted set above, and the identifiers it does not
-    // bind — never from prose it supplies: the facts are the runner's, the wording is this file's, and
-    // the same two arrays are what IMPORT-GATE and ENV-GATE enforce, so the note cannot drift from them.
+    const note = gated
+      ? `// A body may import node builtins and installed packages, each subject to permission at the call — you will be asked\n// the first time: const fs = await import('node:fs/promises');\n`
+      : `// A body may import node builtins and installed packages: const fs = await import('node:fs/promises');\n`;
     const withheld = runner?.withheldGlobals ?? [];
     return `${note}`
       + (withheld.length > 0
@@ -381,13 +295,11 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
           : '');
   }
 
-  /** The two arrays again, printed: a stable fingerprint of the environment a check's verdict was
+  /** The runner's statement, printed: a stable fingerprint of the environment a check's verdict was
    *  reached under, for a caller that PERSISTS the verdict (`function-tools` stores one beside each
-   *  definition). Sorted and printed rather than identity-derived, because it has to survive a restart
-   *  — unlike {@link pathsFor}, whose job is the opposite and which keys on the array itself. */
+   *  definition). */
   async environment(): Promise<string> {
-    const { runner, settings } = await this.runnerNow();
-    return fingerprintOf(runner, settings);
+    return fingerprintOf(this.machine.FunctionRunner);
   }
 
   async check(snippet: string, opts?: ToolCheckOptions): Promise<ToolCheckReport> {
@@ -396,11 +308,11 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     // missed, there were no files to check, and the snippet came back clean whatever was in it. A
     // checker that silently passes everything is the one failure mode this path must not have.
     const root = resolve(this.machine.projectDir ?? OWN_DIR);
-    // Read ONCE, before anything else: the dts, the `paths`, the worker's restriction and the fingerprint
-    // stamped below all have to describe one environment — the one this was graded against — not
-    // whatever is current by the time each is computed.
-    const env = await this.runnerNow();
-    const prefix = `${await this.dtsUnder(env)}\n`;
+    // Read ONCE, before anything else: the dts, the worker's list and the fingerprint stamped below all
+    // have to describe one environment — the one this was graded against — not whatever is current by
+    // the time each is computed.
+    const runner = this.machine.FunctionRunner;
+    const prefix = `${await this.dtsUnder(runner)}\n`;
     const source = `${prefix}${snippet}\nexport {};\n`;           // trailing export ⇒ this file is a module
 
     // Anchor `@matatbread/matbot-plugin-api` — it isn't a bare-resolvable dep of the project root, so map it
@@ -414,14 +326,9 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
 
     // Worker-hosted check (see checker.ts) — off the main loop, and each diagnostic comes back as an
     // annotated block (caret-anchored frame, related locations, HINT) with snippet-relative positions.
-    const { runner, settings } = env;
-    const importPaths = await this.importPaths(settings?.permittedImports);
-    // The restriction goes too, and not only its `paths`: one builtin's declaration file drags in the
-    // ambient `declare module 'node:…'` blocks of everything its own declarations reference, so a
-    // forbidden specifier resolves through the back door and typechecks clean. The checker closes that
-    // structurally. Absent stays absent — unrestricted means nothing to enforce.
-    const restricted = settings?.permittedImports;
-    const withheld   = runner?.withheldGlobals;
+    const refused = opts?.importRefused;
+    const importPaths = await this.importPaths(refusedBuiltins(refused));
+    const withheld = runner?.withheldGlobals;
     const report = await checkSnippetAgainst({
       root, source,
       prefixLen: prefix.length,
@@ -429,17 +336,22 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
       globalTypes: nodeGlobalTypes(),
-      ...(restricted !== undefined ? { permittedImports: restricted } : {}),
+      // Not only its `paths`: one builtin's declaration file drags in the ambient `declare module
+      // 'node:…'` blocks of everything its own declarations reference, so a refused specifier resolves
+      // through the back door and typechecks clean, and a package resolves by ordinary lookup. The
+      // checker closes that structurally, asking this predicate about the literal imports it finds.
+      ...(refused !== undefined ? { importRefused: refused } : {}),
       // ENV-GATE's list, from the runner that withholds them. Absent with no runner, which is correct:
       // nothing is withheld there either, so there is nothing to reject.
       ...(withheld !== undefined ? { withheldGlobals: withheld } : {}),
       ...(opts?.parametersOf !== undefined ? { parametersOf: opts.parametersOf } : {}),
     });
-    // Stamped here and nowhere else, from the same two lists that were just passed to the worker, so the
-    // fingerprint cannot describe an environment other than the one graded against. Only on a verdict
-    // that exists: `checked: false` has nothing to be stale.
-    return report.checked ? { ...report, environment: fingerprintOf(runner, settings) } : report;
+    // Stamped here and nowhere else, from the same runner the worker was handed, so the fingerprint
+    // cannot describe an environment other than the one graded against. Only on a verdict that exists:
+    // `checked: false` has nothing to be stale.
+    return report.checked ? { ...report, environment: fingerprintOf(runner) } : report;
   }
+
 
   // Every live tool the source scan didn't already declare: a source-less tool that carries its contract as
   // a `toolContract` string (a `function-tools` function; the `tool-store` per-namespace tool), spliced
@@ -505,6 +417,36 @@ export const plugin: MatbotPluginSpec = createToolTypesPlugin();
 function nodeGlobalTypes(): string[] {
   const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
   return ['buffer.buffer.d.ts', 'buffer.d.ts'].map(f => join(nodeTypes, f)).filter(f => existsSync(f));
+}
+
+// Every builtin by its canonical, prefixed name — the spelling the gate is asked about. Some entries
+// ALREADY carry the prefix — node:sea, node:sqlite, node:test, node:test/reporters, which have no
+// unprefixed spelling — so prefixing unconditionally wrote `node:node:sqlite`, and those four got no entry.
+const BUILTINS: readonly string[] = builtinModules
+  .filter(m => !m.startsWith('_'))
+  .map(m => m.startsWith('node:') ? m : `node:${m}`);
+
+// The builtins the gate refuses the code being checked, asked one at a time: each is its own question to
+// the gate, and `node:fs` refused says nothing the gate did not say about `node:fs/promises`.
+function refusedBuiltins(refused: ((spec: string) => boolean) | undefined): Set<string> {
+  return refused === undefined ? new Set() : new Set(BUILTINS.filter(b => refused(b)));
+}
+
+function computeImportPaths(refused: ReadonlySet<string>): Record<string, string[]> {
+  const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
+  const out: Record<string, string[]> = {};
+  for (const spec of BUILTINS) {
+    if (refused.has(spec)) continue;
+    const bare = spec.slice('node:'.length);
+    const file = declarationFile(nodeTypes, bare);
+    if (file === undefined) continue;
+    out[spec] = [file];
+    // The UNPREFIXED spelling too, where node has one: `import('os')` resolves to `node:os` at run time,
+    // and a bare specifier is the spelling a model reaches for first. Decided by the PREFIXED spelling,
+    // because that is what the gate asks about (`canonicalImport`).
+    if (builtinModules.includes(bare)) out[bare] = [file];
+  }
+  return out;
 }
 
 // Where @types/node declares a builtin. Most have a file of their own, but a few subpaths are declared

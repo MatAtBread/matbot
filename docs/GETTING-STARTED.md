@@ -85,8 +85,7 @@ Awaited work — tool calls, HTTP requests — never counts towards it. A loop t
 unbounded and matbot warns at startup. Use it only for testing.
 
 It removes the *time* limit and nothing else. The rest still applies with it set to `0`:
-the same globals are withheld, an import is still gated, and `permit_imports` still
-restricts what may be asked for.
+the same globals are withheld, and an import is still gated.
 
 ### When a function wants a module
 
@@ -121,29 +120,28 @@ installing a plugin than to granting a capability. And a standing answer follows
 With nobody to ask — a tool call over HTTP, a trigger, a background job — an import is
 denied unless you had already stood an answer up for it.
 
-If you want a module forbidden outright, so that nobody is even asked, narrow what may be
-requested:
+If you want a module forbidden outright, so that nobody is even asked, give the permission
+gate a standing denial:
 
 ```yaml
 default_settings:
-  '@matatbread/matbot-function-runner-node':
-    permit_imports:
-      - 'node:'      # builtins may be asked for; packages may not
+  '@matatbread/matbot-default-gate':
+    'deny:tool_function.import':
+      - '* node:child_process'   # no function may import it, and nobody is asked
+      - '* node:module'
 ```
 
-Leave `permit_imports` out and anything may be *asked* for. `[]` is the other end: imports
-are switched off and no prompt appears. This is the only way to say "never" at the prompt,
-because a standing answer is always a yes — there is no remembered no.
+`*` means any function, and an entry ending in `:` or `/` covers everything under it
+(`'* node:'` is every builtin). A body that names a denied module in a literal `import(…)`
+fails its type-check, saying why, rather than failing at its first call. "Always deny" at the
+prompt stores the same kind of answer, for that one function and module.
 
-Both settings are also readable and writable at run time, with `function_runner_config`:
-`get` reports what is in effect, `set` takes `permitImports` and/or `timeoutMs`, and `clear`
-puts both back to what the yaml above says. A change applies at once — the runner is rebuilt
-— and you are asked before each setting is written. Two things follow from it being an
-ordinary setting override rather than a second config file. It **wins over the yaml**, so
-`permit_imports` above is a starting point and not a ceiling; and it applies to the whole
-process, so a change made in one conversation is what every conversation then gets. If you
-need a restriction that nothing running can lift, the runner is a plugin — write your own
-with the list compiled in, and matbot will use it instead.
+The time limit is also readable and writable at run time, with `function_runner_config`:
+`get` reports what is in effect, `set` takes `timeoutMs`, and `clear` puts it back to what the
+yaml above says. A change applies from the next run, and you are asked before it is written.
+It is an ordinary setting override, so it **wins over the yaml** and applies to the whole
+process. If you need a bound that nothing running can lift, the runner is a plugin — write your
+own with it compiled in, and matbot will use it instead.
 
 A body imports **by name only** — a node builtin or a package already installed where
 matbot runs. A path (`./lib.js`) or a URL is refused before you are asked: downloading or

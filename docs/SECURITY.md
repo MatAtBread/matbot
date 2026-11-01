@@ -49,7 +49,7 @@ the ones with no human behind them, and it can be withdrawn with `gate_action`.
 | `tool_function.import` | A function body imports a module |
 | `tool_function.connect` | A function body's `fetch` or `WebSocket` reaches an origin, including by redirect |
 | `tool_function.edit` | A function or package that uses `import(`, `fetch` or `WebSocket` is redefined: may the new version keep the grants? |
-| `function_runner_config.set` | A setting of the function runner (its time bound, its import restriction) is changed |
+| `function_runner_config.set` | The function runner's time bound is changed |
 | `telegram_open_door.open` | The Telegram door is opened to new chats |
 | `tools.overwrite` | A plugin registers a tool another plugin owns |
 
@@ -117,8 +117,9 @@ after, or both are configured, since an allow that covers an act keeps it from b
 A broader restriction is expressed somewhere else:
 
 - **don't load the plugin**, or the tool, that does the thing;
-- **a configured denial**, `deny:<gate>`, a list of subjects or `true` for all of them;
-- **the function runner's `permit_imports`**, which forbids modules by rule, so nobody is asked;
+- **a configured denial**, `deny:<gate>`, a list of subjects or `true` for all of them — for a body's
+  imports, `deny:tool_function.import: ['* node:child_process']` forbids a module to every function, and
+  a body naming it fails its type-check;
 - **a replacement `PermissionGate`** with its rules compiled in, which can refuse what the default would
   ask about, and whose rules are out of reach of anything that can write settings;
 - **the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.

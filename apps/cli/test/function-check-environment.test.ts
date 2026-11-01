@@ -3,14 +3,13 @@ import assert from 'node:assert/strict';
 import { stripTypeScriptTypes } from 'node:module';
 import { join } from 'node:path';
 import { HookRegistry } from '@matatbread/matbot-core';
-import type { MatbotMachine, Tool, ToolContext, ToolEvent, ToolTypeIndex } from '@matatbread/matbot-core';
+import type { MatbotMachine, PermissionRequest, Tool, ToolContext, ToolEvent, ToolTypeIndex } from '@matatbread/matbot-core';
 import { createFunctionToolsPlugin } from '@matatbread/matbot-function-tools';
 import { createToolTypesPlugin } from '@matatbread/matbot-tool-types';
 import { createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
 
 // A type-check verdict is a claim about an environment, and the environment is a plugin: unload the node
-// FunctionRunner, or narrow what it permits a body to import, and a stored "this passed" is a claim about
-// somewhere else. Nothing re-checks on load, so the environment the check ran in is stored beside the
+// FunctionRunner and a stored "this passed" is a claim about somewhere else. Nothing re-checks on load, so the environment the check ran in is stored beside the
 // definition and compared — which is the only thing that can tell a reader the ground has moved.
 
 function machineWith(extra: Record<string, unknown>): MatbotMachine {
@@ -60,14 +59,15 @@ test('a stored verdict carries the environment it was reached in, and says when 
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);
-  Object.assign(machine, { ToolTypeIndex: index, FunctionRunner: createVmFunctionRunner(0, { permit: ['node:os'] }) });
+  Object.assign(machine, { ToolTypeIndex: index, FunctionRunner: createVmFunctionRunner(0) });
   await createFunctionToolsPlugin().setup?.(machine);
   const fn = machine.tools.resolve('tool_function')!;
 
   const session = { id: 's1', messages: [] };
   const call = async (input: unknown): Promise<ToolEvent[]> => {
     const ctx = { callId: 'c', session, signal: new AbortController().signal,
-                  prompt: async () => { throw new Error('no prompt here'); } } as unknown as ToolContext;
+                  prompt: async () => { throw new Error('no prompt here'); },
+                  gateSnapshot: async () => () => ({ allowed: false, source: 'fallback' }) } as unknown as ToolContext;
     const out: ToolEvent[] = [];
     for await (const ev of fn.executor.execute(input, ctx)) out.push(ev);
     return out;
@@ -76,8 +76,8 @@ test('a stored verdict carries the environment it was reached in, and says when 
     const last = (await call({ action: 'list' })).at(-1) as { value: { functions: Row[] } };
     return last.value.functions[0]!;
   };
-  const runner = (permit?: string[]): void => {
-    Object.assign(machine, { FunctionRunner: permit === undefined ? undefined : createVmFunctionRunner(0, { permit }) });
+  const runner = (present: boolean): void => {
+    Object.assign(machine, { FunctionRunner: present ? createVmFunctionRunner(0) : undefined });
   };
 
   const defined = await call({ action: 'define', definition: 'sum(a: number, b: number): number { return a + b; }' });
@@ -85,31 +85,78 @@ test('a stored verdict carries the environment it was reached in, and says when 
   assert.deepEqual(await row(), { name: 'sum', definition: 'sum(a: number, b: number): number { return a + b; }' },
     'checked here and now: neither flag, and the fingerprint itself is never handed out');
 
-  // Narrowing the permitted set is a different environment, and the verdict is unchanged: it DID pass —
-  // where it passed is the thing being reported.
-  runner([]);
+  // Unloading the runner plugin: the body is no longer bounded and its import no longer gated. The
+  // verdict is unchanged — it DID pass — and where it passed is the thing being reported.
+  runner(false);
   assert.equal((await row()).checkedElsewhere, true);
   assert.equal((await row()).definedUnchecked, undefined);
 
-  // Unloading the runner plugin altogether: the body is no longer bounded and its import no longer gated.
-  runner(undefined);
-  assert.equal((await row()).checkedElsewhere, true);
-
-  // The same permitted set again is the SAME environment, though it is a different runner object and a
-  // different array — the fingerprint has to survive a restart, so it cannot be identity-derived.
-  runner(['node:os']);
+  // A runner again is the SAME environment, though it is a different object — the fingerprint has to
+  // survive a restart, so it cannot be identity-derived.
+  runner(true);
   assert.equal((await row()).checkedElsewhere, undefined);
 
   // A `check` row is the verdict reached HERE, so it says nothing about where an older one was reached,
   // and hands out no fingerprint. Beside a fresh pass, `checkedElsewhere` read as "passed now, and passed
   // somewhere else".
-  runner(['node:fs']);
+  runner(false);
   assert.equal((await row()).checkedElsewhere, true);
   const rows = ((await call({ action: 'check' })).at(-1) as { value: { results: (Row & { ok: boolean; environment?: string })[] } }).value.results;
   assert.deepEqual(rows.map(r => [r.name, r.ok, r.checkedElsewhere, r.environment]), [['sum', true, undefined, undefined]]);
   // And the pass is recorded, so `list` stops flagging a function that was just re-verified — otherwise
   // the only way to clear the flag was to redefine a correct function.
   assert.equal((await row()).checkedElsewhere, undefined);
+});
+
+test('a definition is checked against what the gate refuses that function, and only where a runner routes it', { timeout: 60000 }, async () => {
+  let index: ToolTypeIndex | undefined;
+  const machine = machineWith({
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
+    register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
+  });
+  await createToolTypesPlugin().setup?.(machine);
+  Object.assign(machine, { ToolTypeIndex: index, FunctionRunner: createVmFunctionRunner(0) });
+  await createFunctionToolsPlugin().setup?.(machine);
+  const fn = machine.tools.resolve('tool_function')!;
+
+  // A policy with one standing denial: `node:os` for every function, matched the way the default gate
+  // matches — against the subject and each standing subject the call site offers.
+  const asked: PermissionRequest[] = [];
+  const snapshot = (req: PermissionRequest & { namespace?: string }) => {
+    asked.push(req);
+    const candidates = [req.subject, ...(req.standing ?? []).map(o => o.subject)];
+    return candidates.includes('* node:os') && req.namespace === 'tool_function' && req.gate === 'import'
+      ? { allowed: false, source: 'configuration' } : { allowed: false, source: 'fallback' };
+  };
+  const call = async (input: unknown): Promise<ToolEvent[]> => {
+    const ctx = { callId: 'c', session: { id: 's1', messages: [] }, signal: new AbortController().signal,
+                  prompt: async () => { throw new Error('no prompt here'); },
+                  gateSnapshot: async () => snapshot } as unknown as ToolContext;
+    const out: ToolEvent[] = [];
+    for await (const ev of fn.executor.execute(input, ctx)) out.push(ev);
+    return out;
+  };
+
+  const refused = await call({ action: 'define', definition: 'host(): Promise<string> { const os = await import("node:os"); return os.hostname(); }' });
+  assert.equal(refused.at(-1)?.type, 'error', JSON.stringify(refused.at(-1)));
+  assert.match((refused.at(-1) as { message: string }).message, /IMPORT-GATE[\s\S]*'node:os' is refused/);
+  // Asked as the call would ask: under the function's own subject, with the `*` answer among its standing.
+  assert.ok(asked.some(r => /^host@[0-9a-f]+ node:os$/.test(r.subject)), asked.map(r => r.subject).join(', '));
+
+  // The unprefixed spelling is the same module, and the same refusal.
+  const bare = await call({ action: 'define', definition: 'host2(): Promise<string> { const os = await import("os"); return os.hostname(); }' });
+  assert.equal(bare.at(-1)?.type, 'error');
+
+  // A module nobody refused is typed and passes: "nobody decided" is asked at the call, not refused here.
+  const fine = await call({ action: 'define', definition: 'cwd(): Promise<string> { const p = await import("node:path"); return p.sep; }' });
+  assert.equal(fine.at(-1)?.type, 'result', JSON.stringify(fine.at(-1)));
+
+  // With no runner nothing routes the import to the gate, so a refusal reported here would be untrue.
+  Object.assign(machine, { FunctionRunner: undefined });
+  asked.length = 0;
+  const ungated = await call({ action: 'execute', definition: '{ const os = await import("node:os"); return typeof os.hostname; }' });
+  assert.equal(asked.length, 0, 'the gate is not consulted');
+  assert.doesNotMatch(JSON.stringify(ungated), /IMPORT-GATE/);
 });
 
 test('a session check stamp applies only to the definition it checked', async () => {
