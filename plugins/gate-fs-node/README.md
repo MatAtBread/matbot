@@ -11,9 +11,10 @@ path the body names is asked about again:
   doesn't allow changing it. Writing includes creating, renaming and deleting.
 - **subject `<function> <realpath>`**, keyed like the import gate's. Symlinks, `..` and relative paths are
   resolved first, so a file has one subject however it is spelled, and a link can't lead out of a grant.
-- **standing answers on offer:** the path itself; anything directly in its directory, for this function;
-  and the same for **any** function (`* <dir>/`). A directory grant covers its entries only, not the
-  subdirectories below them, and a body that moves up or down the tree is asked again.
+- **standing answers on offer:** the path itself; anything in its directory, for this function; and the
+  same for **any** function (`* <dir>/`). A directory grant covers everything below it. A body that moves
+  above it is asked again, and so is one that follows a symlink out of it, because the link is asked about
+  at its target. A grant for a file covers that file only, not `notes.txt.bak` beside it.
 
 It uses the same `PermissionGate` and the same store of standing answers as every other gate, so there's no
 separate setting. `gate_action` lists and clears these answers like any others. To pre-authorise, or to deny
@@ -46,8 +47,8 @@ A **guardrail** against an over-reaching body. It is **not a sandbox**:
 
 - a **granted package** gets the raw `node:fs` (it is trusted as itself), so IO it does goes unasked;
 - a body can reach another IO module (`node:child_process`), which this plugin doesn't touch;
-- operations that recurse (`rm`/`cp`/`readdir` with `recursive`, a `**` glob) act below the path that
-  was asked about.
+- an operation that recurses (`rm`/`cp`/`readdir` with `recursive`, a `**` glob) on a directory granted
+  by its exact path, rather than "anything in" it, acts below what was granted.
 
 Bounding what the **process** may touch is the deployment's job: the OS user matbot runs as, a container,
 or node's `--permission` model (`--allow-fs-read` / `--allow-fs-write`). See `docs/SECURITY.md`.

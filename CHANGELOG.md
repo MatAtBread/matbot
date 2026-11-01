@@ -121,6 +121,11 @@ a second host's needs.
   against the exact subject only, so `deny:<gate>` could not name a directory or `* x` for every
   function. It now matches the call site's standing subjects too, as an allow does. "Always deny" from a
   prompt still stores only the exact subject asked about.
+- **`PermissionRequest.prefix`** declares that a gate's subjects form a hierarchy at a separator. A standing
+  answer ending in it (allow or deny) then covers every subject that starts with it, so `/home/me/` covers
+  `/home/me/a/b.txt`. It is opt-in per request, and matches only at the boundary: a stored subject not
+  ending in the separator still matches exactly, so a file grant does not cover a sibling whose name it
+  prefixes. A gate whose subjects are not a hierarchy (an origin, a secret's name) leaves it unset.
 - **`FunctionRunner.import(spec, caller, options?)`** takes the importing invocation as an `ImportCaller`
   (who is asking, and the gate it asks through), which a runner hands to whatever mediates the module it
   returns. function-tools builds one per invocation, keyed and qualified as its import gate is.
@@ -181,7 +186,8 @@ a second host's needs.
   deployment's (`docs/SECURITY.md`).
 - **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
   gate: `tool_function.fs-read` / `tool_function.fs-write`, keyed `<function> <realpath>`, offering the
-  path, the entries directly in its directory, and that directory for any function. Async and callback
+  path, everything in its directory, and that directory for any function (a directory grant covers its
+  whole subtree). Async and callback
   calls ask; sync calls consult a snapshot of the answers in force and throw `EACCES` saying how to be
   asked. Symlinks are resolved first, and two-path operations ask about both ends. Pre-authorising or
   denying is a standing answer, configured under the default gate's `default_settings:` (`deny:` entries

@@ -194,8 +194,8 @@ replace it.
   `node:fs` through the runner's `ImportedModuleWrapper` seam, so each path is asked about again
   (`tool_function.fs-read` / `fs-write`) through the same gate: an asynchronous call prompts, and a
   synchronous one, which cannot, is allowed only by a standing answer already in force. It covers the
-  body's own `import('node:fs')`, not a granted package's, and an operation that recurses acts below the
-  path it was asked about. Bounding what the *process* may touch is still the deployment's (the user
+  body's own `import('node:fs')`, not a granted package's. A grant for a directory covers everything
+  below it, so "anything in /home/me/" includes `.ssh` and `.env` there unless a denial carves them out. Bounding what the *process* may touch is still the deployment's (the user
   matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/`--allow-fs-write` cap
   the process whatever a grant allows). Network has a finer gate already — `fetch`/`WebSocket` ask per
   origin (`tool_function.connect`) — but a raw `node:net` socket, once the module is granted, does not.

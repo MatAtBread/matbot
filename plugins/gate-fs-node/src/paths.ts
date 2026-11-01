@@ -109,10 +109,10 @@ export function realResolve(p: string): string {
 }
 
 /**
- * The directory a grant for `real` may name: `real` itself when it is a directory (listing it, and the
- * files in it, are then one answer), else the directory holding it. Always with a trailing separator,
- * which no realpath has, so a directory subject never equals a file subject. Its entries only — not
- * below them; a body that reaches further down or up is asked again.
+ * The directory a grant for `real` may name: `real` itself when it is a directory (listing it, and
+ * everything in it, are then one answer), else the directory holding it. Always with a trailing
+ * separator, which no realpath has. That is what makes a directory subject the only kind that covers by
+ * prefix (`PermissionRequest.prefix`): a file grant stays exact.
  */
 export function directoryOf(real: string): string {
   let isDir = false;

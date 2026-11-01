@@ -769,7 +769,13 @@ keep their format) and checked before the allows. One button rather than a deny 
 prompt was already six options and the case it exists for is a model asking the same thing again;
 broader denials are installation authoring — a configured `deny:<gate>` entry may name any subject the
 call site offers as a standing answer (a directory, `* x` for every function), matching exactly what the
-same entry would allow. Like everything else here it is the policy's: the gate
+same entry would allow. Where a call site's subjects form a hierarchy it says so, with
+`PermissionRequest.prefix`: a stored subject ENDING at that separator then covers everything beneath it,
+so a grant for a directory covers its subtree without the request listing every directory above a file.
+It was nearly a `covers` list carrying those ancestors, which grew with the depth of the tree. The
+boundary is what keeps it sound: a bare prefix would let a file grant cover `notes.txt.bak`, and an origin
+grant cover `api.x.evil`. That is why it is opt-in per request and absent for any gate whose subjects are
+not a hierarchy (`http.secret`, `tool_function.connect`). Like everything else here it is the policy's: the gate
 itself is still yes or no, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }` —
 the name of the package the policy was published as until 0.5.0, kept because stored answers and every

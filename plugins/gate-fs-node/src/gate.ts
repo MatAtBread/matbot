@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { ImportCaller, PermissionDecision, PermissionRequest, PermissionSnapshot } from '@matatbread/matbot-plugin-api';
 import { directoryOf, realResolve, type Access } from './paths.js';
@@ -7,10 +8,15 @@ import { directoryOf, realResolve, type Access } from './paths.js';
  * `tool_function.fs-read`), subject `<function> <realpath>` — the same shape as the import gate's, so one
  * policy files and reports both.
  *
- * Standing answers, narrowest first: this path, the entries directly in its directory, and that directory
- * for ANY function. Only those — a body reaching up or down the tree is asked again. The `*` form is also
- * how an installation configures a directory for every function, allow or deny, under `default_settings:`
+ * Standing answers, narrowest first: this path, everything in its directory, and that directory for ANY
+ * function. Subjects are a hierarchy at `path.sep` ({@link PermissionRequest.prefix}), so a directory
+ * answer covers everything below it, whatever directory a later request is in. A body reaching ABOVE a
+ * granted directory is asked again. The realpath keeps that sound: a symlink inside a granted tree that
+ * points out of it is asked about at its target. The `*` form is also how an installation configures a
+ * directory for every function, allow or deny, under `default_settings:`
  * (`'tool_function.fs-read': ['* /home/me/project/']`, `'deny:tool_function.fs-read': ['* /home/me/.ssh/']`).
+ * A denial wins over an allow that also covers the act, so a configured deny carves a subtree out of a
+ * broader grant.
  */
 export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Access, op: string, real: string): PermissionRequest {
   const dir  = directoryOf(real);
@@ -24,9 +30,10 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
     fallback: false,
     standing: [
       { subject: `${fn} ${real}`, label: `Always allow ${who} to ${verb} ${real}` },
-      { subject: `${fn} ${dir}`,  label: `Always allow ${who} to ${verb} anything directly in ${dir}` },
-      { subject: `* ${dir}`,      label: `Always allow ANY function to ${verb} anything directly in ${dir}` },
+      { subject: `${fn} ${dir}`,  label: `Always allow ${who} to ${verb} anything in ${dir}` },
+      { subject: `* ${dir}`,      label: `Always allow ANY function to ${verb} anything in ${dir}` },
     ],
+    prefix: path.sep,
   };
 }
 

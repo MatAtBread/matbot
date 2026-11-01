@@ -385,6 +385,26 @@ test('a configured denial may name any standing subject the call site offers, as
   assert.equal(seen.asked.length, 0);
 });
 
+test('a declared hierarchy lets a stored subject ending at the boundary cover what lies beneath it', async () => {
+  const fsReq = (subject: string, dir: string, prefix?: string): PermissionRequest => ({
+    gate: 'tool_function.fs-read', subject, label: 'l', fallback: false,
+    standing: [{ subject, label: 'x' }, { subject: `* ${dir}`, label: 'y' }],
+    ...(prefix !== undefined ? { prefix } : {}),
+  });
+  const { gate } = policy({ 'tool_function.fs-read': ['* /home/me/', 'f /x/notes.txt'] });
+  const snap = await gate.snapshot();
+  assert.deepEqual(snap(fsReq('f /home/me/a/b/c.txt', '/home/me/a/b/', '/')), permitted('configuration'), 'deep under the grant');
+  assert.deepEqual(snap(fsReq('f /home/me/a/b/c.txt', '/home/me/a/b/')), refused('fallback'), 'no hierarchy declared: exact only');
+  assert.deepEqual(snap(fsReq('f /home/mexico/z.txt', '/home/mexico/', '/')), refused('fallback'), 'a prefix stops at the boundary');
+  assert.deepEqual(snap(fsReq('f /x/notes.txt.bak', '/x/', '/')), refused('fallback'),
+                   'a stored subject not ending at the boundary matches only exactly');
+  const denied = policy({ 'tool_function.fs-read': ['* /home/me/'], 'deny:tool_function.fs-read': ['* /home/me/.ssh/'] });
+  const seen = recorder('allow');
+  assert.deepEqual(await denied.gate.decide(fsReq('f /home/me/.ssh/keys/id', '/home/me/.ssh/keys/', '/'), seen.ask), refused('configuration'));
+  assert.deepEqual(await denied.gate.decide(fsReq('f /home/me/notes', '/home/me/', '/'), seen.ask), permitted('configuration'));
+  assert.equal(seen.asked.length, 0);
+});
+
 // ── Snapshots: the answer with nobody to ask, queried synchronously ────────────
 
 test('the asking gate\'s snapshot is the call site\'s fallback', async () => {

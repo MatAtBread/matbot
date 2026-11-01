@@ -53,6 +53,7 @@ test('an async read is asked about by realpath, with the file, its directory and
   assert.equal(asked[0]!.gate, 'fs-read');
   assert.equal(asked[0]!.subject, `probe@1 ${file}`);
   assert.deepEqual(asked[0]!.standing!.map(s => s.subject), [`probe@1 ${file}`, `probe@1 ${srcDir}`, `* ${srcDir}`]);
+  assert.equal(asked[0]!.prefix, path.sep, 'subjects are a hierarchy at the path separator');
 });
 
 test('a refused async call rejects with EACCES and the refusal, and is not asked again in the same invocation', async () => {
@@ -143,15 +144,43 @@ function defaultPolicy(defaults: Record<string, unknown> | undefined, answer: st
   return { caller, prompts };
 }
 
-test('a configured directory deny for every function refuses sync and async alike, unasked', async () => {
+test('a configured directory deny for every function refuses everything under it, sync and async, unasked', async () => {
   const { caller, prompts } = defaultPolicy({ 'deny:tool_function.fs-read': [`* ${real}${path.sep}`] }, 'allow');
   const fs = await guarded(caller);
   assert.throws(() => fs.readFileSync(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
   await assert.rejects(fs.promises.readFile(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
+  // Below it too: a directory subject covers its whole subtree.
+  await assert.rejects(fs.promises.readFile(path.join(dir, 'src', 'a.ts'), 'utf8'), /permission policy does not allow it/);
   assert.equal(prompts.length, 0);
-  // Its entries only: a file in a subdirectory is a different directory, and is asked about.
-  assert.equal(await fs.promises.readFile(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;');
-  assert.equal(prompts.length, 1);
+});
+
+test('a directory grant covers its subtree, a deny carves one out, and a file grant stays exact', async () => {
+  const { caller, prompts } = defaultPolicy({
+    'tool_function.fs-read':      [`* ${real}${path.sep}`, `* ${path.join(real, 'src', 'a.ts')}`],
+    'deny:tool_function.fs-read': [`* ${path.join(real, 'src')}${path.sep}`],
+  }, 'deny');
+  const fs = await guarded(caller);
+  assert.equal(fs.readFileSync(path.join(dir, '.env'), 'utf8'), 'ANTHROPIC_API_KEY=secret', 'under the granted directory');
+  assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'b.ts'), 'utf8'), /permission policy does not allow it/,
+    'the denied subtree wins over the broader grant');
+  assert.equal(prompts.length, 0);
+});
+
+test('a file grant does not cover a sibling whose name it prefixes, and a granted tree cannot be left by a symlink', async () => {
+  const sibling = path.join(dir, 'src', 'a.ts.bak');
+  realFs.writeFileSync(sibling, 'backup');
+  const { caller } = defaultPolicy({ 'tool_function.fs-read': [`probe@1 ${path.join(real, 'src', 'a.ts')}`, `probe@1 ${path.join(real, 'src')}${path.sep}`] }, 'deny');
+  try {
+    const fs = await guarded(caller);
+    // Exact file subject, no trailing separator: it matches only itself.
+    const exactOnly = defaultPolicy({ 'tool_function.fs-read': [`probe@1 ${path.join(real, 'src', 'a.ts')}`] }, 'deny');
+    const narrow = await guarded(exactOnly.caller);
+    assert.equal(narrow.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;');
+    assert.throws(() => narrow.readFileSync(sibling, 'utf8'), /cannot ask/, 'a.ts does not cover a.ts.bak');
+    // src/escape → ../.env: asked about at the target, which is outside the granted src/.
+    assert.equal(fs.readFileSync(sibling, 'utf8'), 'backup', 'inside the granted directory');
+    assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'escape'), 'utf8'), /cannot ask/);
+  } finally { realFs.rmSync(sibling); }
 });
 
 test('a configured directory allow lets a sync call through with no prompt', async () => {

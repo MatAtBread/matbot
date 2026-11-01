@@ -60,15 +60,24 @@ export function serialised<T>(work: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Whether a standing answer covers this act — the exact subject, or any broader subject the call site
- * offered as a {@link PermissionRequest.standing} answer offered by the call site.
+ * Whether a standing answer covers this act: the exact subject, or any broader subject the call site
+ * offered as a {@link PermissionRequest.standing} answer. Where the call site declares a hierarchy
+ * ({@link PermissionRequest.prefix}), a stored subject ending at its boundary also covers anything
+ * beneath it.
  *
- * Set membership over strings this policy never parses: the call site enumerates how its own subjects
- * generalise, so `node:` admits `node:fs` here without this module knowing what a module specifier is,
- * and a gate contributed by a plugin this build never saw generalises on the same terms.
+ * Over strings this policy never parses: the call site enumerates how its own subjects generalise and
+ * names the boundary, so `node:` admits `node:fs` here and `/home/me/` admits `/home/me/a/b.txt` without
+ * this module knowing what a module specifier or a path is, and a gate contributed by a plugin this
+ * build never saw generalises on the same terms.
  */
-const allows = (answer: StandingAnswer | undefined, subject: string, standing: readonly { subject: string }[] = []): boolean =>
-  answer === true || (answer !== undefined && [subject, ...standing.map(o => o.subject)].some(s => answer.includes(s)));
+const allows = (answer: StandingAnswer | undefined, req: PermissionRequest): boolean => {
+  if (answer === true) return true;
+  if (answer === undefined) return false;
+  const candidates = [req.subject, ...(req.standing ?? []).map(o => o.subject)];
+  const { prefix } = req;
+  return answer.some(stored => candidates.some(c =>
+    c === stored || (prefix !== undefined && prefix !== '' && stored.endsWith(prefix) && c.startsWith(stored))));
+};
 
 /**
  * The standing answer in force for `req`, or `undefined` when nothing stored or configured covers it —
@@ -82,9 +91,8 @@ const allows = (answer: StandingAnswer | undefined, subject: string, standing: r
  * the act.
  */
 function standingDecision(read: (key: string) => StandingAnswer | undefined, req: PermissionRequest): PermissionDecision | undefined {
-  const standing = req.standing ?? [];
-  if (allows(read(denyKey(req.gate)), req.subject, standing)) return refused('configuration');
-  if (allows(read(req.gate), req.subject, standing)) return permitted('configuration');
+  if (allows(read(denyKey(req.gate)), req)) return refused('configuration');
+  if (allows(read(req.gate), req)) return permitted('configuration');
   return undefined;
 }
 
