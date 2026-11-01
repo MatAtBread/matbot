@@ -402,7 +402,7 @@ test("an import's second argument reaches the loader, so an import attribute wor
   // loader that took a specifier alone, and a JSON module failed AFTER the user had granted it.
   const runner = createVmFunctionRunner(2000);
   const seen: unknown[] = [];
-  const spy: FunctionRunner = { ...runner, import: (spec, options) => { seen.push(options); return runner.import!(spec, options); } };
+  const spy: FunctionRunner = { ...runner, import: (spec, caller, options) => { seen.push(options); return runner.import!(spec, caller, options); } };
   const host: CompileHost = { TypeScriptStripper: stripper, FunctionRunner: spy };
   const ev = await run(host, machine(spy),
     `probe() { return import('typescript/package.json', { with: { type: 'json' } }).then(m => m.default.name); }`);

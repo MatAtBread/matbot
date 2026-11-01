@@ -1,7 +1,7 @@
 import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { DefinitionError, stripLeadingTrivia } from './signature.js';
 import { gatedNetwork, type Asker } from './network.js';
-import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ImportCaller, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 /** The invocation's own part first — the gated loader and the settings read for it, which are the
  *  runner's to wire, not bindings the body names — then the ambient values a body has in scope, then its
@@ -184,6 +184,17 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, asker: Asker, set
   // answer given or withdrawn between calls is still seen. Only the DECISION is kept: the load itself
   // takes this call's options, and the module cache already makes a repeat import cheap.
   const decided = new Map<string, Promise<void>>();
+  // ONE caller per invocation, so whatever mediates a granted module (a per-path `node:fs` gate) shares
+  // its answers across every import this invocation makes.
+  const caller: ImportCaller = {
+    fn:  asker.fn,
+    who: asker.who,
+    gate: req => ctx.gate({ ...req, namespace: asker.namespace }),
+    snapshot: async () => {
+      const snapshot = await ctx.gateSnapshot();
+      return req => snapshot({ ...req, namespace: asker.namespace });
+    },
+  };
   return async (written: string, options?: ImportCallOptions): Promise<unknown> => {
     if (typeof written !== 'string' || written === '') throw new Error('import needs a module specifier.');
     // Canonical before anything decides, so `os` and `node:os` are one question, one grant and one label.
@@ -195,7 +206,7 @@ function gatedImport(machine: MatbotMachine, ctx: ToolContext, asker: Asker, set
     }
     await decision;
     const runner = machine.FunctionRunner;
-    return runner?.import !== undefined ? runner.import(spec, options) : import(spec, options);
+    return runner?.import !== undefined ? runner.import(spec, caller, options) : import(spec, options);
   };
 }
 

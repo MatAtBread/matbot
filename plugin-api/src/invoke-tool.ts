@@ -1,5 +1,5 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
-import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate } from './types.js';
+import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate, PermissionRequest } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
@@ -49,19 +49,28 @@ export function bindGate(
   tool:   string | Pick<Tool, 'name' | 'pluginName'>,
   ask:    PromptFn | undefined,
   tools?: { resolve(name: string): Pick<Tool, 'pluginName'> | null },
-): Pick<ToolContext, 'gate'> {
+): Pick<ToolContext, 'gate' | 'gateSnapshot'> {
   const name  = typeof tool === 'string' ? tool : tool.name;
   const owner = typeof tool === 'string' ? undefined : tool.pluginName;
+  const qualify = ({ namespace, ...req }: PermissionRequest & { namespace?: string }): PermissionRequest => {
+    if (namespace !== undefined && namespace !== name
+        && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
+      throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
+    }
+    return { ...req, gate: `${namespace ?? name}.${req.gate}` };
+  };
   return {
-    gate: async ({ namespace, ...req }) => {
-      if (namespace !== undefined && namespace !== name
-          && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
-        throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
-      }
-      const qualified = { ...req, gate: `${namespace ?? name}.${req.gate}` };
+    gate: async req => {
+      const qualified = qualify(req);
       const decision = await (gate ?? askPermissionGate).decide(qualified, ask);
       if (!decision.allowed && decision.source === 'fallback') reportUnattended(name, qualified.gate, qualified.subject);
       return decision;
+    },
+    // Not reported when unattended: a synchronous caller cannot ask even with a human present, so a
+    // fallback here says nothing about whether anybody was there.
+    gateSnapshot: async () => {
+      const snapshot = await (gate ?? askPermissionGate).snapshot();
+      return req => snapshot(qualify(req));
     },
   };
 }

@@ -710,6 +710,18 @@ that captured `services.PermissionGate` and then registered itself would delegat
 ever; the hosts expose a getter instead, and every consumer resolves per call. Gate ids are open at
 runtime, and an unknown one must **ask**: "unregistered ⇒ loose" cannot mean "⇒ allow" here.
 
+**A synchronous caller gets a snapshot, not a second model.** `PermissionGate.snapshot()` (and
+`ToolContext.gateSnapshot()`) is the policy's answer with nobody to ask, read once, asynchronously, and
+then queried synchronously, for a call site that interposes on a synchronous API (`gate-fs-node` under
+`readFileSync`), which blocks the very thread a prompt or a settings read needs. It is taken per
+INVOCATION and never cached by the policy, for the reason `FunctionRunner.settings()` is read per
+invocation: whose answers they are depends on how settings are partitioned. A caller that obtains an
+answer through `decide` takes a fresh one. It was nearly a mirror of the settings namespace kept fresh off
+the bus, and before that a `syncSettings` service: the first assumes a partitioning nobody promised, the
+second exposes a synchronous read of every plugin's settings to fix one call site. The alternative to all
+three, a per-module allow-list in the mediating plugin's own settings, was the thing being avoided: a
+second permission model beside the gate, with its own format and nowhere `gate_action` could see it.
+
 **Boolean only, one refusal shape.** Every gate in the system is allow-or-not, including
 `tools.overwrite`, whose four options author the *memory*, not the outcome. This holds by
 construction rather than by luck, because the value-returning prompts are excluded by construction:
@@ -755,7 +767,9 @@ It reproduces today's behaviour — ask, offer standing answers, remember them �
 asked about and nothing broader, stored under `deny:<gate>` (a key no gate id can have, so the allow keys
 keep their format) and checked before the allows. One button rather than a deny per scope, because the
 prompt was already six options and the case it exists for is a model asking the same thing again;
-broader denials are installation authoring. Like everything else here it is the policy's: the gate
+broader denials are installation authoring — a configured `deny:<gate>` entry may name any subject the
+call site offers as a standing answer (a directory, `* x` for every function), matching exactly what the
+same entry would allow. Like everything else here it is the policy's: the gate
 itself is still yes or no, so an installation authors defaults the ordinary
 way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }` —
 the name of the package the policy was published as until 0.5.0, kept because stored answers and every

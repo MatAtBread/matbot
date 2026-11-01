@@ -1,59 +1,97 @@
-import { fsPathArgs, GLOB, toPath } from './paths.js';
-import { checkPath, type FsPolicy } from './policy.js';
+import type { ImportCaller } from '@matatbread/matbot-plugin-api';
+import { fsPathArgs, GLOB, globBases, toPath, type Access } from './paths.js';
+import { admit, admitSync, type Decisions } from './gate.js';
+
+/** `node:fs` members that return synchronously though their names have no `Sync`: they cannot wait for an
+ *  answer, so they are treated as synchronous calls. (`watch`'s listener is not a completion callback.) */
+const RETURNS_SYNC = new Set(['createReadStream', 'createWriteStream', 'watch', 'watchFile']);
+
+/** `node:fs` members that return a promise though they live on the callback surface. */
+const RETURNS_PROMISE = new Set(['openAsBlob']);
+
+type Checks = (args: unknown[]) => readonly (readonly [path: string, access: Access])[];
 
 /**
- * Wrap an `fs`-shaped module in a Proxy that checks the path arguments of every path-taking method against
- * `policy` before the real call runs, and hands every other property (constants, classes, fd-based calls,
- * `Dirent`…) straight through.
+ * Wrap an `fs`-shaped module in a Proxy that puts each path a call names to the gate before the real call
+ * runs, and hands every other property (constants, classes, fd-based calls, `Dirent`…) straight through.
  *
- * `kind` picks the surface and the failure shape:
- *   - `'fs'` — `node:fs`: includes the `*Sync` twins, and a refused call THROWS synchronously, which is how
- *     node itself reports a bad argument to a sync or callback `fs` call.
- *   - `'promises'` — `node:fs/promises` and `fs.promises`: no sync twins, and a refused call REJECTS, so a
- *     body's `await fs.readFile(…)` catches it as it would any fs error rather than seeing a sync throw.
- *
- * The check itself is identical and synchronous for both — it is a rule test, so it works inside a
- * `readFileSync` as well as before a `readFile`. What a sync call cannot do is PROMPT; see the plugin note.
+ * How a call is asked depends on whether it can wait:
+ *   - a promise (`node:fs/promises`, `fs.promises`, `openAsBlob`) or a completion callback (`fs.readFile(p,
+ *     cb)`) can, so it ASKS — a prompt when nothing standing decides — and a refusal rejects or reaches the
+ *     callback as an `EACCES` error, as any fs failure would;
+ *   - a synchronous call (`readFileSync`, `createReadStream`) cannot, so it consults the answers in force
+ *     and THROWS when they do not allow it, saying how to be asked.
  */
-export function wrapFsModule<T extends object>(mod: T, policy: FsPolicy, kind: 'fs' | 'promises'): T {
+export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', st: Decisions, caller: ImportCaller): T {
   const withSync = kind === 'fs';
   const pathArgs = fsPathArgs(withSync);
   const globNames = new Set<string>(withSync ? GLOB : GLOB.filter(n => !n.endsWith('Sync')));
 
-  const checkArgs = (args: unknown[], op: string, indices: readonly number[]): void => {
-    for (const i of indices) {
-      const p = toPath(args[i]);
-      if (p !== undefined) checkPath(p, op, policy);
+  const checksFor = (prop: string): Checks | undefined => {
+    const indices = pathArgs.get(prop);
+    if (indices !== undefined) {
+      return args => indices(args).flatMap(([i, access]) => {
+        const p = toPath(args[i]);
+        return p !== undefined ? [[p, access] as const] : [];
+      });
     }
-  };
-  // glob's base is options.cwd (string) when given, else the process cwd — which the default policy already
-  // confines. So only a supplied cwd needs checking.
-  const checkGlob = (args: unknown[], op: string): void => {
-    const opts = args[1];
-    const cwd = typeof opts === 'object' && opts !== null ? (opts as { cwd?: unknown }).cwd : undefined;
-    const p = toPath(cwd);
-    if (p !== undefined) checkPath(p, op, policy);
+    if (globNames.has(prop)) {
+      return args => {
+        const opts = args[1];
+        const cwd = toPath(typeof opts === 'object' && opts !== null ? (opts as { cwd?: unknown }).cwd : undefined);
+        return globBases(args[0], cwd).map(base => [base, 'read'] as const);
+      };
+    }
+    return undefined;
   };
 
-  const guard = (fn: (...a: unknown[]) => unknown, check: (args: unknown[]) => void) =>
-    kind === 'promises'
-      ? async (...args: unknown[]): Promise<unknown> => { check(args); return Reflect.apply(fn, mod, args); }
-      : (...args: unknown[]): unknown => { check(args); return Reflect.apply(fn, mod, args); };
+  // Each path in turn, so a two-path call asks its questions one at a time.
+  const admitAll = async (checks: readonly (readonly [string, Access])[], op: string): Promise<void> => {
+    for (const [p, access] of checks) await admit(st, caller, access, op, p);
+  };
+
+  const guard = (fn: (...a: unknown[]) => unknown, op: string, checks: Checks) => {
+    if (kind === 'promises' || RETURNS_PROMISE.has(op)) {
+      return async (...args: unknown[]): Promise<unknown> => {
+        await admitAll(checks(args), op);
+        return Reflect.apply(fn, mod, args);
+      };
+    }
+    if (op.endsWith('Sync') || RETURNS_SYNC.has(op)) {
+      return (...args: unknown[]): unknown => {
+        for (const [p, access] of checks(args)) admitSync(st, caller, access, op, p);
+        return Reflect.apply(fn, mod, args);
+      };
+    }
+    return (...args: unknown[]): unknown => {
+      const cb = args[args.length - 1];
+      // No completion callback: node rejects the call itself, so let it, after the synchronous check.
+      if (typeof cb !== 'function') {
+        for (const [p, access] of checks(args)) admitSync(st, caller, access, op, p);
+        return Reflect.apply(fn, mod, args);
+      }
+      admitAll(checks(args), op).then(
+        () => { Reflect.apply(fn, mod, args); },
+        // `exists` answers with a boolean, not an error, so a refusal reads as absent rather than present.
+        (e: unknown) => { (cb as (e: unknown) => void)(op === 'exists' ? false : e); },
+      );
+      return undefined;
+    };
+  };
 
   return new Proxy(mod, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver);
       if (typeof prop !== 'string' || typeof value !== 'function') {
-        // `node:fs` exposes its promises API here; wrap it with the promises surface.
+        // `node:fs` exposes its promises API here; wrap it with the promises surface, sharing this
+        // invocation's answers.
         if (prop === 'promises' && typeof value === 'object' && value !== null) {
-          return wrapFsModule(value as object, policy, 'promises');
+          return wrapFsModule(value as object, 'promises', st, caller);
         }
         return value;
       }
-      const indices = pathArgs.get(prop);
-      if (indices !== undefined) return guard(value as (...a: unknown[]) => unknown, args => checkArgs(args, prop, indices));
-      if (globNames.has(prop))   return guard(value as (...a: unknown[]) => unknown, args => checkGlob(args, prop));
-      return value;
+      const checks = checksFor(prop);
+      return checks !== undefined ? guard(value as (...a: unknown[]) => unknown, prop, checks) : value;
     },
   });
 }

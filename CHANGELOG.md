@@ -109,6 +109,21 @@ a second host's needs.
 - **`@matatbread/matbot-skills-node` is no longer published.** Its `.md` import and directory watch added
   nothing `skills` and its tool do not, and the directory it watched is not one anything else writes to.
   Load `@matatbread/matbot-skills` in its place.
+- **`PermissionGate` gains `snapshot()`, and `ToolContext` gains `gateSnapshot()`.** A snapshot is what the
+  policy would answer with nobody to ask (`decide(req, undefined)`), read once and queried
+  *synchronously*. It exists for a call site that interposes on a synchronous API (`readFileSync`), which
+  blocks the thread a prompt or a settings read would need. Take one per invocation, never cache it across
+  invocations (whose answers they are depends on how settings are partitioned), and take a fresh one after
+  `decide` obtains an answer. A policy that delegates takes the displaced gate's snapshot alongside its
+  own. Every `PermissionGate` must implement it: core's default gate builds it from one `entries()` read,
+  and `askPermissionGate`'s answers the call site's `fallback`.
+- **A configured denial now covers what the matching allow would.** The default gate checked a denial
+  against the exact subject only, so `deny:<gate>` could not name a directory or `* x` for every
+  function. It now matches the call site's standing subjects too, as an allow does. "Always deny" from a
+  prompt still stores only the exact subject asked about.
+- **`FunctionRunner.import(spec, caller, options?)`** takes the importing invocation as an `ImportCaller`
+  (who is asking, and the gate it asks through), which a runner hands to whatever mediates the module it
+  returns. function-tools builds one per invocation, keyed and qualified as its import gate is.
 
 ### API gaps filled
 
@@ -158,15 +173,20 @@ a second host's needs.
 
 - **`function-runner-node`** gains the **`ImportedModuleWrapper`** service: a seam by which a plugin
   interposes on a module a body is granted, before the body sees it. The import gate decides *whether* a
-  body may import `node:fs`; a wrapper decides *what it can do* with it. Registered per specifier, applied
-  (composed) at `import` — a wrapper may be async, and a specifier with no wrapper is handed through raw.
-  A guardrail against an over-reaching body, not a sandbox: a granted package still gets the raw module,
-  and bounding the process is the deployment's (`docs/SECURITY.md`).
-- **`gate-fs-node`** (new, node) — confines a body's `node:fs`/`node:fs/promises` to permitted paths
-  on that seam: always refuses the `.env` vault and the `.data`/`.plugins`/`.git`/`node_modules` trees,
-  otherwise confines to the project directory or to `permit_fs_paths`. Symlinks are resolved before the
-  check; two-path operations are checked at both ends. Closes the class where a body granted `node:fs`
-  reads secrets or runtime state with no escape.
+  body may import `node:fs`; a wrapper decides *what it can do* with it, asking through the importing
+  invocation's own gate (`ModuleWrapContext.caller`), so there is one policy and one store of standing
+  answers, not one per module. Registered per specifier and applied in order at `import`. A wrapper may be
+  async, and a specifier with no wrapper is handed through raw. A guardrail against an over-reaching
+  body, not a sandbox: a granted package still gets the raw module, and bounding the process is the
+  deployment's (`docs/SECURITY.md`).
+- **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
+  gate: `tool_function.fs-read` / `tool_function.fs-write`, keyed `<function> <realpath>`, offering the
+  path, the entries directly in its directory, and that directory for any function. Async and callback
+  calls ask; sync calls consult a snapshot of the answers in force and throw `EACCES` saying how to be
+  asked. Symlinks are resolved first, and two-path operations ask about both ends. Pre-authorising or
+  denying is a standing answer, configured under the default gate's `default_settings:` (`deny:` entries
+  may name a directory). Closes the class where a body granted `node:fs` reads secrets or runtime state
+  without being asked.
 - **`background-jobs-node`** — its host is the matbot CLI, which it starts again for each job, and it now
   says so: it extends the config the CLI publishes as `MATBOT_CONFIG` rather than reading one off the
   machine. Under any other host it disables itself, as before; `background-jobs` runs jobs in-process

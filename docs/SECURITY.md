@@ -190,11 +190,15 @@ replace it.
   function allowed `node:fs` then reads and writes every path matbot's user can, and one allowed
   `node:net` opens any socket. Nothing in the process narrows that — the grant *is* the capability, not a
   path or host list. So a function granted `node:fs` reads `.env` and the stored gate answers with no
-  escape; the grant is enough. Bounding *which* paths a granted module may touch is the deployment's
-  (the user matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/
-  `--allow-fs-write` cap the process whatever a grant allows), not something the in-process runner does
-  today. Network has a finer gate already — `fetch`/`WebSocket` ask per origin (`tool_function.connect`) —
-  but a raw `node:net` socket, once the module is granted, does not.
+  escape; the grant is enough — unless `gate-fs-node` is loaded. That plugin mediates the granted
+  `node:fs` through the runner's `ImportedModuleWrapper` seam, so each path is asked about again
+  (`tool_function.fs-read` / `fs-write`) through the same gate: an asynchronous call prompts, and a
+  synchronous one, which cannot, is allowed only by a standing answer already in force. It covers the
+  body's own `import('node:fs')`, not a granted package's, and an operation that recurses acts below the
+  path it was asked about. Bounding what the *process* may touch is still the deployment's (the user
+  matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/`--allow-fs-write` cap
+  the process whatever a grant allows). Network has a finer gate already — `fetch`/`WebSocket` ask per
+  origin (`tool_function.connect`) — but a raw `node:net` socket, once the module is granted, does not.
 - **It is not a sandbox against hostile code.** A body shares the process's built-ins, so code written to
   interfere with matbot can rewrite them (`Object.prototype`, `JSON`, `Headers.prototype`) and see what
   matbot later passes through them, a provider's credential included. The type-check refuses the plain

@@ -248,6 +248,13 @@ export interface ToolContext {
    * `if (!await ctx.gate(…))` is always false. Test `.allowed`.
    */
   gate(req: PermissionRequest & { namespace?: string }): Promise<PermissionDecision>;
+  /**
+   * {@link gate}'s answer with nobody to ask, read now and queried SYNCHRONOUSLY — for a call site that
+   * interposes on a synchronous API and so can neither prompt nor await (see
+   * {@link PermissionGate.snapshot}). Qualified and namespace-checked exactly as {@link gate} is. Take one
+   * per invocation; take a fresh one after {@link gate} has obtained an answer it should reflect.
+   */
+  gateSnapshot(): Promise<(req: PermissionRequest & { namespace?: string }) => PermissionDecision>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */

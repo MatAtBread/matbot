@@ -124,4 +124,25 @@ export function refusalMessage(decision: PermissionDecision, act?: string): stri
  */
 export interface PermissionGate {
   decide(req: PermissionRequest, ask: PromptFn | undefined): Promise<PermissionDecision>;
+  /**
+   * What this policy would answer with nobody to ask — `decide(req, undefined)` — as a SYNCHRONOUS
+   * function, for a caller that cannot await: a synchronous API it interposes on (`readFileSync`) blocks
+   * the thread the answer would need, so no prompt and no read can happen inside it.
+   *
+   * Taken once per INVOCATION and held for it, never cached by the policy across invocations: whose
+   * standing answers they are depends on how settings are partitioned (by principal, or not at all), and
+   * an invocation has one principal throughout — the reasoning `FunctionRunner.settings` gives.
+   * So the read happens here, asynchronously, and the function it returns only consults what was read.
+   * A caller that later obtains an answer through {@link decide} (a human chose "Always…") takes a fresh
+   * snapshot to see it.
+   *
+   * A policy that delegates to the gate it displaced takes that gate's snapshot alongside its own, so the
+   * pair compose here as they do in `decide`.
+   */
+  snapshot(): Promise<PermissionSnapshot>;
 }
+
+/** A {@link PermissionGate}'s answer with nobody to ask, read in advance: see {@link PermissionGate.snapshot}.
+ *  A `fallback` source means nothing in force decided the act — the caller could not ask, not that
+ *  anyone said no. */
+export type PermissionSnapshot = (req: PermissionRequest) => PermissionDecision;

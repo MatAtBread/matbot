@@ -24,4 +24,8 @@ export const askPermissionGate: PermissionGate = {
     const yes = (await ask(field)).trim().toLowerCase() === CONFIRM_YES;
     return yes ? permitted('user') : refused('user');
   },
+  // Nothing stored, so nothing to read: with nobody to ask, the call site's fallback stands.
+  async snapshot() {
+    return req => req.fallback ? permitted('fallback') : refused('fallback');
+  },
 };

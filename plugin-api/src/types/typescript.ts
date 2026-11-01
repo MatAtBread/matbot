@@ -1,4 +1,5 @@
 import type { JSONSchema } from './primitives.js';
+import type { PermissionDecision, PermissionGate, PermissionRequest, PermissionSnapshot } from './permission.js';
 
 // ── TypeScript ──────────────────────────────────────────────────────────────
 
@@ -89,6 +90,25 @@ export interface FunctionCall {
   readonly WebSocket?: typeof WebSocket;
 }
 
+/**
+ * The invocation a module is imported for, as the consumer that runs it states it: who is asking, and the
+ * gate it asks through — so code mediating a granted module (a per-path `node:fs` check) puts its question
+ * to the same policy, under the same identity, as the import itself was put. The consumer qualifies and
+ * keys the request; the mediator supplies only the act (`gate` suffix, subject after {@link fn}, label,
+ * standing answers).
+ */
+export interface ImportCaller {
+  /** The function's part of a subject — `<name>@<version>`, or a fixed key for a one-off body. A subject
+   *  is `${fn} ${what}`, and a standing answer for every function is `* ${what}`. */
+  readonly fn:  string;
+  /** The function as prose, for a label: `function "scrape_prices"`. */
+  readonly who: string;
+  /** Ask, prompting if anybody can be asked. */
+  gate(req: PermissionRequest): Promise<PermissionDecision>;
+  /** The answer with nobody to ask, queried synchronously (see {@link PermissionGate.snapshot}). */
+  snapshot(): Promise<PermissionSnapshot>;
+}
+
 export interface FunctionRunner {
   /**
    * Compile `source` — a TypeScript expression evaluating to an async function — and return something
@@ -132,8 +152,12 @@ export interface FunctionRunner {
    *
    * It is reached only after the gate has allowed this specifier for this function, and it performs no
    * check of its own — a capability, not a policy.
+   *
+   * `caller` is the invocation importing it, which a runner hands to whatever MEDIATES the module it
+   * returns (node's applies its `ImportedModuleWrapper`s): a granted `node:fs` is still asked about per
+   * path, and that question is this function's, through the gate it was handed.
    */
-  import?(spec: string, options?: ImportCallOptions): Promise<unknown>;
+  import?(spec: string, caller: ImportCaller, options?: ImportCallOptions): Promise<unknown>;
   /**
    * The spelling `spec` loads as, where the runner's platform has two for one module: node loads `os` as
    * `node:os` whatever is installed, so asking about `os` and `node:os` separately asked twice about one

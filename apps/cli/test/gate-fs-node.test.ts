@@ -1,81 +1,178 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { wrapFsModule, type FsPolicy } from '@matatbread/matbot-gate-fs-node';
+import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS, installSettingsDefaults, makePluginSettings, permitted, refused } from '@matatbread/matbot-core';
+import type { FormField, ImportCaller, PermissionDecision, PermissionRequest, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
+import { decisionsFor, wrapFsModule } from '@matatbread/matbot-gate-fs-node';
 
-// A real project tree, so realpath (symlink collapsing) is exercised rather than mocked.
+// gate-fs-node puts each path a body's `node:fs` names to the SAME gate as the import: an async call asks
+// (prompting when nothing standing decides), a sync call consults a snapshot of what is in force.
+
 let dir: string;
+let real: string;   // the temp dir's realpath (macOS /var → /private/var, etc.)
 before(() => {
   dir = realFs.mkdtempSync(path.join(os.tmpdir(), 'gatefs-'));
+  real = realFs.realpathSync(dir);
   realFs.writeFileSync(path.join(dir, '.env'), 'ANTHROPIC_API_KEY=secret');
-  realFs.mkdirSync(path.join(dir, '.data'));
-  realFs.writeFileSync(path.join(dir, '.data', 'session.json'), '{}');
   realFs.mkdirSync(path.join(dir, 'src'));
   realFs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export const a = 1;');
-  // A symlink inside .data pointing at the real secrets file elsewhere on the box.
-  realFs.symlinkSync('/etc/hostname', path.join(dir, 'src', 'escape'));
+  realFs.writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 2;');
+  realFs.symlinkSync(path.join(dir, '.env'), path.join(dir, 'src', 'escape'));
 });
 after(() => realFs.rmSync(dir, { recursive: true, force: true }));
+afterEach(() => { installSettingsDefaults(undefined); });
 
-function guarded(allow: string[] = []): typeof import('node:fs') {
-  const policy: FsPolicy = { projectDir: dir, allow };
-  return wrapFsModule(realFs, policy, 'fs') as typeof import('node:fs');
+/** A caller whose gate is a function of the request, recording what it is asked; its snapshot answers
+ *  from `standing` (fallback-refused otherwise). */
+function fakeCaller(decide: (r: PermissionRequest) => PermissionDecision, standing: (r: PermissionRequest) => PermissionDecision | undefined = () => undefined) {
+  const asked: PermissionRequest[] = [];
+  let snapshots = 0;
+  const caller: ImportCaller = {
+    fn: 'probe@1', who: 'function "probe"',
+    gate: async r => { asked.push(r); return decide(r); },
+    snapshot: async () => { snapshots++; return r => standing(r) ?? refused('fallback'); },
+  };
+  return { caller, asked, snapshots: () => snapshots };
 }
 
-test('the secrets vault and runtime-state trees are refused; source is allowed', () => {
-  const fs = guarded();
-  assert.equal(fs.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;', 'source reads work');
-  assert.throws(() => fs.readFileSync(path.join(dir, '.env'), 'utf8'), /secrets vault/, '.env refused');
-  assert.throws(() => fs.readFileSync(path.join(dir, '.data', 'session.json'), 'utf8'), /runtime state/, '.data refused');
-  assert.throws(() => fs.readdirSync(path.join(dir, '.data')), /runtime state/, '.data readdir refused');
+async function guarded(caller: ImportCaller): Promise<typeof import('node:fs')> {
+  return wrapFsModule(realFs, 'fs', await decisionsFor(caller), caller) as typeof import('node:fs');
+}
+
+test('an async read is asked about by realpath, with the file, its directory and the directory for any function on offer', async () => {
+  const { caller, asked } = fakeCaller(() => permitted('user'));
+  const fs = await guarded(caller);
+  // Spelled relatively and through `..`: one subject however it is written.
+  const spelled = path.relative(process.cwd(), path.join(dir, 'src', '..', 'src', 'a.ts'));
+  assert.equal(await fs.promises.readFile(spelled, 'utf8'), 'export const a = 1;');
+  assert.equal(asked.length, 1);
+  const file = path.join(real, 'src', 'a.ts');
+  const srcDir = path.join(real, 'src') + path.sep;
+  assert.equal(asked[0]!.gate, 'fs-read');
+  assert.equal(asked[0]!.subject, `probe@1 ${file}`);
+  assert.deepEqual(asked[0]!.standing!.map(s => s.subject), [`probe@1 ${file}`, `probe@1 ${srcDir}`, `* ${srcDir}`]);
 });
 
-test('paths outside the project are refused, absolute or via ..', () => {
-  const fs = guarded();
-  assert.throws(() => fs.readFileSync('/etc/hostname', 'utf8'), /outside the project/, 'absolute outside');
-  assert.throws(() => fs.readFileSync(path.join(dir, 'src', '..', '..', '..', 'etc', 'hostname')), /outside the project/, 'traversal');
+test('a refused async call rejects with EACCES and the refusal, and is not asked again in the same invocation', async () => {
+  const { caller, asked } = fakeCaller(() => refused('user'));
+  const fs = await guarded(caller);
+  const env = path.join(dir, '.env');
+  await assert.rejects(fs.promises.readFile(env, 'utf8'), (e: NodeJS.ErrnoException) => e.code === 'EACCES' && /the user declined/.test(e.message));
+  await assert.rejects(fs.promises.readFile(env, 'utf8'), /the user declined/);
+  assert.equal(asked.length, 1, 'a refusal is remembered for the invocation, not re-prompted in a loop');
 });
 
-test('a symlink is resolved before the check, so it cannot escape', () => {
-  const fs = guarded();
-  // src/escape is inside the (allowed) project but points at /etc/hostname.
-  assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'escape'), 'utf8'), /outside the project/,
-    'the real target, not the link path, is what is checked');
+test('a symlink is asked about at its real target', async () => {
+  const { caller, asked } = fakeCaller(() => refused('user'));
+  const fs = await guarded(caller);
+  await assert.rejects(fs.promises.readFile(path.join(dir, 'src', 'escape'), 'utf8'), /declined/);
+  assert.equal(asked[0]!.subject, `probe@1 ${path.join(real, '.env')}`);
 });
 
-test('two-path operations check both ends', () => {
-  const fs = guarded();
-  assert.throws(() => fs.copyFileSync(path.join(dir, 'src', 'a.ts'), path.join(dir, '.data', 'leak')), /runtime state/,
-    'copy INTO .data refused');
-  assert.throws(() => fs.copyFileSync(path.join(dir, '.env'), path.join(dir, 'src', 'stolen')), /secrets vault/,
-    'copy FROM .env refused');
+test('a sync call never asks: it consults the snapshot, and says how to be asked when nothing allows it', async () => {
+  const file = path.join(real, 'src', 'a.ts');
+  const { caller, asked } = fakeCaller(() => permitted('user'), r => r.subject === `probe@1 ${file}` ? permitted('configuration') : undefined);
+  const fs = await guarded(caller);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'export const a = 1;', 'a standing answer allows it');
+  assert.throws(() => fs.readFileSync(path.join(dir, '.env'), 'utf8'),
+    (e: NodeJS.ErrnoException) => e.code === 'EACCES' && /cannot ask/.test(e.message) && /fs\.promises\.readFile/.test(e.message));
+  assert.equal(asked.length, 0, 'nothing was prompted');
 });
 
-test('fs/promises is wrapped too', async () => {
-  const fs = guarded();
-  await assert.rejects(() => fs.promises.readFile(path.join(dir, '.env'), 'utf8'), /secrets vault/);
-  assert.equal(await fs.promises.readFile(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;');
+test('reads and writes are separate questions; two-path calls ask about each end', async () => {
+  const { caller, asked } = fakeCaller(() => permitted('user'));
+  const fs = await guarded(caller);
+  await fs.promises.copyFile(path.join(dir, 'src', 'a.ts'), path.join(dir, 'src', 'copy.ts'));
+  assert.deepEqual(asked.map(r => [r.gate, r.subject]), [
+    ['fs-read',  `probe@1 ${path.join(real, 'src', 'a.ts')}`],
+    ['fs-write', `probe@1 ${path.join(real, 'src', 'copy.ts')}`],
+  ]);
+  asked.length = 0;
+  const h = await fs.promises.open(path.join(dir, 'src', 'b.ts'));          // default flags: read
+  await h.close();
+  const w = await fs.promises.open(path.join(dir, 'src', 'new.ts'), 'w');   // write
+  await w.close();
+  assert.deepEqual(asked.map(r => r.gate), ['fs-read', 'fs-write']);
 });
 
-test('permit_fs_paths confines to the listed roots, deny-set still applies', () => {
-  const only = path.join(dir, 'src');
-  const fs = guarded([only]);
-  assert.equal(fs.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;', 'inside allowed root');
-  // An ancestor of the allowed root is no longer reachable.
-  assert.throws(() => fs.readdirSync(dir), /permitted paths/, 'project root not in allow-list');
-  // The deny-set still wins even if someone lists the project root.
-  const fs2 = wrapFsModule(realFs, { projectDir: dir, allow: [dir] }, 'fs') as typeof import('node:fs');
-  assert.throws(() => fs2.readFileSync(path.join(dir, '.env'), 'utf8'), /secrets vault/, 'deny-set wins over allow');
+test('the callback form asks, and a refusal reaches the callback', async () => {
+  const { caller, asked } = fakeCaller(r => r.subject.endsWith('.env') ? refused('user') : permitted('user'));
+  const fs = await guarded(caller);
+  const ok = await new Promise<string>((res, rej) => fs.readFile(path.join(dir, 'src', 'a.ts'), 'utf8', (e, d) => e ? rej(e) : res(d)));
+  assert.equal(ok, 'export const a = 1;');
+  const err = await new Promise<NodeJS.ErrnoException | null>(res => fs.readFile(path.join(dir, '.env'), 'utf8', e => res(e)));
+  assert.equal(err?.code, 'EACCES');
+  assert.equal(asked.length, 2);
 });
 
-test('fd-based and non-path members pass through', () => {
-  const fs = guarded();
+test('fd-based and non-path members pass through unasked', async () => {
+  const { caller, asked } = fakeCaller(() => permitted('user'), () => permitted('configuration'));
+  const fs = await guarded(caller);
   const fd = fs.openSync(path.join(dir, 'src', 'a.ts'), 'r');
   const buf = Buffer.alloc(6);
-  fs.readSync(fd, buf, 0, 6, 0);              // fd-based read is not path-checked
+  fs.readSync(fd, buf, 0, 6, 0);
   fs.closeSync(fd);
   assert.equal(buf.toString(), 'export');
-  assert.equal(typeof fs.constants.O_RDONLY, 'number', 'constants pass through');
+  assert.equal(typeof fs.constants.O_RDONLY, 'number');
+  assert.equal(asked.length, 0);
+});
+
+// ── End to end, against core's default policy ─────────────────────────────────
+
+function defaultPolicy(defaults: Record<string, unknown> | undefined, answer: string) {
+  installSettingsDefaults(defaults === undefined ? undefined : new Map([[DEFAULT_GATE_SETTINGS_NS, defaults]]));
+  const docs = new Map<string, unknown>();
+  const store = {
+    get:    async (id: string) => docs.get(id) ?? null,
+    set:    async (id: string, doc: unknown) => { docs.set(id, doc); },
+    cas:    async (id: string, _v: string, doc: unknown) => { docs.set(id, doc); return { ok: true }; },
+    delete: async (id: string) => { docs.delete(id); },
+  } as unknown as Store<SettingsDoc>;
+  const gate = createDefaultGate(makePluginSettings(store, DEFAULT_GATE_SETTINGS_NS));
+  const prompts: FormField[] = [];
+  const ask = (async (f: string | FormField) => { prompts.push(f as FormField); return answer; }) as PromptFn;
+  // As function-tools qualifies it: the gate suffix under `tool_function`.
+  const q = (r: PermissionRequest): PermissionRequest => ({ ...r, gate: `tool_function.${r.gate}` });
+  const caller: ImportCaller = {
+    fn: 'probe@1', who: 'function "probe"',
+    gate: r => gate.decide(q(r), ask),
+    snapshot: async () => { const s = await gate.snapshot(); return r => s(q(r)); },
+  };
+  return { caller, prompts };
+}
+
+test('a configured directory deny for every function refuses sync and async alike, unasked', async () => {
+  const { caller, prompts } = defaultPolicy({ 'deny:tool_function.fs-read': [`* ${real}${path.sep}`] }, 'allow');
+  const fs = await guarded(caller);
+  assert.throws(() => fs.readFileSync(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
+  await assert.rejects(fs.promises.readFile(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
+  assert.equal(prompts.length, 0);
+  // Its entries only: a file in a subdirectory is a different directory, and is asked about.
+  assert.equal(await fs.promises.readFile(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;');
+  assert.equal(prompts.length, 1);
+});
+
+test('a configured directory allow lets a sync call through with no prompt', async () => {
+  const { caller, prompts } = defaultPolicy({ 'tool_function.fs-read': [`* ${path.join(real, 'src')}${path.sep}`] }, 'deny');
+  const fs = await guarded(caller);
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'b.ts'), 'utf8'), 'export const b = 2;');
+  assert.throws(() => fs.writeFileSync(path.join(dir, 'src', 'b.ts'), 'x'), /cannot ask/, 'a read grant does not allow a write');
+  assert.equal(prompts.length, 0);
+});
+
+test('an "always, in this directory" answer to an async call is seen by later sync calls, and by queued async ones', async () => {
+  // always-1 is the second standing option: this function, anything directly in the directory.
+  const { caller, prompts } = defaultPolicy(undefined, 'always-1');
+  const fs = await guarded(caller);
+  assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'b.ts'), 'utf8'), /cannot ask/, 'nothing standing yet');
+  // Concurrent: serialised, so only the first prompts and the second finds the standing answer it gave.
+  const [a, b] = await Promise.all([
+    fs.promises.readFile(path.join(dir, 'src', 'a.ts'), 'utf8'),
+    fs.promises.readFile(path.join(dir, 'src', 'b.ts'), 'utf8'),
+  ]);
+  assert.equal(a + b, 'export const a = 1;export const b = 2;');
+  assert.equal(prompts.length, 1, 'one prompt for the directory, not one per file');
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'b.ts'), 'utf8'), 'export const b = 2;', 'the refreshed snapshot allows it');
 });

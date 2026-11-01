@@ -1,6 +1,6 @@
 import { isBuiltin } from 'node:module';
 import vm from 'node:vm';
-import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner, type ImportCaller } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
 import { BODY_FILE, hostCall, inBody } from './host-only.js';
 
@@ -101,9 +101,9 @@ export function createVmFunctionRunner(
     permit?: readonly string[];
     projectDir?: string;
     /** Mediate a granted module before the body sees it (the `ImportedModuleWrapper` registry's
-     *  `apply`). Called with the canonicalised specifier and the loaded module; returns what the body
-     *  gets. Absent ⇒ the module is handed through unchanged. */
-    wrapModule?: (canonicalSpec: string, module: unknown) => unknown;
+     *  `apply`). Called with the canonicalised specifier, the loaded module and the importing invocation;
+     *  returns what the body gets. Absent ⇒ the module is handed through unchanged. */
+    wrapModule?: (canonicalSpec: string, module: unknown, caller: ImportCaller) => unknown;
   } = {},
   read?: ReadRunnerSettings,
 ): FunctionRunner {
@@ -135,7 +135,7 @@ export function createVmFunctionRunner(
     // Reached only after the gate has allowed this specifier for this function, so it checks nothing of
     // the gate's. It does refuse a path or a URL, which the gate never passes: a body imports builtins and
     // installed packages by name, and placing or downloading code is a plugin install's job.
-    async import(spec: string, options?: ImportCallOptions): Promise<unknown> {
+    async import(spec: string, caller: ImportCaller, options?: ImportCallOptions): Promise<unknown> {
       if (!importableByName(spec)) {
         throw new Error(`Cannot import "${spec}": a function body imports only node builtins and installed packages, by name.`);
       }
@@ -159,9 +159,10 @@ export function createVmFunctionRunner(
       }
       // As host code: a module's own top-level may compile code, and it is not the body's.
       const module = await hostCall(() => import(target, options));
-      // A registered ImportedModuleWrapper may mediate the module before the body sees it (path-checked
-      // `node:fs`, host-bounded `node:net`). Keyed by the canonical specifier, so one spelling is enough.
-      return wrapModule !== undefined ? wrapModule(canonical(spec), module) : module;
+      // A registered ImportedModuleWrapper may mediate the module before the body sees it (path-gated
+      // `node:fs`), asking through the importing invocation's gate. Keyed by the canonical specifier, so
+      // one spelling is enough.
+      return wrapModule !== undefined ? wrapModule(canonical(spec), module, caller) : module;
     },
     canonicalImport: canonical,
     hostCall,

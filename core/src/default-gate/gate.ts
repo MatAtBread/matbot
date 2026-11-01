@@ -1,4 +1,4 @@
-import { permitted, refused, type FormField, type PermissionGate, type PluginSettings } from '@matatbread/matbot-plugin-api';
+import { permitted, refused, type FormField, type PermissionDecision, type PermissionGate, type PermissionRequest, type PluginSettings } from '@matatbread/matbot-plugin-api';
 
 /** The settings namespace standing answers live in, and what an installation keys `default_settings:`
  *  by. The name of the package this policy was published as before it moved into core: stored answers
@@ -20,9 +20,11 @@ export type StandingAnswer = true | readonly string[];
  * Only the exact subject is ever stored from a prompt: "Always deny" is offered for the act being asked
  * about and nothing broader, because a deny is for the request a model keeps making, and one button is
  * the price of it. An installation can configure a list, or `true` for every subject, under
- * `default_settings:` like any other key. A denial wins over an allow that also covers the act — which
- * matters only where a deny was stored first and a broader allow given after, or both are configured,
- * since an allow covering the act would have kept it from being asked about again.
+ * `default_settings:` like any other key — and a configured entry may name any subject the call site
+ * offers as a standing answer, so a denial covers what the matching allow would (a directory, `* x` for
+ * every function). A denial wins over an allow that also covers the act — which matters only where a
+ * deny was stored first and a broader allow given after, or both are configured, since an allow covering
+ * the act would have kept it from being asked about again.
  */
 export const denyKey = (gate: string): string => `deny:${gate}`;
 
@@ -69,6 +71,24 @@ const allows = (answer: StandingAnswer | undefined, subject: string, standing: r
   answer === true || (answer !== undefined && [subject, ...standing.map(o => o.subject)].some(s => answer.includes(s)));
 
 /**
+ * The standing answer in force for `req`, or `undefined` when nothing stored or configured covers it —
+ * one rule for {@link PermissionGate.decide} and {@link PermissionGate.snapshot}, which differ only in
+ * how `read` reaches the settings (a read per key, or one `entries()` read in advance).
+ *
+ * A standing answer is `configuration` whether it came from `default_settings:` or from a "always allow" a
+ * human gave earlier — settings reads are layered, so nothing here can tell the two apart, and a source
+ * that claimed `user` for a configured floor would be a lie half the time. What a reader needs is that this
+ * was decided in advance, not at this prompt. Denied first: a denial wins over an allow that also covers
+ * the act.
+ */
+function standingDecision(read: (key: string) => StandingAnswer | undefined, req: PermissionRequest): PermissionDecision | undefined {
+  const standing = req.standing ?? [];
+  if (allows(read(denyKey(req.gate)), req.subject, standing)) return refused('configuration');
+  if (allows(read(req.gate), req.subject, standing)) return permitted('configuration');
+  return undefined;
+}
+
+/**
  * The policy that reproduces matbot's historical behaviour, generalised from tool names to
  * `(gate, subject)`: ask, offer standing answers, remember them. It keeps its own settings namespace,
  * out of the reserved `__matbot_core__`, and sits behind the `PermissionGate` seam, so an installation
@@ -104,16 +124,22 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   // a second copy of its own keyspace, which could not see a configured default, and which a crash
   // between the two writes left behind as an answer in force and invisible to both `get` and `clear`.
   return {
+    // One `entries()` read — the whole namespace, layered over the configured floor, in one document read
+    // — so the returned function consults only what was read. The displaced gate's snapshot is taken
+    // beside it, so a nothing-stored answer delegates exactly as `decide` does with nobody to ask.
+    async snapshot() {
+      const [entries, before] = await Promise.all([settings.entries(), previous?.snapshot()]);
+      const read = (key: string): StandingAnswer | undefined => toStandingAnswer(entries[key]);
+      return req => standingDecision(read, req)
+        ?? before?.(req)
+        ?? (req.fallback ? permitted('fallback') : refused('fallback'));
+    },
+
     async decide(req, ask) {
       const standing = req.standing ?? [];
-      // A standing answer is `configuration` whether it came from `default_settings:` or from a
-      // "always allow" a human gave earlier — settings reads are layered, so nothing here can tell
-      // the two apart, and a source that claimed `user` for a configured floor would be a lie half
-      // the time. What a reader needs is that this was decided in advance, not at this prompt.
-      // Denied first: a denial wins over an allow that also covers the act. Exact subject only — a
-      // denial is never generalised by the call site's broader standing subjects.
-      if (allows(await read(denyKey(req.gate)), req.subject)) return refused('configuration');
-      if (allows(await read(req.gate), req.subject, standing)) return permitted('configuration');
+      const [deny, allow] = await Promise.all([read(denyKey(req.gate)), read(req.gate)]);
+      const known = standingDecision(key => key === req.gate ? allow : deny, req);
+      if (known !== undefined) return known;
 
       // Nothing stored and nobody to ask: the displaced gate answers, which for the host default means
       // `req.fallback` — today's non-interactive behaviour at each site, stated by the site itself.

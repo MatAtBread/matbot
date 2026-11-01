@@ -374,6 +374,64 @@ test('an installation can configure a denial for every subject of a gate', async
   assert.equal(seen.asked.length, 0);
 });
 
+test('a configured denial may name any standing subject the call site offers, as an allow may', async () => {
+  // "No function may import any builtin" for one function, and "no function may import node:os" for all —
+  // the shapes a directory deny for a path takes (`* /home/me/.ssh/`).
+  const { gate } = policy({ 'deny:tool_function.import': ['probe node:', '* node:os'] });
+  const seen = recorder('allow');
+  assert.deepEqual(await gate.decide(importReq(), seen.ask), refused('configuration'));
+  assert.deepEqual(await gate.decide(importReq({ subject: 'other node:os', standing: [{ subject: '* node:os', label: 'x' }] }), seen.ask),
+                   refused('configuration'), 'the every-function form covers another function');
+  assert.equal(seen.asked.length, 0);
+});
+
+// ── Snapshots: the answer with nobody to ask, queried synchronously ────────────
+
+test('the asking gate\'s snapshot is the call site\'s fallback', async () => {
+  const snap = await askPermissionGate.snapshot();
+  assert.deepEqual(snap(req({ fallback: false })), refused('fallback'));
+  assert.deepEqual(snap(req({ fallback: true })), permitted('fallback'));
+});
+
+test('the default gate\'s snapshot answers as decide would with nobody to ask, from one read', async () => {
+  const { gate, settings } = policy({ 'tool_function.import': ['* node:os'] });
+  await settings.set('deny:tool_function.import', ['probe node:']);
+  const snap = await gate.snapshot();
+  assert.deepEqual(snap(importReq({ subject: 'other node:os', standing: [{ subject: '* node:os', label: 'x' }] })),
+                   permitted('configuration'), 'a configured allow');
+  assert.deepEqual(snap(importReq()), refused('configuration'), 'a stored denial, by a standing subject');
+  assert.deepEqual(snap(req({ gate: 'plugin.add' })), refused('fallback'), 'nothing in force: the fallback');
+
+  // Read in advance: an answer stored afterwards is not seen until a fresh snapshot is taken.
+  await settings.set('plugin.add', ['@x/foo']);
+  assert.deepEqual(snap(req({ gate: 'plugin.add' })), refused('fallback'));
+  assert.deepEqual((await gate.snapshot())(req({ gate: 'plugin.add' })), permitted('configuration'));
+});
+
+test('the default gate\'s snapshot delegates to the displaced gate\'s, as decide does', async () => {
+  const previous: PermissionGate = {
+    async decide() { return refused('acme-directory'); },
+    async snapshot() { return () => refused('acme-directory'); },
+  };
+  const { gate } = policy(undefined, previous);
+  assert.deepEqual((await gate.snapshot())(req({ fallback: true })), refused('acme-directory'));
+});
+
+test('a bound snapshot is qualified and namespace-checked as the gate is', async () => {
+  const asked: string[] = [];
+  const gate: PermissionGate = {
+    async decide() { return permitted('user'); },
+    async snapshot() { return r => { asked.push(r.gate); return permitted('configuration'); }; },
+  };
+  const tools = { resolve: (n: string) => n === 'tool_function' ? { pluginName: '@matatbread/matbot-function-tools' } : null };
+  const fn = { name: 'scrape_prices', pluginName: '@matatbread/matbot-function-tools' };
+  const snap = await bindGate(gate, fn, undefined, tools).gateSnapshot();
+  snap({ gate: 'fs-read', subject: 's', label: 'l', fallback: false, namespace: 'tool_function' });
+  assert.deepEqual(asked, ['tool_function.fs-read']);
+  const rogue = await bindGate(gate, { name: 'rogue', pluginName: '@x/rogue' }, undefined, tools).gateSnapshot();
+  assert.throws(() => rogue({ gate: 'fs-read', subject: 's', label: 'l', fallback: false, namespace: 'tool_function' }), /same plugin/);
+});
+
 test('gate_action reports denials beside answers, and clear forgets them', async () => {
   const { settings } = policy({ 'plugin.add': ['@x/ok'] });
   await settings.set('deny:tool_function.import', ['probe node:os']);

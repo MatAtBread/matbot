@@ -3,7 +3,7 @@ import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
 import { createRunnerConfigTool, readRunnerConfig } from './config.js';
 import { createModuleWrapperRegistry } from './module-wrapper.js';
 import type { ImportedModuleWrapper } from './module-wrapper.js';
-import type { FunctionRunner, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { FunctionRunner, ImportCaller, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 
 export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS, type ReadRunnerSettings, type VmRunSettings } from './runner.js';
 export { transformBody, ROUTE } from './body-transform.js';
@@ -39,10 +39,10 @@ function createRunner(services: MatbotMachine): { runner: FunctionRunner; wrappe
   // The ImportedModuleWrapper registry and the runner reference each other — the runner wraps through
   // `apply`, the registry keys on the runner's `canonicalImport` — so `apply` is a closure the registry
   // fills once both exist. Empty until then, which is only during construction.
-  let apply: (spec: string, module: unknown) => unknown = (_spec, module) => module;
+  let apply: (spec: string, module: unknown, caller: ImportCaller) => unknown = (_spec, module) => module;
   const runner = createVmFunctionRunner(
     FUNCTION_SYNC_LIMIT_MS,
-    { ...(projectDir !== undefined ? { projectDir } : {}), wrapModule: (spec, module) => apply(spec, module) },
+    { ...(projectDir !== undefined ? { projectDir } : {}), wrapModule: (spec, module, caller) => apply(spec, module, caller) },
     async () => {
       const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
       for (const p of problems) warnOnce(p);
