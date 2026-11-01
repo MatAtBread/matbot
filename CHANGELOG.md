@@ -156,6 +156,17 @@ a second host's needs.
 
 ### Optional
 
+- **`function-runner-node`** gains the **`ImportedModuleWrapper`** service: a seam by which a plugin
+  interposes on a module a body is granted, before the body sees it. The import gate decides *whether* a
+  body may import `node:fs`; a wrapper decides *what it can do* with it. Registered per specifier, applied
+  (composed) at `import` — a wrapper may be async, and a specifier with no wrapper is handed through raw.
+  A guardrail against an over-reaching body, not a sandbox: a granted package still gets the raw module,
+  and bounding the process is the deployment's (`docs/SECURITY.md`).
+- **`function-fs-guard`** (new, node) — confines a body's `node:fs`/`node:fs/promises` to permitted paths
+  on that seam: always refuses the `.env` vault and the `.data`/`.plugins`/`.git`/`node_modules` trees,
+  otherwise confines to the project directory or to `permit_fs_paths`. Symlinks are resolved before the
+  check; two-path operations are checked at both ends. Closes the class where a body granted `node:fs`
+  reads secrets or runtime state with no escape.
 - **`background-jobs-node`** — its host is the matbot CLI, which it starts again for each job, and it now
   says so: it extends the config the CLI publishes as `MATBOT_CONFIG` rather than reading one off the
   machine. Under any other host it disables itself, as before; `background-jobs` runs jobs in-process

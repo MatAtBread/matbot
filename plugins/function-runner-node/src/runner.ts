@@ -97,10 +97,18 @@ export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: read
  */
 export function createVmFunctionRunner(
   limitMs = FUNCTION_SYNC_LIMIT_MS,
-  imports: { permit?: readonly string[]; projectDir?: string } = {},
+  imports: {
+    permit?: readonly string[];
+    projectDir?: string;
+    /** Mediate a granted module before the body sees it (the `ImportedModuleWrapper` registry's
+     *  `apply`). Called with the canonicalised specifier and the loaded module; returns what the body
+     *  gets. Absent ⇒ the module is handed through unchanged. */
+    wrapModule?: (canonicalSpec: string, module: unknown) => unknown;
+  } = {},
   read?: ReadRunnerSettings,
 ): FunctionRunner {
   const projectDir = imports.projectDir;
+  const wrapModule = imports.wrapModule;
   // `isBuiltin` and not a `builtinModules` lookup, because a subpath counts (`fs/promises`) and the
   // prefix-only builtins do not (`test` is a package; only `node:test` is the builtin).
   const canonical = (spec: string): string => !spec.includes(':') && isBuiltin(spec) ? `node:${spec}` : spec;
@@ -150,7 +158,10 @@ export function createVmFunctionRunner(
           projectDir !== undefined ? ` Install it in ${projectDir}.` : ''}`);
       }
       // As host code: a module's own top-level may compile code, and it is not the body's.
-      return hostCall(() => import(target, options));
+      const module = await hostCall(() => import(target, options));
+      // A registered ImportedModuleWrapper may mediate the module before the body sees it (path-checked
+      // `node:fs`, host-bounded `node:net`). Keyed by the canonical specifier, so one spelling is enough.
+      return wrapModule !== undefined ? wrapModule(canonical(spec), module) : module;
     },
     canonicalImport: canonical,
     hostCall,
