@@ -9,7 +9,7 @@ export { wrapFsModule } from './wrap.js';
 export { pathAllowed, checkPath, type FsPolicy } from './policy.js';
 
 /**
- * function-fs-guard — confines a `tool_function` body's `node:fs` access to permitted paths.
+ * gate-fs-node — confines a `tool_function` body's `node:fs` access to permitted paths.
  *
  * It registers an {@link ImportedModuleWrapper} for `node:fs` and `node:fs/promises`, so a body still
  * imports them normally (the import gate still asks whether it may import `node:fs` at all), but the module
@@ -48,7 +48,7 @@ export const plugin: MatbotPluginSpec = {
 
   async setup(services: MatbotMachine) {
     if (services.projectDir === undefined) {
-      console.warn('[function-fs-guard] no projectDir: without permit_fs_paths there is no boundary to confine to, so only the configured allow-list (if any) applies.');
+      console.warn('[gate-fs-node] no projectDir: without permit_fs_paths there is no boundary to confine to, so only the configured allow-list (if any) applies.');
     }
     // Registered through the mount table so it follows the runner: replay seeds it against the runner
     // present now, and a runner reload (whose new registry starts empty) re-fires this and re-registers.

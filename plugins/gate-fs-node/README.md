@@ -1,4 +1,4 @@
-# @matatbread/matbot-function-fs-guard
+# @matatbread/matbot-gate-fs-node
 
 Confines a `tool_function` body's `node:fs` access to permitted paths.
 
@@ -18,7 +18,7 @@ calls and non-path members pass through.
 
 ```yaml
 default_settings:
-  '@matatbread/matbot-function-fs-guard':
+  '@matatbread/matbot-gate-fs-node':
     permit_fs_paths: ['/home/matt/project/src', '/home/matt/project/build']
 ```
 

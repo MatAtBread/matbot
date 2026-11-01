@@ -54,7 +54,7 @@
     "@types/node": "catalog:",
     "@matatbread/matbot-caching-tool-types": "workspace:^",
     "@matatbread/matbot-function-runner-node": "workspace:^",
-    "@matatbread/matbot-function-fs-guard": "workspace:^",
+    "@matatbread/matbot-gate-fs-node": "workspace:^",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-provenance": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",

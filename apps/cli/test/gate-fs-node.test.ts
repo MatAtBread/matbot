@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { wrapFsModule, type FsPolicy } from '@matatbread/matbot-function-fs-guard';
+import { wrapFsModule, type FsPolicy } from '@matatbread/matbot-gate-fs-node';
 
 // A real project tree, so realpath (symlink collapsing) is exercised rather than mocked.
 let dir: string;
 before(() => {
-  dir = realFs.mkdtempSync(path.join(os.tmpdir(), 'fsguard-'));
+  dir = realFs.mkdtempSync(path.join(os.tmpdir(), 'gatefs-'));
   realFs.writeFileSync(path.join(dir, '.env'), 'ANTHROPIC_API_KEY=secret');
   realFs.mkdirSync(path.join(dir, '.data'));
   realFs.writeFileSync(path.join(dir, '.data', 'session.json'), '{}');

@@ -162,7 +162,7 @@ a second host's needs.
   (composed) at `import` — a wrapper may be async, and a specifier with no wrapper is handed through raw.
   A guardrail against an over-reaching body, not a sandbox: a granted package still gets the raw module,
   and bounding the process is the deployment's (`docs/SECURITY.md`).
-- **`function-fs-guard`** (new, node) — confines a body's `node:fs`/`node:fs/promises` to permitted paths
+- **`gate-fs-node`** (new, node) — confines a body's `node:fs`/`node:fs/promises` to permitted paths
   on that seam: always refuses the `.env` vault and the `.data`/`.plugins`/`.git`/`node_modules` trees,
   otherwise confines to the project directory or to `permit_fs_paths`. Symlinks are resolved before the
   check; two-path operations are checked at both ends. Closes the class where a body granted `node:fs`

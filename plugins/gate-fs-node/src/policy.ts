@@ -59,7 +59,7 @@ export function checkPath(arg: string, op: string, policy: FsPolicy): void {
   const why = pathAllowed(real, policy);
   if (why !== undefined) {
     throw Object.assign(
-      new Error(`fs.${op}: access to "${arg}" refused — ${why}. Permitted paths are set by the function-fs-guard plugin (permit_fs_paths).`),
+      new Error(`fs.${op}: access to "${arg}" refused — ${why}. Permitted paths are set by the gate-fs-node plugin (permit_fs_paths).`),
       { code: 'EACCES' },
     );
   }
