@@ -11,6 +11,45 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.5.0
 
+### Repository layout
+
+0.5.0 redraws the line between the library and its hosts. In 0.4, core read the CLI's config file,
+plugins were handed its path, and `tool-plugin` was a published package, yet every line of it was a CLI
+convention. So no host other than the CLI could stand up a machine without taking on the CLI's layout.
+The rule now is that core takes what it is given, and whatever belongs to one host lives in that host.
+Each move is listed below under its own category; this section is the overview.
+
+| 0.4 (`main`) | 0.5.0 | Why |
+|---|---|---|
+| `core/src/config/` (`loader.ts`, `yaml.ts`) | `apps/cli/src/config-parse.ts`, `yaml.ts` | `matbot.yaml` is how the CLI is configured, not a core format |
+| `plugins/tool-plugin/` (published) | `apps/cli/src/plugins/` | acquisition and the `plugin`/`provider` tools edit `matbot.yaml` and write `.plugins/`, which only the CLI has |
+| `plugins/browser`'s `plugin` tool | `apps/web-bundle/src/extra-plugins.ts` | the same rule in the browser: the host owns its own plugin list |
+| `apps/cli/src/` `principal-als.ts`, `usage-als.ts`, `plugin-resolver.ts`, `plugin-description.ts`, `env-vault.ts` | `host-node/` (new package) | what any Node host needs and core cannot hold, being Node-only, without the CLI's config or layout |
+| `plugins/default-gate/` | `core/src/default-gate/` | a minimal install's first act is gated, so the policy cannot depend on a `plugins:` line |
+| `plugins/files/` (`files-node`) | `plugins/storage/filesystem/src/file-store.ts` | its only user |
+| `plugins/skills-node/`, `plugins/background/`, `plugins/frontend/dom/`, `research/tool-search/` | removed | superseded or unused |
+| — | `examples/minimal-matbot/` | a machine from core alone, importing published names only, so the boundary is tested rather than described |
+
+Inside the CLI, the two files that had grown by accretion are split by job. `apps/cli/src/index.ts` (1,200
+lines) is now a 60-line entry point beside one module per job:
+
+- `args.ts`: options and help.
+- `boot.ts`: finding the config and standing up the machine.
+- `setup-wizard.ts`: the first-run wizard.
+- `specifiers.ts`: plugin-specifier resolution.
+- `banner.ts`: the version banner.
+- `conversation.ts`: provider, session and the REPL.
+- `turn.ts`: drawing one turn.
+- `terminal.ts`: colour and prompts.
+- `dump-tools.ts`: `--dump-tools`.
+
+The `plugin` tool (1,400 lines) is now a dispatcher, `apps/cli/src/plugins/tools/plugin.ts`, with one file per action under `plugin/`. The
+`matbot.yaml` list editing and the package-manager detection moved out of it, to
+`plugins/config-entries.ts` and `plugins/package-manager.ts`, because `matbot install` shares them. The old
+`plugins/index.ts` barrel only re-exported, so it is gone and callers import the module that defines what
+they use. No new library was extracted from the CLI: with one Node host, a library would be guessing at
+a second host's needs.
+
 ### Breaking changes
 
 - **Every published package is 0.5.0, and npm will not install a 0.4.x plugin beside it.** This is
