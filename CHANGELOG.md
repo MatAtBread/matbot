@@ -358,7 +358,11 @@ a second host's needs.
   removes a tool only when it removes a definition. Definitions from before 0.5.0 keep their namespace
   and need no migration. Removing one leaves its documents where a new `create` will not find them. One
   whose namespace the host now refuses (`settings`) is skipped at boot, with a warning, rather than
-  failing the plugin. A name is at most 57 characters, so its tool name fits a provider's 64.
+  failing the plugin. A name is at most 57 characters, so its tool name fits a provider's 64. A store a
+  plugin exposes is that plugin's alone: its definition records the `owner`, tool-store's boot leaves it
+  for the owner to register (registering it first made the owner's own setup a tool collision, warned
+  about at every boot, and kept the store exposed with its owner unloaded), and `store_action remove`
+  refuses it while the owner holds the tool.
 - **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
   installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
   like a string.

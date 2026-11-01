@@ -11,6 +11,11 @@ export interface StoreDef {
    *  `id` itself for one its owning plugin exposed through `defineStore` (and for any def from
    *  before 0.5.0). */
   namespace:   string;
+  /** The plugin that exposed its OWN store through `defineStore`, and so registers its tool from its own
+   *  setup — which is why this plugin's boot leaves the def alone: registering it first put the tool under
+   *  tool-store's name, so the owner's re-registration became a collision, and the store stayed exposed
+   *  with its owner unloaded. Absent for a store `create` made, and for a def from before 0.5.0. */
+  owner?:      string;
   /** Plain-English description of what the store holds. Shown in the generated tool's description. */
   description: string;
   /** The document shape as a flattened TypeScript type/interface (a string). Surfaced verbatim

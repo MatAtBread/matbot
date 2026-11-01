@@ -61,7 +61,7 @@ function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
 
 async function saveDef(
   services: MatbotMachine,
-  spec: { id: string; namespace: string; description: string; shape: string },
+  spec: { id: string; namespace: string; description: string; shape: string; owner?: string },
 ): Promise<StoreDef> {
   const meta = services.createStore<StoreDef>(META_NAMESPACE);
   const existing = await meta.get(spec.id);
@@ -88,7 +88,8 @@ export async function defineStore(
   services: MatbotMachine,
   spec: { namespace: string; description: string; shape: string },
 ): Promise<StoreDef> {
-  return saveDef(services, { id: spec.namespace, ...spec });
+  const owner = services.self?.name;
+  return saveDef(services, { id: spec.namespace, ...spec, ...(owner !== undefined ? { owner } : {}) });
 }
 
 // A store's name is LLM-supplied, and this is the boundary it enters through — so it is checked here
@@ -449,6 +450,14 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
 
           case 'remove': {
             if (!input.name) { yield { type: 'error', message: 'remove requires "name".' }; return; }
+            // A plugin's own store is that plugin's to withdraw: the def would go and its tool, which the
+            // owner holds, would stay, until its next setup defined both again. Once the owner is no longer
+            // loaded the def is a leftover, and removing it is housekeeping.
+            const owner = (await meta.get(input.name))?.owner;
+            if (owner !== undefined && services.tools.resolve(actionToolName(input.name))?.pluginName === owner) {
+              yield { type: 'error', message: `Store "${input.name}" belongs to the plugin "${owner}", which exposes it; it is not this tool's to remove.` };
+              return;
+            }
             const removed = await meta.delete(input.name);
             if (removed) services.tools.remove(actionToolName(input.name));
             yield { type: 'result', value: { removed } };
@@ -481,8 +490,10 @@ export const plugin: MatbotPluginSpec = {
 
     services.tools.register(makeStoreActionTool(services, meta));
 
-    // Re-register a tool for every managed store, so definitions survive a restart.
+    // Re-register a tool for every managed store, so definitions survive a restart — except a plugin's own,
+    // which that plugin registers from its own setup, and only while it is loaded.
     for (const def of await listDefs(meta)) {
+      if (def.owner !== undefined && def.owner !== services.self?.name) continue;
       registerStoreTool(services, def);
     }
   },
