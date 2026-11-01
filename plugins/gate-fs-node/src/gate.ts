@@ -9,7 +9,7 @@ import { directoryOf, realResolve, type Access } from './paths.js';
  * policy files and reports both.
  *
  * Standing answers, narrowest first: this path, everything in its directory, and that directory for ANY
- * function. Subjects are a hierarchy at `path.sep` ({@link PermissionRequest.prefix}), so a directory
+ * function. Subjects are a hierarchy at `path.sep` (`PermissionRequest.separators`), so a directory
  * answer covers everything below it, whatever directory a later request is in. A body reaching ABOVE a
  * granted directory is asked again. The realpath keeps that sound: a symlink inside a granted tree that
  * points out of it is asked about at its target. The `*` form is also how an installation configures a
@@ -33,7 +33,7 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
       { subject: `${fn} ${dir}`,  label: `Always allow ${who} to ${verb} anything in ${dir}` },
       { subject: `* ${dir}`,      label: `Always allow ANY function to ${verb} anything in ${dir}` },
     ],
-    prefix: path.sep,
+    separators: [path.sep],
   };
 }
 

@@ -237,8 +237,10 @@ async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: str
   // Asked under `tool_function`, not the function's own name: that name is the MODEL's, so a gate qualified
   // by it would mint a fresh id per definition, and a standing answer for "any function" filed under one
   // would never be read by another. Which function asked lives in the subject instead.
+  // Specifiers nest at `:` (`node:` holds every builtin) and `/` (`node:fs/` holds its submodules), so a
+  // standing answer ending at either covers what lies beneath it, configured ones included (`* node:`).
   const permit = await ctx.gate({ namespace, gate: 'import', subject: `${fn} ${spec}`, label, fallback: false,
-                                  standing: standingAnswers(fn, who, spec) });
+                                  standing: standingAnswers(fn, who, spec), separators: [':', '/'] });
   if (!permit.allowed) {
     // The source rides in the message because this one surfaces as a thrown error inside a body the
     // model wrote, where "not permitted" alone reads as something to be debugged or routed around.

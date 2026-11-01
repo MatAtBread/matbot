@@ -48,17 +48,20 @@ export interface PermissionRequest {
    */
   standing?: readonly { readonly subject: string; readonly label: string }[];
   /**
-   * Where this gate's subjects form a HIERARCHY, the separator that marks one level: a standing answer
-   * ENDING in it also covers every subject (or standing subject) that starts with it. A grant for
-   * `/home/me/` then covers `/home/me/a/b.txt` without the call site listing every directory above the
-   * file. Absent ⇒ exact match only.
+   * Where this gate's subjects form a HIERARCHY, the separators that mark a level: a standing answer
+   * ENDING in one of them also covers every subject (or standing subject) that starts with it. A grant for
+   * `/home/me/` then covers `/home/me/a/b.txt`, and one for `node:` covers `node:fs/promises`, without
+   * the call site listing every level above the subject. Absent or empty ⇒ exact match only.
    *
-   * Only a stored subject ending at the boundary matches by prefix, never a bare string prefix, or a grant
-   * for the file `/x/notes.txt` would also cover `/x/notes.txt.bak`. It is the boundary rule
-   * `importPermitted` applies to a module restriction. A policy still parses nothing: it compares
-   * strings at a boundary the call site names. A denial matches the same way.
+   * Only a stored subject ending at a boundary matches by prefix, never a bare string prefix, or a grant
+   * for the file `/x/notes.txt` would also cover `/x/notes.txt.bak` and one for `lodash` would cover
+   * `lodash-es`. It is the boundary rule `importPermitted` applies to a module restriction. A policy still
+   * parses nothing: it compares strings at boundaries the call site names. A denial matches the same way.
+   *
+   * Set it only where the subjects really nest. An origin or a secret's name is not a hierarchy, and a
+   * prefix there would let `https://api.x` cover `https://api.x.evil`.
    */
-  prefix?: string;
+  separators?: readonly string[];
 }
 
 /**

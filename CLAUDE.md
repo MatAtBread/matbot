@@ -770,8 +770,9 @@ prompt was already six options and the case it exists for is a model asking the 
 broader denials are installation authoring — a configured `deny:<gate>` entry may name any subject the
 call site offers as a standing answer (a directory, `* x` for every function), matching exactly what the
 same entry would allow. Where a call site's subjects form a hierarchy it says so, with
-`PermissionRequest.prefix`: a stored subject ENDING at that separator then covers everything beneath it,
-so a grant for a directory covers its subtree without the request listing every directory above a file.
+`PermissionRequest.separators`: a stored subject ENDING at one of them then covers everything beneath it,
+so a grant for a directory covers its subtree, and `node:` every builtin, without the request listing
+every level above its subject. Paths declare `[path.sep]`, module specifiers `[':', '/']`.
 It was nearly a `covers` list carrying those ancestors, which grew with the depth of the tree. The
 boundary is what keeps it sound: a bare prefix would let a file grant cover `notes.txt.bak`, and an origin
 grant cover `api.x.evil`. That is why it is opt-in per request and absent for any gate whose subjects are

@@ -53,7 +53,7 @@ test('an async read is asked about by realpath, with the file, its directory and
   assert.equal(asked[0]!.gate, 'fs-read');
   assert.equal(asked[0]!.subject, `probe@1 ${file}`);
   assert.deepEqual(asked[0]!.standing!.map(s => s.subject), [`probe@1 ${file}`, `probe@1 ${srcDir}`, `* ${srcDir}`]);
-  assert.equal(asked[0]!.prefix, path.sep, 'subjects are a hierarchy at the path separator');
+  assert.deepEqual(asked[0]!.separators, [path.sep], 'subjects are a hierarchy at the path separator');
 });
 
 test('a refused async call rejects with EACCES and the refusal, and is not asked again in the same invocation', async () => {

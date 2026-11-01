@@ -62,8 +62,8 @@ export function serialised<T>(work: () => Promise<T>): Promise<T> {
 /**
  * Whether a standing answer covers this act: the exact subject, or any broader subject the call site
  * offered as a {@link PermissionRequest.standing} answer. Where the call site declares a hierarchy
- * ({@link PermissionRequest.prefix}), a stored subject ending at its boundary also covers anything
- * beneath it.
+ * ({@link PermissionRequest.separators}), a stored subject ending at one of its boundaries also covers
+ * anything beneath it.
  *
  * Over strings this policy never parses: the call site enumerates how its own subjects generalise and
  * names the boundary, so `node:` admits `node:fs` here and `/home/me/` admits `/home/me/a/b.txt` without
@@ -74,9 +74,8 @@ const allows = (answer: StandingAnswer | undefined, req: PermissionRequest): boo
   if (answer === true) return true;
   if (answer === undefined) return false;
   const candidates = [req.subject, ...(req.standing ?? []).map(o => o.subject)];
-  const { prefix } = req;
-  return answer.some(stored => candidates.some(c =>
-    c === stored || (prefix !== undefined && prefix !== '' && stored.endsWith(prefix) && c.startsWith(stored))));
+  const nests = (stored: string): boolean => (req.separators ?? []).some(sep => sep !== '' && stored.endsWith(sep));
+  return answer.some(stored => candidates.some(c => c === stored || (nests(stored) && c.startsWith(stored))));
 };
 
 /**

@@ -121,11 +121,14 @@ a second host's needs.
   against the exact subject only, so `deny:<gate>` could not name a directory or `* x` for every
   function. It now matches the call site's standing subjects too, as an allow does. "Always deny" from a
   prompt still stores only the exact subject asked about.
-- **`PermissionRequest.prefix`** declares that a gate's subjects form a hierarchy at a separator. A standing
-  answer ending in it (allow or deny) then covers every subject that starts with it, so `/home/me/` covers
-  `/home/me/a/b.txt`. It is opt-in per request, and matches only at the boundary: a stored subject not
-  ending in the separator still matches exactly, so a file grant does not cover a sibling whose name it
-  prefixes. A gate whose subjects are not a hierarchy (an origin, a secret's name) leaves it unset.
+- **`PermissionRequest.separators`** declares that a gate's subjects form a hierarchy. A standing answer
+  (allow or deny) ending in one of the separators then covers every subject that starts with it, so
+  `/home/me/` covers `/home/me/a/b.txt` and `node:` covers `node:fs/promises`. It is opt-in per request,
+  and matches only at a boundary: a stored subject not ending in a separator still matches exactly, so a
+  file grant does not cover a sibling whose name it prefixes, nor `lodash` cover `lodash-es`. gate-fs-node
+  declares `[path.sep]`; the import gate declares `[':', '/']`, so a configured `* node:` (every function,
+  every builtin) now applies. A gate whose subjects are not a hierarchy (an origin, a secret's name)
+  leaves it unset.
 - **`FunctionRunner.import(spec, caller, options?)`** takes the importing invocation as an `ImportCaller`
   (who is asking, and the gate it asks through), which a runner hands to whatever mediates the module it
   returns. function-tools builds one per invocation, keyed and qualified as its import gate is.

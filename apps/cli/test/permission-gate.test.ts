@@ -386,10 +386,10 @@ test('a configured denial may name any standing subject the call site offers, as
 });
 
 test('a declared hierarchy lets a stored subject ending at the boundary cover what lies beneath it', async () => {
-  const fsReq = (subject: string, dir: string, prefix?: string): PermissionRequest => ({
+  const fsReq = (subject: string, dir: string, sep?: string): PermissionRequest => ({
     gate: 'tool_function.fs-read', subject, label: 'l', fallback: false,
     standing: [{ subject, label: 'x' }, { subject: `* ${dir}`, label: 'y' }],
-    ...(prefix !== undefined ? { prefix } : {}),
+    ...(sep !== undefined ? { separators: [sep] } : {}),
   });
   const { gate } = policy({ 'tool_function.fs-read': ['* /home/me/', 'f /x/notes.txt'] });
   const snap = await gate.snapshot();
@@ -403,6 +403,19 @@ test('a declared hierarchy lets a stored subject ending at the boundary cover wh
   assert.deepEqual(await denied.gate.decide(fsReq('f /home/me/.ssh/keys/id', '/home/me/.ssh/keys/', '/'), seen.ask), refused('configuration'));
   assert.deepEqual(await denied.gate.decide(fsReq('f /home/me/notes', '/home/me/', '/'), seen.ask), permitted('configuration'));
   assert.equal(seen.asked.length, 0);
+});
+
+test('module specifiers nest at : and /, so a configured every-function, every-builtin answer applies', async () => {
+  const imp = (subject: string, spec: string): PermissionRequest => ({
+    gate: 'tool_function.import', subject: `${subject} ${spec}`, label: 'l', fallback: false,
+    standing: [{ subject: `${subject} ${spec}`, label: 'x' }, { subject: `* ${spec}`, label: 'y' }],
+    separators: [':', '/'],
+  });
+  const snap = await policy({ 'tool_function.import': ['* node:', 'probe lodash', 'probe @aws-sdk/'] }).gate.snapshot();
+  assert.deepEqual(snap(imp('other', 'node:fs/promises')), permitted('configuration'), '* node: covers any builtin, any depth');
+  assert.deepEqual(snap(imp('probe', 'lodash')), permitted('configuration'));
+  assert.deepEqual(snap(imp('probe', 'lodash-es')), refused('fallback'), 'lodash does not end at a boundary, so is exact');
+  assert.deepEqual(snap(imp('probe', '@aws-sdk/client-s3')), permitted('configuration'), 'a configured scope covers its packages');
 });
 
 // ── Snapshots: the answer with nobody to ask, queried synchronously ────────────
