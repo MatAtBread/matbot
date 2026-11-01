@@ -22,7 +22,7 @@ import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
 export { createDefaultGate, denyKey, toStandingAnswer, toScopedAnswers, DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY } from './gate.js';
 export type { StandingAnswer, ScopedAnswers } from './gate.js';
 export { makeGateActionTool } from './tool.js';
-export type { GateAnswer, GateEntry } from './tool.js';
+export type { GateAnswer, GateEntry, SessionStore, SessionStoreReport } from './tool.js';
 
 /** The tools a host seeds alongside the default gate. One today; a list because that is what a host's
  *  builtin seeding (`builtinTools`) takes. */

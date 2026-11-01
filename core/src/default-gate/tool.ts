@@ -1,5 +1,5 @@
 import { refusalMessage, type PluginSettings, type Tool, type ToolContext, type ToolContract, type ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, denyKey, isPolicyOption, migratedFor, serialised, sessionMemory, toScopedAnswers, type ScopedAnswers, type StandingAnswer } from './gate.js';
+import { DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY, denyKey, isPolicyOption, migratedFor, persistSessionMemory, serialised, sessionMemory, toScopedAnswers, type ScopedAnswers, type StandingAnswer } from './gate.js';
 
 /** A standing answer in force for one gate in one scope: `always` allows every subject, `subjects` allows
  *  exactly those. There is no arm for "no answer" — a gate with none simply is not reported, because an
@@ -46,14 +46,30 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ answers: GateAnswer[]; denials?: GateAnswer[] }, { action: 'get'; gate?: string }>
       | ToolContract<{ entries: GateEntry[] }, { action: 'list'; gate?: string; match?: string }>
       | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; ids: string[] }>
-      | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; gate?: string; subject?: string }>;
+      | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; gate?: string; subject?: string }>
+      // Where a "for this session" answer is kept. `store` absent reports it; `null` reverts to the
+      // installation's configured default (memory, unless configured otherwise).
+      | ToolContract<SessionStoreReport, { action: 'session-store'; store?: SessionStore | null }>;
   }
 }
+
+/** Where the default policy keeps an answer given "for this session". */
+export type SessionStore = 'memory' | 'settings';
+
+export interface SessionStoreReport {
+  store:   SessionStore;
+  /** Answers moved from memory into settings by switching to `settings` — present only when some were. */
+  moved?:  number;
+  message: string;
+}
+
+const STORES: readonly SessionStore[] = ['memory', 'settings'];
 
 type GateInput =
   | { action: 'get';   gate?: string }
   | { action: 'list';  gate?: string; match?: string }
-  | { action: 'clear'; gate?: string; subject?: string; ids?: string[] };
+  | { action: 'clear'; gate?: string; subject?: string; ids?: string[] }
+  | { action: 'session-store'; store?: SessionStore | null };
 
 const DENY = denyKey('');
 const gateOf = (key: string): string => key.startsWith(DENY) ? key.slice(DENY.length) : key;
@@ -164,6 +180,10 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
     }
   };
 
+  // Anything but `settings` is memory: that is the policy's default, and how it reads an unrecognised value.
+  const storeInEffect = async (): Promise<SessionStore> =>
+    await settings.get<unknown>(SESSION_STORE_KEY) === 'settings' ? 'settings' : 'memory';
+
   return {
     name: 'gate_action',
     description:
@@ -187,16 +207,21 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
       'so a gate an installation configured keeps that setting.\n\n' +
       'Forgetting a DENIAL asks the user first, since it undoes a refusal they chose; forgetting an ' +
       'allow does not. This tool cannot GRANT permission: the only way to author a standing answer at ' +
-      'runtime is to answer a prompt that names the specific act.',
+      'runtime is to answer a prompt that names the specific act.\n\n' +
+      '"session-store" reports where "for this session" answers are kept, and with "store" changes it: ' +
+      '"memory" (the default — forgotten when matbot restarts) or "settings" (kept until forgotten here, ' +
+      'so a session\'s answers survive a restart). Switching to "settings" also keeps the answers already ' +
+      'given. "store": null reverts to the installation\'s configured default.',
     inputSchema: {
       type:     'object',
       required: ['action'],
       properties: {
-        action:  { type: 'string', enum: ['get', 'list', 'clear'], description: 'The operation to perform.' },
+        action:  { type: 'string', enum: ['get', 'list', 'clear', 'session-store'], description: 'The operation to perform.' },
         gate:    { type: 'string', description: 'A gate id, e.g. "plugin.add" or "tools.overwrite". Absent means every gate. Not with "ids".' },
         match:   { type: 'string', description: 'list only: keep entries whose gate, subject or session contains this text.' },
         ids:     { type: 'array', items: { type: 'string' }, description: 'clear only: the ids of entries "list" reported, to forget exactly those.' },
         subject: { type: 'string', description: 'clear only: forget just this subject (a tool name, plugin specifier, provider profile, MCP server) rather than the whole gate. Requires "gate". Prefer "ids".' },
+        store:   { type: ['string', 'null'], enum: ['memory', 'settings', null], description: 'session-store only: where "for this session" answers are kept from now on; null reverts to the configured default. Absent reports it.' },
       },
     },
     executor: {
@@ -340,7 +365,30 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
           return;
         }
 
-        yield { type: 'error', message: `Unknown action "${String((act as { action: unknown }).action)}" — expected "get", "list" or "clear".` };
+        if (act.action === 'session-store') {
+          // Not gated: it changes where an answer someone already gave is kept, and how long — never what
+          // is allowed. Every answer it keeps was given at a prompt that named the act.
+          const before = await storeInEffect();
+          if (act.store === null) await settings.delete(SESSION_STORE_KEY);
+          else if (act.store !== undefined) {
+            if (!STORES.includes(act.store)) {
+              yield { type: 'error', message: `session-store: "store" is "memory" or "settings" (or null to revert to the configured default), not ${JSON.stringify(act.store)}.` };
+              return;
+            }
+            await settings.set(SESSION_STORE_KEY, act.store);
+          }
+          const store = await storeInEffect();
+          const moved = store === 'settings' && before !== 'settings' ? await persistSessionMemory(settings) : 0;
+          const message = store === 'settings'
+            ? 'Answers given "for this session" are kept in settings, under each session\'s id: they survive a restart and stay until forgotten with "clear".'
+              + (moved > 0 ? ` ${moved} answer(s) held in memory were moved there.` : '')
+            : 'Answers given "for this session" are kept in memory: they end when matbot restarts.'
+              + (before === 'settings' ? ' Those already in settings stay there, and still apply in their sessions.' : '');
+          yield { type: 'result', value: { store, ...(moved > 0 ? { moved } : {}), message } };
+          return;
+        }
+
+        yield { type: 'error', message: `Unknown action "${String((act as { action: unknown }).action)}" — expected "get", "list", "clear" or "session-store".` };
       },
     },
   };

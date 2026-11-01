@@ -937,3 +937,34 @@ test('gate_action asked first after an upgrade lists what was stored in the unsc
   const { entries } = await call<{ entries: Entry[] }>(makeGateActionTool(settings), { action: 'list', gate: 'http.request' });
   assert.deepEqual(entries.map(e => [e.gate, e.subject]), [['http.request', 'http://house:8800']]);
 });
+
+// ── Where session answers are kept ────────────────────────────────────────────
+
+test('gate_action session-store reports and changes where session answers are kept, and keeps the ones already given', async () => {
+  const s = 'session-store-1';
+  const { gate, settings } = policy();
+  const tool = makeGateActionTool(settings);
+  await gate.decide(req({ subject: '@x/kept' }), recorder('0|session|allow').ask, { session: s });
+
+  assert.equal((await call<{ store: string }>(tool, { action: 'session-store' })).store, 'memory', 'the default');
+  const on = await call<{ store: string; moved?: number; message: string }>(tool, { action: 'session-store', store: 'settings' });
+  assert.equal(on.store, 'settings');
+  assert.ok((on.moved ?? 0) >= 1, 'the answer already given is moved, so it survives a restart');
+  assert.deepEqual((await settings.get<Record<string, unknown>>('plugin.add'))?.[s], ['@x/kept']);
+  assert.deepEqual(await gate.decide(req({ subject: '@x/kept' }), undefined, { session: s }), permitted('session'), 'and still applies');
+
+  await gate.decide(req({ subject: '@x/later' }), recorder('0|session|allow').ask, { session: s });
+  assert.deepEqual((await settings.get<Record<string, unknown>>('plugin.add'))?.[s], ['@x/kept', '@x/later'], 'a new answer goes straight to settings');
+
+  const off = await call<{ store: string; message: string }>(tool, { action: 'session-store', store: null });
+  assert.equal(off.store, 'memory', 'null reverts to the default');
+  assert.match(off.message, /already in settings stay there/);
+  assert.equal(await settings.get('#session-store'), undefined);
+  await assert.rejects(call(tool, { action: 'session-store', store: 'disk' }), /"memory" or "settings"/);
+});
+
+test('session-store is not an answer: list and get do not report it', async () => {
+  const { settings } = policy({ '#session-store': 'settings' });
+  const tool = makeGateActionTool(settings);
+  assert.deepEqual(await call(tool, { action: 'list' }).then(r => (r as { entries: Entry[] }).entries.filter(e => e.gate.startsWith('#'))), []);
+});

@@ -202,8 +202,9 @@ a second host's needs.
   (open, like a gate id), `PermissionRequest.lifetimes` (what a call site permits remembering an act for),
   the `'session'` `PermissionSource` with its `refusalMessage`, and `HTTP_TOOL_SESSION`. A session answer
   is kept in memory by default, keyed by principal and session, and out of reach of every tool;
-  `'#session-store': settings` in the gate's namespace persists it instead. It is offered only where there
-  is a session someone works in. `gate_action` reports and clears session answers (`session`, `inMemory`).
+  `'#session-store': settings` in the gate's namespace persists it instead — or `gate_action
+  session-store`, which also moves the answers already in memory. It is offered only where there is a
+  session someone works in. `gate_action` reports and clears session answers (`session`, `inMemory`).
 - **`FormField.axes`, `FormAxis`, `FORM_AXIS_SEPARATOR`** — a select that is the product of independent
   choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
   marked `submit` is drawn as the buttons that send the answer.

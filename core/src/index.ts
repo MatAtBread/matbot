@@ -79,4 +79,4 @@ export * from './assemble.js';
 // The default permission policy: what `assembleMachine` seeds when a host passes no `gate`, exported for a
 // policy that composes over it (`createDefaultGate(settings, previous)`) and for tests.
 export { defaultGate, createDefaultGate, createGateTools, makeGateActionTool, denyKey, toStandingAnswer, toScopedAnswers, DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY } from './default-gate/index.js';
-export type { StandingAnswer, ScopedAnswers, GateAnswer, GateEntry } from './default-gate/index.js';
+export type { StandingAnswer, ScopedAnswers, GateAnswer, GateEntry, SessionStore, SessionStoreReport } from './default-gate/index.js';

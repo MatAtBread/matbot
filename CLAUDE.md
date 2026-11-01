@@ -799,7 +799,9 @@ configured, and is ignored with a warning naming it: read as an answer it would 
 ever, and ignored silently a configured denial would quietly stop denying. Where a session answer goes
 is the policy's one option, `#session-store` (a `#` key is never a gate id): `memory` by default — out
 of reach of every tool, being in no file, and gone at restart — or `settings`, under the session's id,
-where it stays until forgotten, sessions never being deleted. Memory is keyed by principal as well as
+where it stays until forgotten, sessions never being deleted. `gate_action session-store` sets it, ungated:
+it decides how long an answer a human gave is kept, never what is allowed, and switching to `settings`
+moves the answers already held in memory so they survive the restart the switch is for. Memory is keyed by principal as well as
 session, because a session can be shared and one principal's answer for their work is not another's.
 
 **The most specific answer wins**, and the policy still parses nothing to find it: the call site lists an
@@ -826,7 +828,7 @@ loads it).
 `list` one entry at a time (with its session, and whether only memory holds it), each with an id that is a digest of the entry, found by substring because a
 subject's format is its call site's, and `clear` takes the ids back; forgetting a *denial* is itself gated
 (`gate_action.forget-denial`), being a refusal the user chose. There is
-deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
+deliberately no `set` for an answer, because the write path for a runtime actor is answering a prompt that names
 the specific act. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
 from the listing rather than described as "will ask", since an absent key says only that nobody
 answered — what happens then is the call site's `fallback` and whatever policy is registered. A

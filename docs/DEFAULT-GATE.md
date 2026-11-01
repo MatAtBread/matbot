@@ -83,7 +83,7 @@ standing denial of something narrower.
 (a `#` key is never a gate id): `memory`, the default — kept until matbot restarts, and out of reach of
 every tool, being in no file — or `settings`, beside the `'*'` answers under the session's id, kept until
 forgotten. Sessions are never deleted, so persisted session answers accumulate until `gate_action`
-clears them.
+clears them. `gate_action`'s `session-store` action changes it at run time, as below.
 
 This is also the supported way to make a gated operation work for callers that have **no prompt
 channel** — `invokeTool`, a trigger, a compiled skill, `POST /tools/:name` — which otherwise get the
@@ -156,8 +156,14 @@ again; at a door with nobody to ask the act would fall to its site's fallback, w
 Writes re-read inside the same queue as the policy's own, so two clears at once cannot restore what the
 other removed.
 
-There is deliberately no `set`: the write path for a runtime actor is answering a prompt that names
-the specific act.
+- `{ action: 'session-store', store? }` — where *for this session* answers are kept: absent reports it,
+  `'memory'` or `'settings'` sets it, `null` reverts to the configured default. Switching to `settings`
+  moves the answers already held in memory there, so they survive the next restart; switching back
+  leaves persisted ones where they are, still applying in their sessions. Not gated: it changes how long
+  an answer someone gave is kept, never what is allowed.
+
+There is deliberately no `set` for an answer: the write path for a runtime actor is answering a prompt
+that names the specific act.
 
 ## Gate ids
 

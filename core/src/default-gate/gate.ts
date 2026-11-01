@@ -130,6 +130,29 @@ export function sessionMemory(): Map<string, Map<string, StandingAnswer>> {
   return mine;
 }
 
+/**
+ * Move this principal's session answers out of memory into settings, under each session's id — what
+ * switching `#session-store` to `settings` means for the answers already given, which would otherwise end
+ * at the next restart despite the switch. Merged into what settings hold, inside the write queue. Returns
+ * how many answers (session × key) moved.
+ */
+export function persistSessionMemory(settings: PluginSettings): Promise<number> {
+  return serialised(async () => {
+    const sessions = sessionMemory();
+    let moved = 0;
+    for (const [session, keys] of sessions) {
+      for (const [key, answer] of keys) {
+        const current = new Map(toScopedAnswers(await settings.get<unknown>(key)));
+        current.set(session, answer === true ? true : answer.reduce<StandingAnswer>(adding, current.get(session) ?? []));
+        await settings.set(key, Object.fromEntries(current));
+        moved++;
+      }
+    }
+    sessions.clear();
+    return moved;
+  });
+}
+
 function rememberInMemory(session: string, key: string, subject: string | true): void {
   const sessions = sessionMemory();
   let keys = sessions.get(session);
