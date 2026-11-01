@@ -57,6 +57,13 @@ a second host's needs.
   additive, so a 0.4.x plugin loads. But each plugin peer-depends on `plugin-api` with a caret range, and
   on 0.x `^0.4.x` excludes 0.5.0, so npm refuses the install (`ERESOLVE`). Plugins with no change of their
   own are republished at 0.5.0 for that reason alone; upgrade them together with the CLI.
+- **A plugin cannot open the `settings` store, and removes only its own tools.** `settings` holds every
+  plugin's settings, the default gate's standing answers among them, so a plugin able to open it could
+  grant itself anything, and tool-store's `expose` let a model do exactly that. A plugin reaches its own
+  through `services.settings()`; `createStore('settings')` on its machine now throws, in any case.
+  `services.tools.remove` on a plugin's machine leaves another plugin's or the host's tool in place, with
+  a warning: removing it and registering into the gap replaced it without the `tools.overwrite`
+  collision ever being decided.
 - **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
   instead: several co-exist and every one is asked, where the service key held one validator and a second
   had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
@@ -242,6 +249,16 @@ a second host's needs.
   (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
   line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow
   the rest of it.
+- **`tool-store`: a model creates stores of its own and cannot open anyone else's.** `expose` is removed:
+  it gave a model read and write over any namespace, `settings` included. `create` keeps its documents in
+  a namespace of tool-store's own (`store-<name>`), so a model can no longer claim a store a plugin will
+  use once it is installed. A plugin that wants its own store exposed calls `defineStore`, as cognition
+  does. The generated tool is still `<name>_action`. `store_action`'s `namespace` parameter is now
+  `name`. A name whose tool another plugin provides is refused rather than replaced, and `remove`
+  removes a tool only when it removes a definition. Definitions from before 0.5.0 keep their namespace
+  and need no migration. Removing one leaves its documents where a new `create` will not find them. One
+  whose namespace the host now refuses (`settings`) is skipped at boot, with a warning, rather than
+  failing the plugin. A name is at most 57 characters, so its tool name fits a provider's 64.
 - **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
   installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
   like a string.

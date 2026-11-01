@@ -1,12 +1,13 @@
 import type { Tool, ToolRegistry, Hook, PromptFn, FrontendInfo, ProviderAdapter, ProviderConfig, FailedPlugin } from './types.js';
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
+import type { Store } from '@matatbread/matbot-plugin-api';
 import { scopedNotifier, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import type {
   MatbotPlugin, MatbotMachine, MatbotRuntime, Mounted,
   ProviderAdapterFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
-import { makePluginSettings } from './settings.js';
+import { makePluginSettings, SETTINGS_NAMESPACE } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
@@ -345,7 +346,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
 
   // Plugin-scoped settings: bound to this plugin's identity, built once. A plugin reaches only its
   // own settings — there is no way to name another's.
-  const ownSettings = makePluginSettings(services.createStore<SettingsDoc>('settings'), plugin.name);
+  const ownSettings = makePluginSettings(services.createStore<SettingsDoc>(SETTINGS_NAMESPACE), plugin.name);
 
   // Plugin-scoped notifier, likewise built once. See the `Notifier` member below.
   const ownNotifier = scopedNotifier(services.Notifier, plugin.name);
@@ -372,6 +373,16 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     ...services,
     mounted: scopedMounted,
     settings: () => ownSettings,
+    // `settings()` is what makes "a plugin reaches only its own settings" true, and the raw namespace
+    // would undo it: one document per plugin, the default gate's standing answers among them, so a
+    // plugin opening it (or exposing it to a model, as tool-store's `expose` once could) can grant
+    // itself anything. Case-folded because a namespace is a directory on the filesystem backend, and
+    // `Settings` is the same one on macOS and Windows.
+    createStore<T extends { id: string; version: string }>(namespace: string): Store<T> {
+      if (namespace.toLowerCase() === SETTINGS_NAMESPACE)
+        throw new Error(`Plugin "${plugin.name}" cannot open the "${namespace}" store: a plugin reaches its own settings through services.settings(), and no other plugin's.`);
+      return services.createStore<T>(namespace);
+    },
     self: {
       name:      plugin.name,
       specifier: plugin.specifier,
@@ -395,9 +406,17 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     // safety is unaffected, because what is wrapped is the host's capture-safe proxy — both hosts put
     // that stable object on the machine — so a registered distributed Notifier still takes effect.
     Notifier: ownNotifier,
+    // `remove` reaches only this plugin's own tools. Removing another's and registering into the gap
+    // is a replacement the `tools.overwrite` gate never sees — and where the name is model-chosen
+    // (tool-store's `<name>_action`) it was the model's way to replace `gate_action` unasked.
     tools: {
       register:      registerTool,
-      remove:        (name: string) => services.tools.remove(name),
+      remove(name: string) {
+        const existing = services.tools.resolve(name);
+        if (existing === null) return;
+        if (existing.pluginName === plugin.name) { services.tools.remove(name); return; }
+        console.warn(`[matbot] Plugin "${plugin.name}" cannot remove the tool "${name}": it belongs to ${existing.pluginName === undefined ? 'the host' : `"${existing.pluginName}"`}.`);
+      },
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
       removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
