@@ -123,6 +123,20 @@ A broader restriction is expressed somewhere else:
   ask about, and whose rules are out of reach of anything that can write settings;
 - **the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.
 
+## Settings and the tool registry
+
+Two invariants keep a tool — bundled, or one a model drives — from reaching past its own authority
+without a gate:
+
+- **A plugin reaches only its own settings.** `services.settings()` is scoped to the plugin; the raw
+  `settings` store cannot be opened through a plugin's `createStore`, because it holds every plugin's
+  settings, the default gate's standing answers among them. `tool-store`'s `store_action` once *exposed*
+  any namespace, `settings` included, which let a model write the gate answers and grant itself every
+  gate; it now keeps the stores it creates in a namespace of its own and cannot open another's.
+- **A plugin removes only the tools it registered.** Removing another plugin's tool through a plugin's
+  machine and registering into the gap would replace it without the `tools.overwrite` gate; the registry
+  refuses it.
+
 ## The web UI's endpoints
 
 The UI answers gate prompts over HTTP (`POST /sessions/:id/prompt`). Anything that can reach that
@@ -165,13 +179,22 @@ replace it.
 - **Without a runner**, nothing is gated: a body's `import(…)`, `fetch` and `WebSocket` reach the
   platform directly, unbounded in time. That is the default until a runner is configured.
 - **The node runner keeps a body from reaching past the gates.** It runs bodies in matbot's own process,
-  withholds `process`, `globalThis` and `eval`, routes `import(…)` through the import gate and binds a
+  withholds `process`, `globalThis`, `global` and `eval`, routes `import(…)` through the import gate and binds a
   gated `fetch` and `WebSocket`. Code a body compiles from a string would run in the global scope, where
   none of that applies, so the function constructors (`Function`, and every function's `.constructor`)
   and `process.getBuiltinModule` refuse a body however it reaches them, saying why. The type-check refuses
   the plain spellings when the function is defined (`ESCAPE-GATE`). This is aimed at a model that decides
   a task needs something it was not given and looks for another way to it: the intended path asks the
   user, and the other one says it is closed.
+- **A granted module is granted whole.** The import gate asks per *module*, not per path or host: a
+  function allowed `node:fs` then reads and writes every path matbot's user can, and one allowed
+  `node:net` opens any socket. Nothing in the process narrows that — the grant *is* the capability, not a
+  path or host list. So a function granted `node:fs` reads `.env` and the stored gate answers with no
+  escape; the grant is enough. Bounding *which* paths a granted module may touch is the deployment's
+  (the user matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/
+  `--allow-fs-write` cap the process whatever a grant allows), not something the in-process runner does
+  today. Network has a finer gate already — `fetch`/`WebSocket` ask per origin (`tool_function.connect`) —
+  but a raw `node:net` socket, once the module is granted, does not.
 - **It is not a sandbox against hostile code.** A body shares the process's built-ins, so code written to
   interfere with matbot can rewrite them (`Object.prototype`, `JSON`, `Headers.prototype`) and see what
   matbot later passes through them, a provider's credential included. The type-check refuses the plain
@@ -246,9 +269,10 @@ tools should refuse when nobody can be asked is a separate question from the run
   environment, so keep secrets in `.env`.
 - A tool names a secret by key (`${KEY}`) and the vault supplies it: `http`'s `{ Vault: … }` headers
   (gated per origin and key), a provider's `credentials`, a local MCP server's `env`.
-- The `.env` vault is a template, not a secrets manager. Code with filesystem access as matbot's user
-  (`bash`, or a body using the runner escape) can read the file itself. A vault backed by an OS secrets
-  manager is the fix for that.
+- The `.env` vault is a template, not a secrets manager. Code with filesystem access as matbot's user —
+  `bash`, a function granted `node:fs` (no escape needed — see *Code the model writes*), or a body using
+  the runner escape — can read the file itself. A vault backed by an OS secrets manager is the fix for
+  that.
 
 ## Profiles
 
