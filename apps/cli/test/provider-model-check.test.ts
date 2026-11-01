@@ -121,7 +121,7 @@ async function runAdd(model: string, answers: string[], models: (c: ProviderConf
     prompt:     ask,
     vault:      { hasKey: () => true, resolve: async (s: string) => s.replace('${OPENAI_KEY}', 'sk-real') },
     loadPlugin: async (spec: string) => ({ name: spec, provider: () => adapter }),
-    ...bindGate(undefined, 'provider', ask),
+    ...bindGate(undefined, 'provider', ask, {}),
   } as unknown as ToolContext;
   const providers = new ProviderRegistryImpl([]);
   const events: ToolEvent<unknown>[] = [];

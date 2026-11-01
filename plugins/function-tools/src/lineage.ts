@@ -7,8 +7,8 @@ import { TOOL_NAME, versionedSubject } from './compile.js';
 // change to a function under development asked for its imports and connections again.
 //
 // So an edit can be PERMITTED to keep the grants: `tool_function.edit`, asked when a function that holds
-// something to keep is redefined, with "always, for edits to this function in this session" among the
-// answers. A permitted edit links the new version's digest to the lineage it descends from, and every grant
+// something to keep is redefined, and rememberable for this SESSION only — the work in hand, which is
+// what "I am developing this function" means; a new session asks again. A permitted edit links the new version's digest to the lineage it descends from, and every grant
 // is filed under the lineage's first digest — so a grant given during development still holds when the
 // finished function runs in a background job, which is outside any session.
 //
@@ -59,12 +59,13 @@ export class Lineage {
     if (pending.length === 0) return undefined;
 
     const who = what.kind === 'function' ? `function "${what.name}"` : `package "${what.name}"`;
-    const subject = `${what.name}@session:${ctx.session.id}`;
+    const subject = what.name;
     const permit = await ctx.gate({
       namespace: TOOL_NAME, gate: 'edit', subject, fallback: false,
       label: `Keep the permissions given to ${who} — its module imports and network connections — for this new version? ` +
              'If not, each is asked about again the first time the new version uses it.',
-      standing: [{ subject, label: `Always keep them for edits to ${who} in this session` }],
+      standing: [{ subject, label: `keeping them across edits to ${who}` }],
+      lifetimes: ['session'],
     });
     if (!permit.allowed) return 'reset';
     for (const p of pending) await this.link(p.tool, p.to, p.root);

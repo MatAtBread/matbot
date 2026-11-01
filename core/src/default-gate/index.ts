@@ -19,8 +19,8 @@ import type { PluginSettings, Tool } from '@matatbread/matbot-plugin-api';
 import { makeGateActionTool } from './tool.js';
 import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
 
-export { createDefaultGate, denyKey, toStandingAnswer, DEFAULT_GATE_SETTINGS_NS } from './gate.js';
-export type { StandingAnswer } from './gate.js';
+export { createDefaultGate, denyKey, toStandingAnswer, toScopedAnswers, DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY } from './gate.js';
+export type { StandingAnswer, ScopedAnswers } from './gate.js';
 export { makeGateActionTool } from './tool.js';
 export type { GateAnswer, GateEntry } from './tool.js';
 
@@ -33,6 +33,6 @@ export function createGateTools(settings: PluginSettings): Tool[] {
 /** The policy in the shape `assembleMachine` takes as `gate`, and its default. */
 export const defaultGate = {
   namespace: DEFAULT_GATE_SETTINGS_NS,
-  create:    (settings: PluginSettings) => createDefaultGate(settings),
+  create:    (settings: PluginSettings, stored: () => Promise<Record<string, unknown>>) => createDefaultGate(settings, undefined, stored),
   tools:     createGateTools,
 };

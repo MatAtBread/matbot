@@ -8,7 +8,7 @@ import {
   createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
   isMediaRejectedError,
 } from '@matatbread/matbot-core';
-import { bindGate } from '@matatbread/matbot-plugin-api';
+import { bindGate, HTTP_TOOL_SESSION } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { trackOwnConnections } from './own-connections.js';
@@ -509,8 +509,11 @@ export function createWebServer(deps: WebServerDeps) {
 
   function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'pluginName'>) {
     const now = new Date().toISOString();
+    // One fixed id rather than one per request: it is what a permission answer for this door is held
+    // against (`#http` under a gate id in the default policy's settings), and a fresh id per request would be
+    // a session nobody could ever have answered for.
     const stubSession: Session = {
-      id: crypto.randomUUID(), version: crypto.randomUUID(),
+      id: HTTP_TOOL_SESSION, version: crypto.randomUUID(),
       status: 'active', messages: [],
       createdAt: now, updatedAt: now,
     };
@@ -524,7 +527,7 @@ export function createWebServer(deps: WebServerDeps) {
       prompt:       nonInteractivePrompt,
       // `undefined`, never `nonInteractivePrompt`: the stand-in answers with a field's own default, so a
       // gate handed it could not tell "nobody is here" from "a human answered". This route has no human.
-      ...bindGate(deps.permissionGate?.(), tool, undefined, deps.tools),
+      ...bindGate(deps.permissionGate?.(), tool, undefined, { session: stubSession.id }, deps.tools),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
     };

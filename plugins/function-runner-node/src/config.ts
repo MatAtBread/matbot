@@ -133,8 +133,8 @@ export function createRunnerConfigTool(
           const permit = await ctx.gate({
             gate: 'set', subject: TIMEOUT_KEY, label: labelFor(await current()), fallback: false,
             standing: [
-              { subject: TIMEOUT_KEY, label: `Always allow changing \`${TIMEOUT_KEY}\`` },
-              { subject: '*', label: 'Always allow changing this runner\'s settings' },
+              { subject: TIMEOUT_KEY, label: `changing \`${TIMEOUT_KEY}\`` },
+              { subject: '*', label: 'changing this runner\'s settings' },
             ],
           });
           if (!permit.allowed) {

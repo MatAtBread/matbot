@@ -168,9 +168,9 @@ test('a permitted import is gated, and the subject names the function as well as
   // Narrowest first, so a frontend resolving a typed prefix lands on the narrower answer. Each carries
   // its own prose: a subject is a key, and `#execute node:fs/` is a correct key and an unusable question.
   assert.deepEqual(req.standing, [
-    { subject: 'probe node:os', label: 'Always allow function "probe" to import node:os' },
-    { subject: 'probe node:',   label: 'Always allow function "probe" to import any node builtin' },
-    { subject: '* node:os',     label: 'Always allow ANY function to import node:os' },
+    { subject: 'probe node:os', label: 'function "probe" to import node:os' },
+    { subject: 'probe node:',   label: 'function "probe" to import any node builtin' },
+    { subject: '* node:os',     label: 'ANY function to import node:os' },
   ]);
 });
 

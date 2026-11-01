@@ -220,7 +220,7 @@ plugin-visibility ceiling is structural.
   (the default one: Deny / Allow / Always-this-subject / Always-every). The registry `Map` is keyed by
   name, so the later `register()` replaces the earlier entry. An install can skip the prompt for
   exactly the names it means to shadow by listing them under the policy plugin's own settings —
-  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'` (see
+  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'.'*'` (see
   [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your tool
   wins, without blanket-overwriting collisions you would rather hear about.
 - **Shadow, not stack.** Because the `Map` overwrites, the built-in is *gone*, not suspended — if your

@@ -12,7 +12,7 @@ import { mediumGuard } from './storage-base/medium-guard.js';
 import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
 import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins } from './registry.js';
-import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces } from './settings.js';
+import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces, storedSettingsData } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 import { ToolRegistryImpl } from './tool-registry.js';
 import type { ProviderRegistryImpl } from './provider-registry.js';
@@ -52,7 +52,9 @@ export async function preScanStorage(
 /** A permission policy, and the tools that inspect it. Core's own is `defaultGate`. */
 export interface HostGate {
   namespace: string;
-  create(settings: PluginSettings): PermissionGate;
+  /** `stored` reads the namespace's stored document alone, with no configured default under it — for a
+   *  policy migrating a stored format, which must never copy a default into what is stored. */
+  create(settings: PluginSettings, stored: () => Promise<Record<string, unknown>>): PermissionGate;
   tools(settings: PluginSettings): Tool[];
 }
 
@@ -208,8 +210,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // would make that capture resolve to the capturing gate itself — which then calls itself until the
   // stack overflows. A getter keeps the member read late-bound; every consumer resolves it per call.
   const gate = opts.gate ?? defaultGate;
-  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), gate.namespace);
-  let activeGate = gate.create(gateSettings);
+  const gateStore    = createStore<SettingsDoc>('settings');
+  const gateSettings = makePluginSettings(gateStore, gate.namespace);
+  let activeGate = gate.create(gateSettings, storedSettingsData(gateStore, gate.namespace));
 
   const boot = { vault: activeVault, knowledge: knowledgeImpl, notifier: activeNotifier, gate: activeGate };
 

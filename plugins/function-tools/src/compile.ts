@@ -333,14 +333,14 @@ function standingAnswers(fnName: string, who: string, spec: string): { subject: 
   // `@aws-sdk/client-s3` there offered every package in the `@aws-sdk` scope as "anything under".
   const root = spec.split('/', spec.startsWith('@') ? 2 : 1).join('/');
   const dir = spec !== root ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
-  const out = [{ subject: `${fnName} ${spec}`, label: `Always allow ${who} to import ${spec}` }];
+  const out = [{ subject: `${fnName} ${spec}`, label: `${who} to import ${spec}` }];
   if (dir !== undefined) {
-    out.push({ subject: `${fnName} ${dir}`, label: `Always allow ${who} to import anything under ${dir}` });
+    out.push({ subject: `${fnName} ${dir}`, label: `${who} to import anything under ${dir}` });
   }
   if (spec.startsWith('node:')) {
-    out.push({ subject: `${fnName} node:`, label: `Always allow ${who} to import any node builtin` });
+    out.push({ subject: `${fnName} node:`, label: `${who} to import any node builtin` });
   }
-  out.push({ subject: `* ${spec}`, label: `Always allow ANY function to import ${spec}` });
+  out.push({ subject: `* ${spec}`, label: `ANY function to import ${spec}` });
   return out;
 }
 

@@ -655,7 +655,7 @@ service **decides** how it is obtained. One boolean question, one answer:
 
 ```ts
 await ctx.gate({ gate: 'add', subject: specifier, label: 'Install plugin **"…"**?', fallback: false });
-// → services.PermissionGate.decide({ gate: 'plugin.add', … }, ask)
+// → services.PermissionGate.decide({ gate: 'plugin.add', … }, ask, { session })
 ```
 
 The call site used to do both jobs, and the *how* had already grown past a prompt: core held a
@@ -674,6 +674,19 @@ once per site instead of implied at each.
 per-turn and frontend-owned. The runner passes the RAW `opts.prompt`, never the stand-in that answers
 with a field's default — that substitute would make "nobody is here" indistinguishable from "a human
 answered with the default". `ToolContext.prompt` keeps the stand-in exactly as before.
+
+**Where the act is made is the host's to state, beside the request (`PermissionContext`).** Today that
+is the session, which a *for this session* answer is held against. It is a third argument rather than a
+request field because the request is the tool's to write, and a tool that could name its session could
+borrow another session's answers; `bindGate` takes it, required, from the door — the runner's turn, an
+`invokeTool` caller's `opts.session` — since a door that omitted it would silently never be offered a
+session lifetime, with nothing failing. A registration (`tools.overwrite`) has none. The HTTP tool door
+has no session of its own, so it states a fixed sentinel, `HTTP_TOOL_SESSION` (`#http`), as its stub
+session's id: something an installation can configure what that door may do unattended against, which a
+fresh id per request was not. A `#` session is a door, not work anybody is doing, so no *session* answer
+is offered there. The context is open: a later field (which door a call came in by) is how
+*interactive* or *background* answers would become expressible, as more scopes to look an answer up in,
+without another parameter.
 
 **`ctx.gate` takes the SUFFIX; the host qualifies it with the tool's registered name.** So a plugin
 cannot address a gate it does not own (tool-name collision on `register` closes the impersonation
@@ -710,7 +723,7 @@ that captured `services.PermissionGate` and then registered itself would delegat
 ever; the hosts expose a getter instead, and every consumer resolves per call. Gate ids are open at
 runtime, and an unknown one must **ask**: "unregistered ⇒ loose" cannot mean "⇒ allow" here.
 
-**A synchronous caller gets a snapshot, not a second model.** `PermissionGate.snapshot()` (and
+**A synchronous caller gets a snapshot, not a second model.** `PermissionGate.snapshot(context)` (and
 `ToolContext.gateSnapshot()`) is the policy's answer with nobody to ask, read once, asynchronously, and
 then queried synchronously, for a call site that interposes on a synchronous API (`gate-fs-node` under
 `readFileSync`), which blocks the very thread a prompt or a settings read needs. It is taken per
@@ -733,8 +746,9 @@ nothing to branch on and no distinct denial error.
 
 **The answer carries `source`, and it is for the REPORT, not the control flow.** A decision is
 `{ allowed, source }`, where `source` names *which test in the cascade produced the answer* — not who
-the actor was: `user` (a human was asked and answered, a no included), `configuration` (a standing
-answer in force), `fallback` (nothing decided and nobody was reachable). It exists because a refusal
+the actor was: `user` (a human was asked and answered, a no included), `session` (an answer held for
+this session), `configuration` (a standing answer held everywhere or at a door), `fallback` (nothing
+decided and nobody was reachable). It exists because a refusal
 that says only `Cancelled.` reads to a model as a malfunction, so it goes looking for the malfunction:
 it retries under another spelling, probes for a bug, or reaches for a route around the gate. Call sites
 therefore render `refusalMessage(decision)`, which names the layer and — for the two sources nothing in
@@ -763,13 +777,39 @@ The bare asking gate (`askPermissionGate`, `plugin-api/host`) remains the floor 
 hand-assembled machine.
 
 It reproduces today's behaviour — ask, offer standing answers, remember them — keyed
-`(gate, subject)`, in its own settings namespace, plus one **"Always deny"**: the exact subject being
-asked about and nothing broader, stored under `deny:<gate>` (a key no gate id can have, so the allow keys
-keep their format) and checked before the allows. One button rather than a deny per scope, because the
-prompt was already six options and the case it exists for is a model asking the same thing again;
-broader denials are installation authoring — a configured `deny:<gate>` entry may name any subject the
-call site offers as a standing answer (a directory, `* x` for every function), matching exactly what the
-same entry would allow. Where a call site's subjects form a hierarchy it says so, with
+`(gate, subject)`, in its own settings namespace, with **lifetimes**: an answer is for *this time*, *this
+session* or *always*, and the same three for a denial. *For this session* is the reason: "this work needs
+my photos directory" should neither grant it for ever nor ask about every file. The prompt is three
+independent choices — subject, lifetime, effect — sent as `FormField.axes`, which the web UI draws as two
+dropdowns and the Allow / Deny buttons that answer (`FormAxis.submit`), reading as a phrase ending in its
+verb; a frontend that draws only buttons ignores `axes` and is offered a short list of the common
+combinations in `options`, each value encoding the same three coordinates (`1|session|allow`), so there is
+one decoder and an answer is only ever a combination that was rendered. A call site may restrict the
+lifetimes (`PermissionRequest.lifetimes` — keeping a function's grants across its edits is *session*
+only), and a label names WHAT and never for how long, because the lifetime is the policy's to word.
+
+Storage is one key per gate id holding a map from **scope** to answer — `'*'` everywhere, a session's
+id, a `#` door sentinel — denials beside the allows under `deny:<gate>`. The map is required even for
+`'*'` alone, rather than a bare list meaning "everywhere": one shape, so a reader never guesses which a
+value is. The format before scopes (a list or `true` under the gate id) is migrated once, from the
+**stored** document only — the host hands the policy a reader of it (`HostGate.create(settings,
+stored)`), because migrating through the layered facade would copy a configured default into what is
+stored, the seeding *Default plugin settings* rejects. An unscoped value that remains is therefore
+configured, and is ignored with a warning naming it: read as an answer it would need a second shape for
+ever, and ignored silently a configured denial would quietly stop denying. Where a session answer goes
+is the policy's one option, `#session-store` (a `#` key is never a gate id): `memory` by default — out
+of reach of every tool, being in no file, and gone at restart — or `settings`, under the session's id,
+where it stays until forgotten, sessions never being deleted. Memory is keyed by principal as well as
+session, because a session can be shared and one principal's answer for their work is not another's.
+
+**The most specific answer wins**, and the policy still parses nothing to find it: the call site lists an
+act's subjects narrowest first, so a match ranks by the earliest of them it covers, then by the longer
+stored subject (a deeper prefix, where subjects nest), then this session's answer before one held
+everywhere, then a denial before an allow should two tie. So an allow of `* node:fs` beside a denial of
+`* node:` admits that module and no other builtin, and an allow of one function's directory reopens it
+inside a denial for every function — the case a flat "a denial always wins" rule could not express. The
+subject outranks the scope deliberately: a broad answer for this session does not lift a standing denial
+of something narrower. Where a call site's subjects form a hierarchy it says so, with
 `PermissionRequest.separators`: a stored subject ENDING at one of them then covers everything beneath it,
 so a grant for a directory covers its subtree, and `node:` every builtin, without the request listing
 every level above its subject. Paths declare `[path.sep]`, module specifiers `[':', '/']`.
@@ -778,12 +818,12 @@ boundary is what keeps it sound: a bare prefix would let a file grant cover `not
 grant cover `api.x.evil`. That is why it is opt-in per request and absent for any gate whose subjects are
 not a hierarchy (`http.secret`, `tool_function.connect`). Like everything else here it is the policy's: the gate
 itself is still yes or no, so an installation authors defaults the ordinary
-way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': [bash, plugin] } }` —
+way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite': { '*': [bash, plugin] } } }` —
 the name of the package the policy was published as until 0.5.0, kept because stored answers and every
 installation are keyed by it; the "names no loaded plugin" warning exempts that one key, since nothing
 loads it).
 `gate_action` (`get` / `list` / `clear`) reports the standing answers **in effect** and forgets them —
-`list` one entry at a time, each with an id that is a digest of the entry, found by substring because a
+`list` one entry at a time (with its session, and whether only memory holds it), each with an id that is a digest of the entry, found by substring because a
 subject's format is its call site's, and `clear` takes the ids back; forgetting a *denial* is itself gated
 (`gate_action.forget-denial`), being a refusal the user chose. There is
 deliberately no `set`, because the write path for a runtime actor is answering a prompt that names
@@ -801,12 +841,12 @@ through a decision*; it does not put that decision out of the model's reach. The
 its standing answers in plugin settings, so they live wherever the active `StorageBackend` keeps
 settings — on the filesystem and SQLite backends, under `.data` (`.data/settings/`, `.data/matbot.db`).
 That is read-write to `bash`, and `docker-bash` mounts `.data` read-write too, so on any install that
-loads a shell tool the model can write `{"plugin.add": true}` itself (or the SQLite row holding it) and
+loads a shell tool the model can write `{"plugin.add": {"*": true}}` itself (or the SQLite row holding it) and
 every later install proceeds unasked (reads are not cached, so it
 takes effect at once, not at the next restart). The same was true of the `__matbot_core__` key this
 replaces, over a narrower blast radius. So the property is **"a privileged operation is decided
 somewhere replaceable, and by default that means a human is asked"** — not "the LLM cannot change
-this". A deployment that needs a real boundary ships a gate with its rules compiled in, or keeps them
+this". (A *session* answer kept in memory, the default, is the one exception: it is in no file.) A deployment that needs a real boundary ships a gate with its rules compiled in, or keeps them
 somewhere the tools it grants cannot reach; that is the policy plugin's problem by construction, which
 is the point of the seam. And plainly: **a gate that auto-approves `plugin.add` has granted
 everything**, a loaded plugin having full Node capability with no in-process sandbox.

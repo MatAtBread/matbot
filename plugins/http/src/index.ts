@@ -105,8 +105,8 @@ async function resolveHeaders(
     const permit = await ctx.gate({
       gate: 'secret', subject: `${origin} ${key}`, label, fallback: false,
       standing: [
-        { subject: `${origin} ${key}`, label: `Always allow sending ${key} to ${origin}` },
-        { subject: origin,            label: `Always allow sending any vault key to ${origin}` },
+        { subject: `${origin} ${key}`, label: `sending ${key} to ${origin}` },
+        { subject: origin,            label: `sending any vault key to ${origin}` },
       ],
     });
     if (!permit.allowed) return { ok: false, message: refusalMessage(permit, `Sending ${key} to ${origin}`) };
@@ -143,7 +143,7 @@ function originGate(ctx: ToolContext): (url: URL) => Promise<void> {
   const decide = async (origin: string): Promise<void> => {
     const permit = await ctx.gate({
       gate: 'request', subject: origin, label: `Send an HTTP request to **${origin}**?`, fallback: false,
-      standing: [{ subject: origin, label: `Always allow requests to ${origin}` }],
+      standing: [{ subject: origin, label: `requests to ${origin}` }],
     });
     if (!permit.allowed) throw new Error(refusalMessage(permit, `A request to ${origin}`));
   };

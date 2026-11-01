@@ -96,6 +96,20 @@ const lateBoundNotifier: Notifier = {
  * key's default. Seeding on write would make a later config edit work or not work depending on
  * unrelated write history, which is unexplainable to whoever edits the yaml.
  */
+/**
+ * What is STORED for a namespace, with no installation default layered under it — for a one-off migration of
+ * a stored format, which must rewrite what was written and never copy a configured default into the stored
+ * document (the seeding {@link makePluginSettings} refuses). Not a `PluginSettings` method: a plugin has no
+ * business telling a configured value from a stored one, which is the whole design of the layering.
+ */
+export function storedSettingsData(rawStore: Store<SettingsDoc>, namespace: string): () => Promise<Record<string, unknown>> {
+  const id = slugSettingsNamespace(namespace);
+  return async () => {
+    const raw = await rawStore.get(id);
+    return raw !== null && isSettingsDoc(raw) ? raw.data : {};
+  };
+}
+
 export function makePluginSettings(rawStore: Store<SettingsDoc>, namespace: string): PluginSettings {
   const id = slugSettingsNamespace(namespace);
   // Wrapped here, not at the call sites, for the reason installDefaults is consulted here: the writers

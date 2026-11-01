@@ -15,6 +15,8 @@ path the body names is asked about again:
   same for **any** function (`* <dir>/`). A directory grant covers everything below it. A body that moves
   above it is asked again, and so is one that follows a symlink out of it, because the link is asked about
   at its target. A grant for a file covers that file only, not `notes.txt.bak` beside it.
+- **for this session or always:** "allow anything in `~/Photos/` for this session" is how a piece of work
+  reaches a directory without asking about every file, and without granting it for ever.
 
 It uses the same `PermissionGate` and the same store of standing answers as every other gate, so there's no
 separate setting. `gate_action` lists and clears these answers like any others. To pre-authorise, or to deny
@@ -23,10 +25,13 @@ outright, configure the gate:
 ```yaml
 default_settings:
   '@matatbread/matbot-default-gate':
-    'tool_function.fs-read':       ['* /home/matt/project/src/']
-    'deny:tool_function.fs-read':  ['* /home/matt/.ssh/']
-    'deny:tool_function.fs-write': ['* /home/matt/project/']
+    'tool_function.fs-read':       { '*': ['* /home/matt/project/src/'] }
+    'deny:tool_function.fs-read':  { '*': ['* /home/matt/.ssh/'] }
+    'deny:tool_function.fs-write': { '*': ['* /home/matt/project/'] }
 ```
+
+`'*'` holds the answer everywhere. Where answers overlap, the most specific wins: a denial of a directory
+inside a granted one carves it out, and a grant inside a denied one reopens it.
 
 ## Sync and async
 

@@ -1,5 +1,5 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
-import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate, PermissionRequest } from './types.js';
+import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionContext, PermissionGate, PermissionRequest } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
@@ -43,12 +43,18 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
  * is how "no human is reachable" reaches the policy, and a substitute would make that undecidable.
  * `gate` is the registered `PermissionGate`; it is a non-optional service, but a hand-assembled
  * machine (a test, a minimal embedder) may still have none, so the asking default stands in.
+ *
+ * `context` is where the call is made — its session, which a `session` answer is held against — and is
+ * the binder's to state, never the tool's: the request a tool writes cannot carry it, so no tool can claim
+ * another session's answers. Required, because a door that omitted it would silently never be offered a
+ * session lifetime.
  */
 export function bindGate(
-  gate:   PermissionGate | undefined,
-  tool:   string | Pick<Tool, 'name' | 'pluginName'>,
-  ask:    PromptFn | undefined,
-  tools?: { resolve(name: string): Pick<Tool, 'pluginName'> | null },
+  gate:    PermissionGate | undefined,
+  tool:    string | Pick<Tool, 'name' | 'pluginName'>,
+  ask:     PromptFn | undefined,
+  context: PermissionContext,
+  tools?:  { resolve(name: string): Pick<Tool, 'pluginName'> | null },
 ): Pick<ToolContext, 'gate' | 'gateSnapshot'> {
   const name  = typeof tool === 'string' ? tool : tool.name;
   const owner = typeof tool === 'string' ? undefined : tool.pluginName;
@@ -62,14 +68,14 @@ export function bindGate(
   return {
     gate: async req => {
       const qualified = qualify(req);
-      const decision = await (gate ?? askPermissionGate).decide(qualified, ask);
+      const decision = await (gate ?? askPermissionGate).decide(qualified, ask, context);
       if (!decision.allowed && decision.source === 'fallback') reportUnattended(name, qualified.gate, qualified.subject);
       return decision;
     },
     // Not reported when unattended: a synchronous caller cannot ask even with a human present, so a
     // fallback here says nothing about whether anybody was there.
     gateSnapshot: async () => {
-      const snapshot = await (gate ?? askPermissionGate).snapshot();
+      const snapshot = await (gate ?? askPermissionGate).snapshot(context);
       return req => snapshot(qualify(req));
     },
   };
@@ -141,7 +147,7 @@ export function invokeTool<K extends string, const P>(
     // The raw `opts.prompt`, not the rejecting stand-in above: a gate must be able to tell "nobody is
     // here" from "a human answered", and `POST /tools/:name` reaching a privileged tool is exactly the
     // non-interactive case the request's `fallback` exists to answer.
-    ...bindGate(machine.PermissionGate, tool, opts.prompt, machine.tools),
+    ...bindGate(machine.PermissionGate, tool, opts.prompt, { session: opts.session.id }, machine.tools),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),

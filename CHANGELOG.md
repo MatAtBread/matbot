@@ -138,6 +138,23 @@ a second host's needs.
 - **`FunctionRunner.import(spec, caller, options?)`** takes the importing invocation as an `ImportCaller`
   (who is asking, and the gate it asks through), which a runner hands to whatever mediates the module it
   returns. function-tools builds one per invocation, keyed and qualified as its import gate is.
+- **`PermissionGate.decide(req, ask, context)` and `snapshot(context)`** take a `PermissionContext` — where
+  the act is made, as the host states it (today its `session`). `bindGate(gate, tool, ask, context, tools?)`
+  requires one: the runner passes the turn's session, `invokeTool` `opts.session`, a registration none, and
+  `POST /tools/:name` `HTTP_TOOL_SESSION`. Not a request field, which a tool writes and could use to borrow
+  another session's answers. A replacement gate that delegates passes it on.
+- **The default gate's standing answers are scoped, and the format before 0.5.0 is not read.** A gate's
+  value is a map from scope to answer — `{ '*': [bash, plugin] }`, `'*'` being everywhere, a session's id
+  that session, `#http` the HTTP tool door — and `default_settings:` must use it. A stored answer in the old
+  shape (a bare list or `true`) is migrated once, from the stored document alone so no configured default
+  is copied into it; one in `default_settings:` is ignored, with a warning naming the key.
+- **The most specific standing answer wins, not every denial.** Ranked by the narrowest subject the call
+  site offered, then the deeper prefix, then this session's answer over one held everywhere, then a
+  denial on a tie. So an allow of `* node:fs` beside a denial of `* node:` admits `node:fs` and no other
+  builtin, where every builtin was refused before, and an allow beneath a broader denial now applies.
+- **A standing answer's label names what is allowed, never for how long** (`function "probe" to import
+  node:fs`, not `Always allow …`): the policy words the lifetime. Every call site in this repository is
+  updated; a plugin offering `standing` answers should drop the prefix.
 
 ### API gaps filled
 
@@ -179,6 +196,18 @@ a second host's needs.
   and the report's new `parameters` gives each one's parameters (`ToolCheckParameter`: name, optional, and
   the JSON Schema its resolved type projects to), read from the program the check just ran. An index that
   cannot resolve types (the browser) omits it.
+- **Permission lifetimes: an answer for this session.** The default gate asks allow or deny, *this time*,
+  *for this session* or *always*, and for which of the subjects the call site offers — "this work needs my
+  photos directory" without granting it for ever or answering a prompt per file. `PermissionLifetime`
+  (open, like a gate id), `PermissionRequest.lifetimes` (what a call site permits remembering an act for),
+  the `'session'` `PermissionSource` with its `refusalMessage`, and `HTTP_TOOL_SESSION`. A session answer
+  is kept in memory by default, keyed by principal and session, and out of reach of every tool;
+  `'#session-store': settings` in the gate's namespace persists it instead. It is offered only where there
+  is a session someone works in. `gate_action` reports and clears session answers (`session`, `inMemory`).
+- **`FormField.axes`, `FormAxis`, `FORM_AXIS_SEPARATOR`** — a select that is the product of independent
+  choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
+  marked `submit` is drawn as the buttons that send the answer.
+  `options` stays the answer for a frontend that ignores it, in the same encoding.
 
 ### Bug fixes
 
@@ -190,12 +219,16 @@ a second host's needs.
 
 ### Optional
 
+- **`frontend-web`** — a permission prompt reads as a phrase: what, and for how long, as dropdowns, then
+  Allow and Deny as the buttons that answer (an axis marked `submit`). `POST /tools/:name` runs its tool in the fixed session `#http`, which an
+  installation configures that door's unattended answers against.
+- **`function-tools`** — keeping a function's grants across an edit (`tool_function.edit`) is remembered
+  for this session only, a real lifetime rather than the session's id inside the subject.
 - **`function-runner-node`** — `permit_imports` is retired, and `function_runner_config` reads and sets
   `timeoutMs` alone. An installation that authored it gets a warning naming the replacement, a standing
   denial in the default gate's `default_settings:`, rather than its restriction silently becoming "ask at
   the call"; `clear` forgets a stored override of it. It duplicated the gate, which can refuse a module
-  outright by rule and, once its "most specific wins" precedence lands, allow narrowly beneath a broad
-  denial.
+  outright by rule and, with "most specific wins", allow narrowly beneath a broad denial.
 - **`tool-types`** — the modules a body is typed against are every builtin less those the gate refuses
   it, and `IMPORT-GATE` refuses a literal import of any refused module, a package included: a package
   resolves by ordinary lookup, so leaving it out of `paths` refused nothing. The checker's worker sends the

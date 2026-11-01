@@ -127,12 +127,16 @@ gate a standing denial:
 default_settings:
   '@matatbread/matbot-default-gate':
     'deny:tool_function.import':
-      - '* node:child_process'   # no function may import it, and nobody is asked
-      - '* node:module'
+      '*':                         # everywhere — every session, every door
+        - '* node:child_process'   # no function may import it, and nobody is asked
+        - '* node:module'
 ```
 
-`*` means any function, and an entry ending in `:` or `/` covers everything under it
-(`'* node:'` is every builtin). A body that names a denied module in a literal `import(…)`
+The `'*'` key is where the answer holds: everywhere. (A session's id instead holds it in that session
+only — what *for this session* at a prompt stores.) In a subject, `*` means any function, and an
+entry ending in `:` or `/` covers everything under it (`'* node:'` is every builtin). Where answers
+disagree the most specific wins, so an allow of `'* node:fs'` beside a denial of `'* node:'` admits
+`node:fs` and no other builtin. A body that names a denied module in a literal `import(…)`
 fails its type-check, saying why, rather than failing at its first call. "Always deny" at the
 prompt stores the same kind of answer, for that one function and module.
 
@@ -376,22 +380,25 @@ A gate says *what* is being asked and what happens when nobody can be asked; the
 **permission policy** decides how the acceptance is obtained. The one matbot ships
 (core's default gate — see [DEFAULT-GATE.md](DEFAULT-GATE.md)) asks, offers to remember the answer, and honours what it
 remembered. It is built in — like the `plugin` and `provider` tools, it is there on every install,
-including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is *Deny* / *Allow* / *Always allow "<subject>"* / *Always allow
-every `<gate>`*; non-interactively — a boot, an HTTP install — each call site's own stated answer
+including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is
+allow or deny, *this time*, *for this session* or *always*, for the act or a broader subject the call site
+offers — dropdowns ending in Allow and Deny buttons in the web UI, and *Deny* / *Allow* / *Allow … for this session* / *Always
+allow "<subject>"* / *Always allow every `<gate>`* as buttons elsewhere; non-interactively — a boot, an HTTP install — each call site's own stated answer
 applies, which for a tool collision is "overwrite" (what lets a deliberate override win with nobody
 there to answer) and for everything else is "no".
 
 Standing answers live in its own settings namespace, `@matatbread/matbot-default-gate`, one key per gate id, so an
-installation can author them up front — the same thing the two *Always* options write:
+installation can author them up front — the same thing the *Always* options write:
 
 ```yaml
 default_settings:
   '@matatbread/matbot-default-gate':
-    'tools.overwrite': [bash, plugin]   # or: true
-    'plugin.add': ['@acme/our-tools']
+    'tools.overwrite': { '*': [bash, plugin] }   # or: { '*': true }
+    'plugin.add':      { '*': ['@acme/our-tools'] }
 ```
 
-A **list of subjects** allows exactly those and asks about everything else — the form to reach for
+`'*'` is the scope — everywhere; a session's id, or `#http` for the HTTP tool door, holds an answer
+only there. A **list of subjects** allows exactly those and asks about everything else — the form to reach for
 when one particular override is intended and any *other* collision is a surprise you want to hear
 about. `true` allows every subject of that gate. Anything else asks. As everywhere in
 `default_settings:`, a stored answer then wins over this one;

@@ -204,7 +204,7 @@ async function runUpdate(
     signal:     new AbortController().signal,
     prompt:     ask,
     vault:      noKeys,
-    ...bindGate(undefined, 'provider', ask),
+    ...bindGate(undefined, 'provider', ask, {}),
   } as unknown as ToolContext;
 
   const events: ToolEvent<unknown>[] = [];

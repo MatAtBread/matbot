@@ -69,7 +69,8 @@ async function resolveToolCollision(
     // cannot also express "trust everything plugin foo registers", and no policy wants that yet.
     label,
     fallback: true,
-  }, prompt);
+  // No session: a registration belongs to no piece of work, so no answer can be held for one.
+  }, prompt, {});
   // Said out loud when nobody could be asked, as it was before the gate existed: a boot-time overwrite
   // is the one decision here that proceeds with no human and no record of itself, and "my tool silently
   // changed hands" is exactly the report this line answers. A policy that overwrites after ASKING

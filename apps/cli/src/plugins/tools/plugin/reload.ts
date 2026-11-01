@@ -209,6 +209,6 @@ async function approveNewCode(ctx: ToolContext, entry: string, now: Promise<stri
   return ctx.gate({
     gate: 'reload', subject: entry, fallback: false,
     label: `The code of plugin **"${entry}"** has changed since it was loaded. Load the new code? It runs with matbot's full access.`,
-    standing: [{ subject: entry, label: `Always allow reloading "${entry}" when its code has changed` }],
+    standing: [{ subject: entry, label: `reloading "${entry}" when its code has changed` }],
   });
 }

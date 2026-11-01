@@ -30,7 +30,8 @@ export interface PermissionRequest {
    * The standing answers this act may be remembered as, NARROWEST FIRST — what a policy offers beside
    * "just this once", each as the subject it would store and the prose a human reads. A policy consults
    * {@link subject} and then each of these in order, and may store whichever was chosen; absent, the
-   * only standing answer is the exact subject, labelled by the policy.
+   * only standing answer is the exact subject, labelled by the policy. The order is also the policy's
+   * measure of SPECIFICITY: where stored answers disagree, the one covering the earliest of these wins.
    *
    * The call site supplies the SUBJECTS because only it knows how its own generalise: a module specifier
    * widens by protocol or by directory, a plugin specifier by registry scope, and neither rule is one a
@@ -42,6 +43,10 @@ export interface PermissionRequest {
    * be stable and unambiguous, and keys make terrible prose. `#execute node:fs/` is a correct key and an
    * unusable question. A policy rendering `Always allow "<subject>"` can only ever show the key, because
    * saying it in English needs exactly the knowledge the subject was built to avoid requiring.
+   *
+   * A label names WHAT is allowed and never for how long: a phrase completing "Allow …"
+   * (`function "probe" to import node:fs`), because the lifetime is the policy's to offer and to word —
+   * "Always allow …", "Allow … for this session".
    *
    * A policy must never store a subject that was not offered here: that is what keeps this from widening
    * the memory semantics of every other gate.
@@ -62,7 +67,50 @@ export interface PermissionRequest {
    * prefix there would let `https://api.x` cover `https://api.x.evil`.
    */
   separators?: readonly string[];
+  /**
+   * The lifetimes this act may be REMEMBERED for, if a policy offers more than one; absent ⇒ whichever it
+   * offers. "Just this once" is not a lifetime anything stores, so it is always offered and never listed.
+   * For an act whose memory only makes sense within one piece of work (keeping a function's grants across
+   * its edits), `['session']`.
+   */
+  lifetimes?: readonly PermissionLifetime[];
 }
+
+/**
+ * How long a standing answer holds. matbot's own three are named here, and the type stays **open**, like a
+ * gate id: a policy may hold answers for scopes of its own, and one it does not implement is simply never
+ * offered — nor, read back out of storage, ever honoured as an allow.
+ */
+export type PermissionLifetime =
+  /** This act, now. Nothing is remembered. */
+  | 'once'
+  /** Every act it covers in the {@link PermissionContext.session} it was given in, and no other. */
+  | 'session'
+  /** Every act it covers, wherever it is asked — every session, and every door. */
+  | 'always'
+  | (string & {});
+
+/**
+ * Where a request is being made, as the HOST states it — never the request, which a tool writes: a tool that
+ * could name its session could borrow another's answers. Passed beside the request rather than on it for the
+ * same reason. Open: a later field (the door a call came in by) extends what a policy can scope an answer to
+ * without a new parameter.
+ */
+export interface PermissionContext {
+  /**
+   * The session the act is made in, which a `session` answer is held against. Absent where there is none —
+   * a plugin's registration, a hand-assembled call — so a `session` lifetime cannot be offered. A value
+   * starting `#` is a sentinel for a door with no session of its own ({@link HTTP_TOOL_SESSION}): answers
+   * may be configured against it, but it is not a session anybody works in, so a policy offers no
+   * `session` lifetime there.
+   */
+  readonly session?: string;
+}
+
+/** The {@link PermissionContext.session} of a tool called directly over HTTP (`POST /tools/:name`): one fixed
+ *  key, because each request is otherwise a session of its own, and an installation configuring what that
+ *  door may do unattended needs something to configure it against. */
+export const HTTP_TOOL_SESSION = '#http';
 
 /**
  * Which test in the cascade produced an answer — not *who* answered, but which of the layers a policy
@@ -78,6 +126,9 @@ export type PermissionSource =
   /** A standing answer in force — an installation's configured floor or a remembered one; the settings
    *  layering that holds them makes the two indistinguishable by construction, so they share a source. */
   | 'configuration'
+  /** A standing answer held for this session only ({@link PermissionLifetime}): a decision someone made for
+   *  the work in hand, which a new session asks about again. */
+  | 'session'
   /** Nothing decided and nobody was reachable: {@link PermissionRequest.fallback} stands. */
   | 'fallback'
   | (string & {});
@@ -119,6 +170,7 @@ export function refusalMessage(decision: PermissionDecision, act?: string): stri
   switch (decision.source) {
     case 'user':          return `${what} — the user declined. ${stop}`;
     case 'configuration': return `${what} — the installation's permission policy does not allow it. ${stop}`;
+    case 'session':       return `${what} — the user declined it for this session. ${stop}`;
     case 'fallback':      return `${what} — permission was required and nobody could be asked, so the non-interactive default applied. Nothing is broken; it needs a user present, or a standing answer in the installation's policy.`;
     default:              return `${what} — refused by the permission policy (${decision.source}). ${stop}`;
   }
@@ -134,11 +186,14 @@ export function refusalMessage(decision: PermissionDecision, act?: string): stri
  * one — passed per call rather than held, because it is per-turn and frontend-owned. `undefined`
  * means **no human is reachable**; a policy that wants to behave differently then simply checks it.
  *
+ * `context` is where the act is made, as the host states it ({@link PermissionContext}); a policy that
+ * scopes nothing ignores it. A delegating gate passes it on unchanged.
+ *
  * A gate that wants "my rules, else the previous behaviour" captures the gate it displaces and
  * delegates to it, so a pair composes in either load order.
  */
 export interface PermissionGate {
-  decide(req: PermissionRequest, ask: PromptFn | undefined): Promise<PermissionDecision>;
+  decide(req: PermissionRequest, ask: PromptFn | undefined, context: PermissionContext): Promise<PermissionDecision>;
   /**
    * What this policy would answer with nobody to ask — `decide(req, undefined)` — as a SYNCHRONOUS
    * function, for a caller that cannot await: a synchronous API it interposes on (`readFileSync`) blocks
@@ -152,9 +207,9 @@ export interface PermissionGate {
    * snapshot to see it.
    *
    * A policy that delegates to the gate it displaced takes that gate's snapshot alongside its own, so the
-   * pair compose here as they do in `decide`.
+   * pair compose here as they do in `decide`. `context` is the invocation's, as for `decide`.
    */
-  snapshot(): Promise<PermissionSnapshot>;
+  snapshot(context: PermissionContext): Promise<PermissionSnapshot>;
 }
 
 /** A {@link PermissionGate}'s answer with nobody to ask, read in advance: see {@link PermissionGate.snapshot}.

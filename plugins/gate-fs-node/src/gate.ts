@@ -14,9 +14,10 @@ import { directoryOf, realResolve, type Access } from './paths.js';
  * granted directory is asked again. The realpath keeps that sound: a symlink inside a granted tree that
  * points out of it is asked about at its target. The `*` form is also how an installation configures a
  * directory for every function, allow or deny, under `default_settings:`
- * (`'tool_function.fs-read': ['* /home/me/project/']`, `'deny:tool_function.fs-read': ['* /home/me/.ssh/']`).
- * A denial wins over an allow that also covers the act, so a configured deny carves a subtree out of a
- * broader grant.
+ * (`'tool_function.fs-read': { '*': ['* /home/me/project/'] }`, `'deny:tool_function.fs-read': { '*': ['* /home/me/.ssh/'] }`).
+ * The most specific answer wins, so a configured deny carves a subtree out of a broader grant, and an allow
+ * of one directory reopens it inside a broader deny. "For this session" is how a piece of work reaches a
+ * directory without granting it for ever.
  */
 export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Access, op: string, real: string): PermissionRequest {
   const dir  = directoryOf(real);
@@ -29,9 +30,9 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
               (access === 'write' ? ' Writing includes creating, changing and deleting.' : ''),
     fallback: false,
     standing: [
-      { subject: `${fn} ${real}`, label: `Always allow ${who} to ${verb} ${real}` },
-      { subject: `${fn} ${dir}`,  label: `Always allow ${who} to ${verb} anything in ${dir}` },
-      { subject: `* ${dir}`,      label: `Always allow ANY function to ${verb} anything in ${dir}` },
+      { subject: `${fn} ${real}`, label: `${who} to ${verb} ${real}` },
+      { subject: `${fn} ${dir}`,  label: `${who} to ${verb} anything in ${dir}` },
+      { subject: `* ${dir}`,      label: `ANY function to ${verb} anything in ${dir}` },
     ],
     separators: [path.sep],
   };

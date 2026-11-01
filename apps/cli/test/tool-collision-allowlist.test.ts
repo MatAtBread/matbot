@@ -8,7 +8,7 @@ import { collider, otherCollider, machine } from './fixtures/collision-harness.t
 // The policy is the default gate's, out of ITS settings namespace — not the registry's, and the key the
 // registry used to hold (`__matbot_core__.overwriteToolsOnCollision`) is deliberately not
 // migrated. Both tests here want the same floor, so it is installed once.
-installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': ['contested'] }]]));
+installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': { '*': ['contested'] } }]]));
 after(() => { installSettingsDefaults(undefined); });
 
 const gate = (settings: Store<never>) =>
@@ -18,7 +18,7 @@ const gate = (settings: Store<never>) =>
 // was skipped, and the unlisted one survives only if it was consulted.
 function recordingPrompt(): { asked: string[]; prompt: PromptFn } {
   const asked: string[] = [];
-  const prompt = (async (f: { label: string }) => { asked.push(f.label); return 'deny'; }) as PromptFn;
+  const prompt = (async (f: { label: string }) => { asked.push(f.label); return '0|once|deny'; }) as PromptFn;
   return { asked, prompt };
 }
 

@@ -23,7 +23,7 @@ export { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey,
 // that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
 // plugin-api dependency to get it.
 export { applyProviderPatch, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, checkProviderModel, confirmUnlistedModel, modelListed, closestIds } from '@matatbread/matbot-plugin-api';
-export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT, permitted, refused, refusalMessage } from '@matatbread/matbot-plugin-api';
+export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT, permitted, refused, refusalMessage, HTTP_TOOL_SESSION, FORM_AXIS_SEPARATOR } from '@matatbread/matbot-plugin-api';
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.
 export { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
@@ -78,5 +78,5 @@ export * from './knowledge/index.js';
 export * from './assemble.js';
 // The default permission policy: what `assembleMachine` seeds when a host passes no `gate`, exported for a
 // policy that composes over it (`createDefaultGate(settings, previous)`) and for tests.
-export { defaultGate, createDefaultGate, createGateTools, makeGateActionTool, denyKey, toStandingAnswer, DEFAULT_GATE_SETTINGS_NS } from './default-gate/index.js';
-export type { StandingAnswer, GateAnswer, GateEntry } from './default-gate/index.js';
+export { defaultGate, createDefaultGate, createGateTools, makeGateActionTool, denyKey, toStandingAnswer, toScopedAnswers, DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY } from './default-gate/index.js';
+export type { StandingAnswer, ScopedAnswers, GateAnswer, GateEntry } from './default-gate/index.js';

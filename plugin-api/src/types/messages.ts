@@ -132,6 +132,15 @@ export interface FormField {
    *  callers never learn whether the answer was a preset or free text (which is why a picked option
    *  resolves to a string, never an index). Ignored for other types. */
   allowOther?: boolean;
+  /**
+   * select-only presentation hint: the choice is the PRODUCT of these independent axes, which a frontend may
+   * render as one control each — a permission's effect, lifetime and subject. Such a frontend answers with
+   * the chosen values joined by {@link FORM_AXIS_SEPARATOR}, in axis order, and its initial choices are
+   * `default` split the same way. `options` stays the whole answer for a frontend that ignores this, each
+   * value in the same encoding, so it is necessarily a selection from the product: a frontend that cannot
+   * render controls side by side (buttons in a chat) is offered the common cases, never every combination.
+   */
+  axes?:       FormAxis[];
   /** select: matched against an option's VALUE, not its label. */
   default?:    string;
   required?:   boolean;
@@ -140,6 +149,23 @@ export interface FormField {
    *  runner and server never consult this; a frontend with no cancel UI simply can't fire one. */
   cancelable?: boolean;
 }
+
+/** One independent choice in a {@link FormField.axes} select. `label`, when present, captions the control. */
+export interface FormAxis {
+  name:    string;
+  label?:  string;
+  options: FormOption[];
+  /**
+   * Presentation hint: draw this axis as the BUTTONS that send the answer — one per option, each answering
+   * with the other axes' current choices and its own value — in place of a control plus an OK. For the
+   * choice a question ends on (a permission's allow or deny), which then reads as the verb it is. At most
+   * one axis, and the last. A frontend that ignores it draws a control like any other axis.
+   */
+  submit?: boolean;
+}
+
+/** What joins the per-axis values of a {@link FormField.axes} answer. Option values never contain it. */
+export const FORM_AXIS_SEPARATOR = '|';
 
 /**
  * Canonical values a `type: 'confirm'` prompt resolves to. The rendered label and buttons are a
