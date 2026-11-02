@@ -21,7 +21,7 @@ All you need is an LLM (OpenAI, Anthropic, DeepSeek, Google Gemini, your own loc
 no server, no build step, no backend. The full runtime runs client-side, calling your LLM
 directly. Same core, same plugins, same UI as the Node build. This isn't a demo mode:
 it's a deliberate design choice that makes the browser a first-class, sandboxed deployment
-target.
+target. You can also use the `WebLLM` provider to run an LLM on your browser's GPU! No key or API endpoint needed!
 
 **Everything is a plugin.** Tools, frontends, storage backends, LLM providers, knowledge
 indexes, session editors — all plugins. None of them are hardcoded. The core is genuinely
@@ -38,8 +38,8 @@ UI, memory, skills and a Telegram frontend without ever touching a config file.
 every layer — tools, storage, knowledge index — without it needing to be in every
 signature. Credentials are resolved at runtime and never written to session storage.
 Privileged operations pass through permission gates that ask a human, and refuse when nobody
-can be asked. In the browser, the sandbox means even an overenthusiastic LLM can't touch your
-filesystem. [SECURITY.md](docs/SECURITY.md) sets out the threat model, what is protected, what
+can be asked. In the browser, the sandbox means even an overenthusiastic LLM can't touch your filesystem.
+Under node, [SECURITY.md](docs/SECURITY.md) sets out the threat model, and explains how to defend your host against an over-zealous LLM, what is protected, what
 remains open, and how to deploy.
 
 ---
