@@ -31,7 +31,9 @@ export interface PermissionRequest {
    * "just this once", each as the subject it would store and the prose a human reads. A policy consults
    * {@link subject} and then each of these in order, and may store whichever was chosen; absent, the
    * only standing answer is the exact subject, labelled by the policy. The order is also the policy's
-   * measure of SPECIFICITY: where stored answers disagree, the one covering the earliest of these wins.
+   * measure of SPECIFICITY: where stored answers disagree, the one covering the earliest of these wins —
+   * after depth, where {@link separators} make them a hierarchy: an answer nearer the act (a file inside a
+   * granted directory) beats a farther one, whichever of these each reaches.
    *
    * The call site supplies the SUBJECTS because only it knows how its own generalise: a module specifier
    * widens by protocol or by directory, a plugin specifier by registry scope, and neither rule is one a
@@ -71,9 +73,19 @@ export interface PermissionRequest {
    * The lifetimes this act may be REMEMBERED for, if a policy offers more than one; absent ⇒ whichever it
    * offers. "Just this once" is not a lifetime anything stores, so it is always offered and never listed.
    * For an act whose memory only makes sense within one piece of work (keeping a function's grants across
-   * its edits), `['session']`.
+   * its edits), `['session']`. Empty: asked EVERY time — nothing is remembered, and no standing answer,
+   * stored or configured, decides it — for an act whose whole point is that a human agrees to this one
+   * (taking back a denial they chose).
    */
   lifetimes?: readonly PermissionLifetime[];
+  /**
+   * The words for the two answers, where "Allow" and "Deny" would misread: `yes` lets the act proceed, `no`
+   * refuses it. For a request whose act is itself about permission — confirming a standing DENIAL, where
+   * "Allow" would mean "deny it" (`{ yes: 'Deny', no: 'Cancel' }`), or taking one back (`{ yes: 'Forget',
+   * no: 'Keep' }`). Prose only, like {@link label}: the decision is still `allowed` or not. Absent ⇒ the
+   * policy's own words.
+   */
+  answers?: { readonly yes: string; readonly no: string };
 }
 
 /**

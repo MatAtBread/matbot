@@ -763,6 +763,101 @@ test('the report does not promise a prompt that a broader answer will pre-empt',
   assert.match(result.message, /Other standing answers remain for tool_function\.import/);
 });
 
+// ── Denying what nobody is asked about ────────────────────────────────────────
+// A file inside a directory already granted is never prompted for, so a denial of it has to be given some
+// other way. `deny` gives it, asking the user every time: a denial the model wrote unasked would be one the
+// gated forget then protected, and could refuse the management gates at will.
+
+function asking(allowed: boolean): { ctx: never; asked: PermissionRequest[] } {
+  const asked: PermissionRequest[] = [];
+  return { asked, ctx: { gate: async (r: PermissionRequest) => { asked.push(r); return { allowed, source: 'user' }; } } as never };
+}
+
+test('deny stores a standing denial everywhere once the user confirms it, asking every time', async () => {
+  const { settings, gate } = policy();
+  await settings.set('tool_function.fs-read', { '*': ['* /home/me/project/'] });
+  const tool = makeGateActionTool(settings);
+  const yes = asking(true);
+  const result = await call<{ denied?: Entry; message: string }>(tool, { action: 'deny', gate: 'tool_function.fs-read', subject: '* /home/me/project/.env' }, yes.ctx);
+  assert.deepEqual(yes.asked.map(r => [r.gate, r.subject, r.fallback, r.lifetimes, r.answers]),
+                   [['deny', 'deny:tool_function.fs-read * /home/me/project/.env', false, [], { yes: 'Deny', no: 'Cancel' }]],
+                   'asked, nothing about it can be remembered, and "yes" reads as the denial it is');
+  assert.deepEqual(await settings.get('deny:tool_function.fs-read'), { '*': ['* /home/me/project/.env'] });
+  assert.equal(result.denied?.effect, 'deny');
+  assert.equal(result.denied?.subject, '* /home/me/project/.env');
+  assert.doesNotMatch(result.message, /nothing confirms/, 'the gate has other answers to compare the spelling with');
+
+  // And it carves the file out of the grant.
+  const fs = (file: string, dir: string): PermissionRequest => ({
+    gate: 'tool_function.fs-read', subject: `probe ${file}`, label: 'l', fallback: false,
+    standing: [{ subject: `probe ${file}`, label: 'a' }, { subject: `* ${file}`, label: 'b' }, { subject: `probe ${dir}`, label: 'c' }, { subject: `* ${dir}`, label: 'd' }],
+    separators: ['/'],
+  });
+  const snap = await gate.snapshot(NOWHERE);
+  assert.deepEqual(snap(fs('/home/me/project/.env', '/home/me/project/')), refused('configuration'));
+  assert.deepEqual(snap(fs('/home/me/project/a.ts', '/home/me/project/')), permitted('configuration'));
+
+  const again = asking(true);
+  const dup = await call<{ denied?: Entry; message: string }>(tool, { action: 'deny', gate: 'tool_function.fs-read', subject: '* /home/me/project/.env' }, again.ctx);
+  assert.equal(again.asked.length, 0, 'already denied: nothing to ask');
+  assert.match(dup.message, /already denied/);
+});
+
+test('deny stores nothing the user declines, or when nobody can be asked', async () => {
+  const { settings } = policy();
+  const tool = makeGateActionTool(settings);
+  const declined = await call<{ denied?: Entry; message: string }>(tool, { action: 'deny', gate: 'plugin.add' }, asking(false).ctx);
+  assert.equal(declined.denied, undefined);
+  assert.match(declined.message, /the user declined/);
+  assert.equal(await settings.get('deny:plugin.add'), undefined);
+
+  const unattended = { gate: async () => refused('fallback') } as never;
+  await call(tool, { action: 'deny', gate: 'plugin.add', subject: '@x/foo' }, unattended);
+  assert.equal(await settings.get('deny:plugin.add'), undefined);
+});
+
+test('deny without a subject denies the whole gate, and says when nothing confirms the spelling', async () => {
+  const { settings } = policy();
+  const tool = makeGateActionTool(settings);
+  const yes = asking(true);
+  const result = await call<{ message: string }>(tool, { action: 'deny', gate: 'plugin.add' }, yes.ctx);
+  assert.match(yes.asked[0]!.label, /EVERY plugin\.add/);
+  assert.deepEqual(await settings.get('deny:plugin.add'), { '*': true });
+  assert.match(result.message, /nothing confirms the gate id/);
+});
+
+test('deny refuses gate_action\'s own gates and anything that is not a gate id, asking nobody', async () => {
+  const { settings } = policy();
+  const tool = makeGateActionTool(settings);
+  for (const gate of ['gate_action.forget-denial', 'gate_action.deny', 'fs-read', '#session-store', 'deny:plugin.add', '']) {
+    const seen = asking(true);
+    await assert.rejects(call(tool, { action: 'deny', gate, subject: 'x' }, seen.ctx), /deny:/, gate);
+    assert.equal(seen.asked.length, 0, gate);
+  }
+  await assert.rejects(call(tool, { action: 'deny', gate: 'plugin.add', subject: ' ' }, asking(true).ctx), /"subject"/);
+  assert.deepEqual(Object.keys(await settings.entries()), []);
+});
+
+test('forgetting a denial is asked every time: no "always" is offered, and none stored decides it', async () => {
+  const { settings, gate } = policy({ 'gate_action.forget-denial': { '*': true } });
+  await settings.set('deny:http.request', { '*': ['http://b'] });
+  const tool = makeGateActionTool(settings);
+  const seen = asking(false);
+  await call(tool, { action: 'clear', gate: 'http.request', subject: 'http://b' }, seen.ctx);
+  assert.deepEqual(seen.asked[0]?.lifetimes, []);
+  assert.deepEqual(await settings.get('deny:http.request'), { '*': ['http://b'] });
+
+  // Through the real policy: the configured "always" does not decide it, and the prompt offers none.
+  const forget = { gate: 'gate_action.forget-denial', subject: 'deny:http.request http://b', label: 'l', fallback: false, lifetimes: [] };
+  assert.deepEqual(await gate.decide(forget, undefined, { session: 's' }), refused('fallback'));
+  assert.deepEqual((await gate.snapshot(NOWHERE))(forget), refused('fallback'));
+  const rec = recorder('0|once|deny');
+  await gate.decide({ ...forget, answers: { yes: 'Forget', no: 'Keep' } }, rec.ask, { session: 's' });
+  assert.deepEqual(rec.asked[0]?.options?.map(optionLabel), ['Forget', 'Keep'], 'yes or no, in the call site\'s words');
+  assert.equal(rec.asked[0]?.axes, undefined, 'no subject or lifetime to choose: nothing is remembered');
+  assert.equal(rec.asked[0]?.default, '0|once|deny', 'the safe answer is the default');
+});
+
 // ── Most specific wins ────────────────────────────────────────────────────────
 // Where stored answers disagree, the one covering the narrowest of the subjects the call site offered wins
 // — then the deeper prefix, then a session's answer over one held everywhere, then a denial on a tie.

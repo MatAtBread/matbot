@@ -8,8 +8,11 @@ import { directoryOf, realResolve, type Access } from './paths.js';
  * `tool_function.fs-read`), subject `<function> <realpath>` — the same shape as the import gate's, so one
  * policy files and reports both.
  *
- * Standing answers, narrowest first: this path, everything in its directory, and that directory for ANY
- * function. Subjects are a hierarchy at `path.sep` (`PermissionRequest.separators`), so a directory
+ * Standing answers, narrowest first: this path, this path for ANY function, everything in its directory,
+ * and that directory for any function. The file for any function is what excludes one file from a directory
+ * granted (`deny:tool_function.fs-read`: `* /home/me/project/.env` inside `* /home/me/project/`), and it
+ * comes before the function's own directory so that, at the same depth, the file is the narrower answer.
+ * Subjects are a hierarchy at `path.sep` (`PermissionRequest.separators`), so a directory
  * answer covers everything below it, whatever directory a later request is in. A body reaching ABOVE a
  * granted directory is asked again. The realpath keeps that sound: a symlink inside a granted tree that
  * points out of it is asked about at its target. The `*` form is also how an installation configures a
@@ -31,6 +34,7 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
     fallback: false,
     standing: [
       { subject: `${fn} ${real}`, label: `${who} to ${verb} ${real}` },
+      { subject: `* ${real}`,     label: `ANY function to ${verb} ${real}` },
       { subject: `${fn} ${dir}`,  label: `${who} to ${verb} anything in ${dir}` },
       { subject: `* ${dir}`,      label: `ANY function to ${verb} anything in ${dir}` },
     ],

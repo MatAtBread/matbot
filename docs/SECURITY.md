@@ -113,9 +113,11 @@ the stored list is what applies, so a later edit to that gate's configured value
 stored one is cleared. `gate_action get` reports the answers in effect (and any `denials`); `list`
 reports them one entry at a time with an id, optionally those mentioning some text (a host, a function),
 and `clear` forgets the entries named, a gate (reverting it to its configured value), or everything.
-Forgetting a denial asks the user first (`gate_action.forget-denial`), since it undoes a refusal they
-chose; forgetting an allow does not, since it only makes a gate ask again. There is no `set`: the one
-way to give a standing answer at run time is a person answering the prompt that names the act.
+Forgetting a denial asks the user first, every time (`gate_action.forget-denial`), since it undoes a
+refusal they chose; forgetting an allow does not, since it only makes a gate ask again. There is no `set`:
+the one way to give a standing allow at run time is a person answering the prompt that names the act.
+`deny` adds a standing denial, also asking the user every time (`gate_action.deny`), for what is never
+prompted for because a broader allow covers it — one file inside a granted directory.
 
 ### What an answer can change
 

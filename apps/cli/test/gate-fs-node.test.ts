@@ -43,7 +43,7 @@ async function guarded(caller: ImportCaller): Promise<typeof import('node:fs')> 
   return wrapFsModule(realFs, 'fs', await decisionsFor(caller), caller) as typeof import('node:fs');
 }
 
-test('an async read is asked about by realpath, with the file, its directory and the directory for any function on offer', async () => {
+test('an async read is asked about by realpath, with the file and its directory, each for this function and for any, on offer', async () => {
   const { caller, asked } = fakeCaller(() => permitted('user'));
   const fs = await guarded(caller);
   // Spelled relatively and through `..`: one subject however it is written.
@@ -54,7 +54,7 @@ test('an async read is asked about by realpath, with the file, its directory and
   const srcDir = path.join(real, 'src') + path.sep;
   assert.equal(asked[0]!.gate, 'fs-read');
   assert.equal(asked[0]!.subject, `probe@1 ${file}`);
-  assert.deepEqual(asked[0]!.standing!.map(s => s.subject), [`probe@1 ${file}`, `probe@1 ${srcDir}`, `* ${srcDir}`]);
+  assert.deepEqual(asked[0]!.standing!.map(s => s.subject), [`probe@1 ${file}`, `* ${file}`, `probe@1 ${srcDir}`, `* ${srcDir}`]);
   assert.deepEqual(asked[0]!.separators, [path.sep], 'subjects are a hierarchy at the path separator');
 });
 
@@ -185,6 +185,44 @@ test('a file grant does not cover a sibling whose name it prefixes, and a grante
   } finally { realFs.rmSync(sibling); }
 });
 
+// The case a user meets: a directory granted — to one function and to any, as two prompts answered it —
+// and one file or subdirectory inside it to be excluded. The nearer answer wins whichever way the
+// directory was granted.
+test('a file denied for every function is carved out of a directory granted to one function and to any', async () => {
+  const { caller, prompts } = defaultPolicy({
+    'tool_function.fs-read':      { '*': [`probe@1 ${real}${path.sep}`, `* ${real}${path.sep}`] },
+    'deny:tool_function.fs-read': { '*': [`* ${path.join(real, '.env')}`] },
+  }, '0|once|allow');
+  const fs = await guarded(caller);
+  assert.throws(() => fs.readFileSync(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
+  await assert.rejects(fs.promises.readFile(path.join(dir, '.env'), 'utf8'), /permission policy does not allow it/);
+  await assert.rejects(fs.promises.readFile(path.join(dir, 'src', 'escape'), 'utf8'), /permission policy does not allow it/,
+    'nor through a link to it');
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;', 'the rest is still granted');
+  assert.equal(prompts.length, 0);
+});
+
+test('a subdirectory denied for every function is carved out of a directory granted to one function', async () => {
+  const { caller, prompts } = defaultPolicy({
+    'tool_function.fs-read':      { '*': [`probe@1 ${real}${path.sep}`] },
+    'deny:tool_function.fs-read': { '*': [`* ${path.join(real, 'src')}${path.sep}`] },
+  }, '0|once|allow');
+  const fs = await guarded(caller);
+  assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), /permission policy does not allow it/);
+  await assert.rejects(fs.promises.readFile(path.join(dir, 'src', 'b.ts'), 'utf8'), /permission policy does not allow it/);
+  assert.equal(fs.readFileSync(path.join(dir, '.env'), 'utf8'), 'ANTHROPIC_API_KEY=secret', 'outside it, still granted');
+  assert.equal(prompts.length, 0);
+});
+
+test('at the same depth this function\'s answer wins over any function\'s', async () => {
+  const { caller } = defaultPolicy({
+    'tool_function.fs-read':      { '*': [`probe@1 ${path.join(real, 'src')}${path.sep}`] },
+    'deny:tool_function.fs-read': { '*': [`* ${path.join(real, 'src')}${path.sep}`] },
+  }, '0|once|deny');
+  const fs = await guarded(caller);
+  assert.equal(fs.readFileSync(path.join(dir, 'src', 'a.ts'), 'utf8'), 'export const a = 1;');
+});
+
 test('a configured directory allow lets a sync call through with no prompt', async () => {
   const { caller, prompts } = defaultPolicy({ 'tool_function.fs-read': { '*': [`* ${path.join(real, 'src')}${path.sep}`] } }, '0|once|deny');
   const fs = await guarded(caller);
@@ -194,8 +232,8 @@ test('a configured directory allow lets a sync call through with no prompt', asy
 });
 
 test('an "always, in this directory" answer to an async call is seen by later sync calls, and by queued async ones', async () => {
-  // always-1 is the second standing option: this function, anything directly in the directory.
-  const { caller, prompts } = defaultPolicy(undefined, '1|always|allow');
+  // always-2 is the third standing option: this function, anything in the directory.
+  const { caller, prompts } = defaultPolicy(undefined, '2|always|allow');
   const fs = await guarded(caller);
   assert.throws(() => fs.readFileSync(path.join(dir, 'src', 'b.ts'), 'utf8'), /cannot ask/, 'nothing standing yet');
   // Concurrent: serialised, so only the first prompts and the second finds the standing answer it gave.

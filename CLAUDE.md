@@ -805,11 +805,18 @@ moves the answers already held in memory so they survive the restart the switch 
 session, because a session can be shared and one principal's answer for their work is not another's.
 
 **The most specific answer wins**, and the policy still parses nothing to find it: the call site lists an
-act's subjects narrowest first, so a match ranks by the earliest of them it covers, then by the longer
-stored subject (a deeper prefix, where subjects nest), then this session's answer before one held
-everywhere, then a denial before an allow should two tie. So an allow of `* node:fs` beside a denial of
-`* node:` admits that module and no other builtin, and an allow of one function's directory reopens it
-inside a denial for every function — the case a flat "a denial always wins" rule could not express. The
+act's subjects narrowest first, so a match ranks by how far below the stored subject the nearest subject it
+covers lies (0 for an exact match, otherwise the depth of prefix between them), then by the earliest of the
+call site's subjects at that distance, then this session's answer before one held everywhere, then a denial
+before an allow should two tie. So an allow of `* node:fs` beside a denial of `* node:` admits that module
+and no other builtin, a denial of one file (`* /p/.env`) or subdirectory carves it out of a directory
+granted to any function or to one, and an allow of one function's directory reopens it inside a denial for
+every function — the cases a flat "a denial always wins" rule could not express. Depth comes first because
+a hierarchical gate's subjects vary along two axes (which function, how deep), and a stored ancestor
+directory is none of them: ranked by the earliest subject it covered, a tree granted to one function
+covered that function's exact file, and so beat a denial of the file for every function — the very
+denial a user writes to exclude one file from a grant. Without separators every match is exact, and the
+call site's order decides alone. The
 subject outranks the scope deliberately: a broad answer for this session does not lift a standing denial
 of something narrower. Where a call site's subjects form a hierarchy it says so, with
 `PermissionRequest.separators`: a stored subject ENDING at one of them then covers everything beneath it,
@@ -824,12 +831,25 @@ way (`default_settings: { '@matatbread/matbot-default-gate': { 'tools.overwrite'
 the name of the package the policy was published as until 0.5.0, kept because stored answers and every
 installation are keyed by it; the "names no loaded plugin" warning exempts that one key, since nothing
 loads it).
-`gate_action` (`get` / `list` / `clear`) reports the standing answers **in effect** and forgets them —
+`gate_action` (`get` / `list` / `clear` / `deny`) reports the standing answers **in effect** and forgets them —
 `list` one entry at a time (with its session, and whether only memory holds it), each with an id that is a digest of the entry, found by substring because a
 subject's format is its call site's, and `clear` takes the ids back; forgetting a *denial* is itself gated
-(`gate_action.forget-denial`), being a refusal the user chose. There is
-deliberately no `set` for an answer, because the write path for a runtime actor is answering a prompt that names
-the specific act. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
+(`gate_action.forget-denial`), being a refusal the user chose, and asked EVERY time
+(`PermissionRequest.lifetimes: []`, which also means no stored or configured answer decides it) — an
+"always allow" there would let anything clear any denial unasked from then on. There is
+deliberately no `set` for an allow, because the write path for a runtime actor is answering a prompt that names
+the specific act. `deny` is the one exception, because it is the one thing that prompt can never be: a file
+inside a directory already granted is never asked about, so there is nowhere to answer "deny". A denial only
+narrows (under the ranking above, adding one turns an allow or an ask into a refusal and nothing into an
+allow), but it is still gated, every time (`gate_action.deny`): a denial the model wrote unasked would be one
+the gated forget then protected, and could refuse the management gates (`plugin.add`, `tools.overwrite`) at
+will. `gate_action`'s own gates cannot be denied, since a denial of forgetting a denial could never be taken
+back through the tool. Both are CONFIRMATIONS — asked every time, nothing remembered — so their prompt is
+the question and two buttons, with no subject or lifetime to choose (those only say what would be stored,
+and a "this time" there read as the lifetime of the denial it confirmed). Their buttons say what they do
+(`PermissionRequest.answers`: Deny / Cancel, Forget / Keep), since "Allow" a denial is a double negative.
+It is prose the policy renders, never a flag a frontend interprets: a frontend sees a form, not a request,
+so no UI implementer learns a special case. It reports **answers, not a vocabulary**: a gate with no stored answer is absent
 from the listing rather than described as "will ask", since an absent key says only that nobody
 answered — what happens then is the call site's `fallback` and whatever policy is registered. A
 built-in list of matbot's own ids would also be stale the moment a plugin contributes one of its own,

@@ -1,5 +1,5 @@
 import { refusalMessage, type PluginSettings, type Tool, type ToolContext, type ToolContract, type ToolResultOf } from '@matatbread/matbot-plugin-api';
-import { DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY, denyKey, isPolicyOption, migratedFor, persistSessionMemory, serialised, sessionMemory, toScopedAnswers, type ScopedAnswers, type StandingAnswer } from './gate.js';
+import { DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY, denyKey, isPolicyOption, migratedFor, persistSessionMemory, rememberStanding, serialised, sessionMemory, toScopedAnswers, type ScopedAnswers, type StandingAnswer } from './gate.js';
 
 /** A standing answer in force for one gate in one scope: `always` allows every subject, `subjects` allows
  *  exactly those. There is no arm for "no answer" — a gate with none simply is not reported, because an
@@ -47,6 +47,9 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ entries: GateEntry[] }, { action: 'list'; gate?: string; match?: string }>
       | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; ids: string[] }>
       | ToolContract<{ cleared: string[]; message: string }, { action: 'clear'; gate?: string; subject?: string }>
+      // A standing denial, everywhere, once the user confirms it. `subject` absent denies every subject of the
+      // gate. `denied` is the entry as "list" reports it, absent when nothing was stored.
+      | ToolContract<{ denied?: GateEntry; message: string }, { action: 'deny'; gate: string; subject?: string }>
       // Where a "for this session" answer is kept. `store` absent reports it; `null` reverts to the
       // installation's configured default (memory, unless configured otherwise).
       | ToolContract<SessionStoreReport, { action: 'session-store'; store?: SessionStore | null }>;
@@ -65,10 +68,15 @@ export interface SessionStoreReport {
 
 const STORES: readonly SessionStore[] = ['memory', 'settings'];
 
+/** A gate id as a call site's `ctx.gate` qualifies it: `<tool>.<gate>`, so neither a policy option (`#…`) nor a
+ *  deny key (`deny:…`), and not the bare suffix a prompt never shows. */
+const GATE_ID = /^[^\s.#:]+\.\S+$/;
+
 type GateInput =
   | { action: 'get';   gate?: string }
   | { action: 'list';  gate?: string; match?: string }
   | { action: 'clear'; gate?: string; subject?: string; ids?: string[] }
+  | { action: 'deny';  gate: string; subject?: string }
   | { action: 'session-store'; store?: SessionStore | null };
 
 const DENY = denyKey('');
@@ -205,9 +213,15 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
       '"clear" without "ids": no arguments forgets every gate, "gate" that gate alone, "gate" + "subject" ' +
       'just that subject, in every session. Forgetting a whole gate reverts it to the configured default, ' +
       'so a gate an installation configured keeps that setting.\n\n' +
-      'Forgetting a DENIAL asks the user first, since it undoes a refusal they chose; forgetting an ' +
-      'allow does not. This tool cannot GRANT permission: the only way to author a standing answer at ' +
-      'runtime is to answer a prompt that names the specific act.\n\n' +
+      'Forgetting a DENIAL asks the user first, every time, since it undoes a refusal they chose; ' +
+      'forgetting an allow does not. This tool cannot GRANT permission: the only way to author a standing ' +
+      'allow at runtime is to answer a prompt that names the specific act.\n\n' +
+      '"deny" with "gate" and "subject" adds a standing DENIAL, everywhere, once the user confirms it — for ' +
+      'what nobody is ever asked about because a broader answer already allows it, such as one file inside ' +
+      'a directory a function may read ("gate": "tool_function.fs-read", "subject": "* /home/me/project/.env" ' +
+      'for any function). The most specific answer wins, so it carves that out of the broader allow. The ' +
+      'subject must be spelled exactly as the gate asks about it: "list" shows how that gate\'s subjects ' +
+      'look. Without "subject" it denies every subject of the gate. gate_action\'s own gates cannot be denied.\n\n' +
       '"session-store" reports where "for this session" answers are kept, and with "store" changes it: ' +
       '"memory" (the default — forgotten when matbot restarts) or "settings" (kept until forgotten here, ' +
       'so a session\'s answers survive a restart). Switching to "settings" also keeps the answers already ' +
@@ -216,11 +230,11 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
       type:     'object',
       required: ['action'],
       properties: {
-        action:  { type: 'string', enum: ['get', 'list', 'clear', 'session-store'], description: 'The operation to perform.' },
-        gate:    { type: 'string', description: 'A gate id, e.g. "plugin.add" or "tools.overwrite". Absent means every gate. Not with "ids".' },
+        action:  { type: 'string', enum: ['get', 'list', 'clear', 'deny', 'session-store'], description: 'The operation to perform.' },
+        gate:    { type: 'string', description: 'A gate id, e.g. "plugin.add" or "tools.overwrite". Absent means every gate (required for "deny"). Not with "ids".' },
         match:   { type: 'string', description: 'list only: keep entries whose gate, subject or session contains this text.' },
         ids:     { type: 'array', items: { type: 'string' }, description: 'clear only: the ids of entries "list" reported, to forget exactly those.' },
-        subject: { type: 'string', description: 'clear only: forget just this subject (a tool name, plugin specifier, provider profile, MCP server) rather than the whole gate. Requires "gate". Prefer "ids".' },
+        subject: { type: 'string', description: 'clear: forget just this subject (a tool name, plugin specifier, provider profile, MCP server) rather than the whole gate; requires "gate", and prefer "ids". deny: the subject to refuse; absent denies every subject of the gate.' },
         store:   { type: ['string', 'null'], enum: ['memory', 'settings', null], description: 'session-store only: where "for this session" answers are kept from now on; null reverts to the configured default. Absent reports it.' },
       },
     },
@@ -292,8 +306,11 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
             if (e.effect !== 'deny') continue;
             const what = (e.subject !== undefined ? `"${e.subject}" at ${e.gate}` : `every ${e.gate}`) +
                          (e.session !== undefined ? ` in ${e.session}` : '');
+            // Asked every time (no lifetime): an "always allow" here would let anything clear any denial
+            // unasked from then on, which is the one thing this gate exists to prevent.
             const decision = await ctx.gate({
               gate: 'forget-denial', subject: e.subject !== undefined ? `${e.key} ${e.subject}` : e.key, fallback: false,
+              lifetimes: [], answers: { yes: 'Forget', no: 'Keep' },
               label: `Forget the standing denial of ${what}? It will no longer be refused without asking.`,
             });
             if (!decision.allowed) { kept.add(e); refusals.push(refusalMessage(decision, `Forget the denial of ${what}`)); }
@@ -365,6 +382,55 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
           return;
         }
 
+        if (act.action === 'deny') {
+          // The one standing answer this tool can author, because a denial only ever narrows what is allowed —
+          // under "most specific wins", adding one can turn an allow or an ask into a refusal and nothing into
+          // an allow. It exists for the denial nobody is ever prompted for: a file inside a directory already
+          // granted. Still asked, every time: a denial is a refusal the user chose, which is why forgetting
+          // one asks them, and one the model wrote unasked would make that question protect the model's
+          // choices — and could refuse the management gates (plugin.add, tools.overwrite) at will.
+          const { gate, subject } = act;
+          if (typeof gate !== 'string' || !GATE_ID.test(gate)) {
+            yield { type: 'error', message: 'deny: "gate" is a qualified gate id such as "tool_function.fs-read" or "plugin.add" — "<tool>.<gate>", as "list" reports it.' };
+            return;
+          }
+          if (gate.startsWith('gate_action.')) {
+            yield { type: 'error', message: 'deny: gate_action\'s own gates cannot be denied — a denial of forgetting a denial could never be taken back here.' };
+            return;
+          }
+          if (subject !== undefined && (typeof subject !== 'string' || subject.trim() === '')) {
+            yield { type: 'error', message: 'deny: "subject" is the subject to refuse, exactly as the gate asks about it; omit it to deny every subject of the gate.' };
+            return;
+          }
+          const key = denyKey(gate);
+          const what = subject !== undefined ? `"${subject}" at ${gate}` : `EVERY ${gate}`;
+          const held = toScopedAnswers(await settings.get<unknown>(key))?.get(EVERYWHERE);
+          if (held === true || (subject !== undefined && held?.includes(subject) === true)) {
+            yield { type: 'result', value: { message: `${what} is already denied everywhere${held === true && subject !== undefined ? ` (every subject of ${gate} is)` : ''}; nothing was changed.` } };
+            return;
+          }
+          const decision = await ctx.gate({
+            gate: 'deny', subject: subject !== undefined ? `${key} ${subject}` : key, fallback: false, lifetimes: [],
+            answers: { yes: 'Deny', no: 'Cancel' },
+            label: `Always deny ${what}? It will be refused without asking, in every session, until the denial is forgotten — which asks you again.`,
+          });
+          if (!decision.allowed) {
+            yield { type: 'result', value: { message: refusalMessage(decision, `Deny ${what}`) } };
+            return;
+          }
+          await rememberStanding(settings, key, EVERYWHERE, subject ?? true);
+          const now = await entriesOf(rowsOf(await stored()));
+          const denied = now.find(e => e.key === key && e.scope === EVERYWHERE && !e.memory && e.subject === subject);
+          // The policy never parses a subject, so nothing here can tell a denial that matches no request
+          // from one that does — and one that matches nothing refuses nothing, silently. Where nothing else of
+          // the gate is stored there is not even a spelling to compare against, so say so.
+          const alone = !now.some(e => e.gate === gate && e !== denied);
+          const message = `Denied ${what} everywhere: it is refused without asking until the denial is forgotten.` +
+            (alone ? ` Nothing else is stored for "${gate}", so nothing confirms the gate id or the subject's spelling — a denial that matches no request refuses nothing. A subject matches exactly, or as a prefix where it ends at the gate's separator (a "/" for a directory).` : '');
+          yield { type: 'result', value: { ...(denied !== undefined ? { denied: shown(denied) } : {}), message } };
+          return;
+        }
+
         if (act.action === 'session-store') {
           // Not gated: it changes where an answer someone already gave is kept, and how long — never what
           // is allowed. Every answer it keeps was given at a prompt that named the act.
@@ -388,7 +454,7 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
           return;
         }
 
-        yield { type: 'error', message: `Unknown action "${String((act as { action: unknown }).action)}" — expected "get", "list", "clear" or "session-store".` };
+        yield { type: 'error', message: `Unknown action "${String((act as { action: unknown }).action)}" — expected "get", "list", "clear", "deny" or "session-store".` };
       },
     },
   };

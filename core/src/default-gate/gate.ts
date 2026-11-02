@@ -153,6 +153,22 @@ export function persistSessionMemory(settings: PluginSettings): Promise<number> 
   });
 }
 
+/**
+ * Add `subject` to the answers stored under `key` in `scope`, inside the write queue.
+ *
+ * Re-read INSIDE the queue: the answers may have grown since the prompt was rendered (a concurrent answer,
+ * given first). Persist the answers IN EFFECT plus this one, never this one alone — they may come from
+ * `default_settings`, and a stored key wins over the floor wholesale, so writing just the new subject would
+ * silently start asking again about everything the install had exempted.
+ */
+export function rememberStanding(settings: PluginSettings, key: string, scope: string, subject: string | true): Promise<void> {
+  return serialised(async () => {
+    const current = new Map(toScopedAnswers(await settings.get<unknown>(key)));
+    current.set(scope, adding(current.get(scope), subject));
+    await settings.set(key, Object.fromEntries(current));
+  });
+}
+
 function rememberInMemory(session: string, key: string, subject: string | true): void {
   const sessions = sessionMemory();
   let keys = sessions.get(session);
@@ -189,31 +205,43 @@ function inEffect(stored: ScopedAnswers | undefined, key: string, context: Permi
  * reaches the answers.
  *
  * MOST SPECIFIC wins, which needs no parsing of a subject: the call site lists the act's subjects narrowest
- * first ({@link PermissionRequest.standing}), so a match is ranked by
- *   1. the earliest of those subjects it covers — exactly, or as a prefix ending at a declared separator;
- *      `true` (every subject) ranks after all of them;
- *   2. then the longer stored subject, a deeper prefix being the narrower grant;
+ * first ({@link PermissionRequest.standing}), and a stored subject covers one exactly, or as a prefix ending at a
+ * declared separator. A match is ranked by
+ *   1. how far BELOW the stored subject the nearest subject it covers lies — 0 for an exact match, otherwise
+ *      the depth of prefix between them — so a deeper answer beats a shallower one whichever subjects they
+ *      reach; `true` (every subject) is farthest of all;
+ *   2. then the earliest of the call site's subjects at that distance;
  *   3. then this session's answer before one held everywhere;
  *   4. then a denial before an allow — a tie that should not arise, and is refused if it does.
- * So an allow of `* node:fs` beside a denial of `* node:` admits `node:fs` and nothing else under `node:`,
- * and a denial of one function's directory carves it out of a grant to every function.
+ * So an allow of `* node:fs` beside a denial of `* node:` admits `node:fs` and nothing else under `node:`, a
+ * denial of one file or subdirectory carves it out of a directory granted to any function or to one, and an
+ * allow of one function's directory reopens it inside a denial for every function. The distance comes first
+ * because the subjects of a hierarchical gate vary along two axes (which function, how deep a path), and a
+ * stored ancestor directory is not among them: ranked by the earliest subject it covered, a grant of a whole
+ * tree to one function covered that function's exact file, and so outranked a denial of the file for every
+ * function — the denial a user writes to exclude one file from what they granted. For a gate without
+ * separators every match is exact, and the order is the call site's alone.
+ *
+ * A request that permits no lifetime ({@link PermissionRequest.lifetimes} empty) is asked every time: no
+ * standing answer decides it, stored or configured.
  *
  * A session's answer is reported as `session`; one held everywhere or at a door as `configuration` — settings
  * reads are layered, so a configured floor and a remembered answer cannot be told apart, and claiming `user`
  * for either would be a lie half the time.
  */
 function standingDecision(read: (key: string) => ScopedAnswers | undefined, req: PermissionRequest, context: PermissionContext): PermissionDecision | undefined {
+  if (req.lifetimes?.length === 0) return undefined;
   const scopes     = scopesFor(context);
   const candidates = [req.subject, ...(req.standing ?? []).map(o => o.subject)];
   const separators = (req.separators ?? []).filter(sep => sep !== '');
   const covers = (stored: string, c: string): boolean =>
     c === stored || (separators.some(sep => stored.endsWith(sep)) && c.startsWith(stored));
 
-  interface Match { at: number; length: number; scope: number; deny: boolean }
+  interface Match { distance: number; at: number; scope: number; deny: boolean }
   const before = (a: Match, b: Match): boolean =>
-      a.at     !== b.at     ? a.at < b.at
-    : a.length !== b.length ? a.length > b.length
-    : a.scope  !== b.scope  ? a.scope < b.scope
+      a.distance !== b.distance ? a.distance < b.distance
+    : a.at       !== b.at       ? a.at < b.at
+    : a.scope    !== b.scope    ? a.scope < b.scope
     : a.deny && !b.deny;
 
   let best: Match | undefined;
@@ -224,10 +252,15 @@ function standingDecision(read: (key: string) => ScopedAnswers | undefined, req:
       const answer = held.get(scope);
       if (answer === undefined) return;
       const found = answer === true
-        ? [{ at: candidates.length, length: -1 }]
+        ? [{ distance: Infinity, at: candidates.length }]
         : answer.flatMap(stored => {
-            const at = candidates.findIndex(c => covers(stored, c));
-            return at < 0 ? [] : [{ at, length: stored.length }];
+            let nearest: { distance: number; at: number } | undefined;
+            candidates.forEach((c, at) => {
+              if (!covers(stored, c)) return;
+              const distance = c.length - stored.length;
+              if (nearest === undefined || distance < nearest.distance) nearest = { distance, at };
+            });
+            return nearest !== undefined ? [nearest] : [];
           });
       for (const m of found) {
         const match = { ...m, scope: i, deny };
@@ -280,16 +313,31 @@ function promptFor(req: PermissionRequest, context: PermissionContext): { field:
   const lifetimes = lifetimesFor(req, context);
   const session   = lifetimes.includes('session');
   const always    = lifetimes.includes('always');
+  const yes = req.answers?.yes ?? 'Allow';
+  const no  = req.answers?.no  ?? 'Deny';
+  const firstly = encode(req.fallback ? 'allow' : 'deny', 'once', exact);
+
+  // Nothing can be remembered, so there is nothing to choose but yes or no: no subject, no lifetime — both
+  // only say what would be STORED, and a subject is a key (`deny:tool_function.fs-read * /p/.env`) that
+  // reads as noise beside a question that already names the act. Plain options, which every frontend draws
+  // as buttons.
+  if (req.lifetimes?.length === 0) {
+    const field: FormField = {
+      name: 'gate', label: req.label, type: 'select', default: firstly,
+      options: [{ value: encode('allow', 'once', exact), label: yes }, { value: encode('deny', 'once', exact), label: no }],
+    };
+    return { field, subjects: offered.map(o => o.subject), lifetimes };
+  }
 
   const subjects: FormOption[] = [
     ...offered.map((o, i) => ({ value: String(i), label: o.label })),
     { value: EVERY, label: `every ${req.gate}` },
   ];
   const options: FormOption[] = [
-    { value: encode('deny', 'once', exact), label: 'Deny' },
+    { value: encode('deny', 'once', exact), label: no },
     ...(session ? [{ value: encode('deny', 'session', exact), label: 'Deny for this session' }] : []),
     ...(always  ? [{ value: encode('deny', 'always',  exact), label: 'Always deny' }] : []),
-    { value: encode('allow', 'once', exact), label: 'Allow' },
+    { value: encode('allow', 'once', exact), label: yes },
     ...offered.flatMap((o, i) => [
       ...(session ? [{ value: encode('allow', 'session', String(i)), label: `Allow ${o.label} for this session` }] : []),
       ...(always  ? [{ value: encode('allow', 'always',  String(i)), label: `Always allow ${o.label}` }] : []),
@@ -308,11 +356,11 @@ function promptFor(req: PermissionRequest, context: PermissionContext): { field:
         ...(session ? [{ value: 'session', label: 'for this session' }] : []),
         ...(always  ? [{ value: 'always',  label: 'always' }] : []),
       ] },
-      { name: 'effect', submit: true, options: [{ value: 'allow', label: 'Allow' }, { value: 'deny', label: 'Deny' }] },
+      { name: 'effect', submit: true, options: [{ value: 'allow', label: yes }, { value: 'deny', label: no }] },
     ],
     // A site whose non-interactive answer is "proceed" (tools.overwrite) keeps proceeding for a frontend that
     // can only answer with the default.
-    default: encode(req.fallback ? 'allow' : 'deny', 'once', exact),
+    default: firstly,
   };
   return { field, subjects: offered.map(o => o.subject), lifetimes };
 }
@@ -381,16 +429,6 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
   };
   if (stored !== undefined) migrations.set(settings, migrated);
 
-  // Re-read INSIDE the write queue: the answers may have grown since the prompt was rendered (a concurrent
-  // answer, given first). Persist the answers IN EFFECT plus this one, never this one alone — they may come
-  // from `default_settings`, and a stored key wins over the floor wholesale, so writing just the new subject
-  // would silently start asking again about everything the install had exempted.
-  const remember = (key: string, scope: string, subject: string | true): Promise<void> => serialised(async () => {
-    const current = new Map(toScopedAnswers(await settings.get<unknown>(key)));
-    current.set(scope, adding(current.get(scope), subject));
-    await settings.set(key, Object.fromEntries(current));
-  });
-
   const fallback = (req: PermissionRequest): PermissionDecision =>
     req.fallback ? permitted('fallback') : refused('fallback');
 
@@ -431,10 +469,10 @@ export function createDefaultGate(settings: PluginSettings, previous?: Permissio
       if (lifetime === 'session') {
         // `lifetimesFor` offers a session only where `workable` holds.
         const session = context.session!;
-        if (await settings.get<unknown>(SESSION_STORE_KEY) === 'settings') await remember(key, session, subject);
+        if (await settings.get<unknown>(SESSION_STORE_KEY) === 'settings') await rememberStanding(settings, key, session, subject);
         else rememberInMemory(session, key, subject);
       } else if (lifetime === 'always') {
-        await remember(key, EVERYWHERE, subject);
+        await rememberStanding(settings, key, EVERYWHERE, subject);
       }
       return effect === 'allow' ? permitted('user') : refused('user');
     },

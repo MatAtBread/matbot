@@ -148,10 +148,14 @@ a second host's needs.
   that session, `#http` the HTTP tool door — and `default_settings:` must use it. A stored answer in the old
   shape (a bare list or `true`) is migrated once, from the stored document alone so no configured default
   is copied into it; one in `default_settings:` is ignored, with a warning naming the key.
-- **The most specific standing answer wins, not every denial.** Ranked by the narrowest subject the call
-  site offered, then the deeper prefix, then this session's answer over one held everywhere, then a
-  denial on a tie. So an allow of `* node:fs` beside a denial of `* node:` admits `node:fs` and no other
-  builtin, where every builtin was refused before, and an allow beneath a broader denial now applies.
+- **The most specific standing answer wins, not every denial.** Ranked by how near the act it lies (an
+  exact match, then the deeper prefix, where subjects nest), then the narrowest subject the call site
+  offered, then this session's answer over one held everywhere, then a denial on a tie. So an allow of
+  `* node:fs` beside a denial of `* node:` admits `node:fs` and no other builtin, where every builtin was
+  refused before; an allow beneath a broader denial now applies; and a denial of one file or subdirectory
+  inside a granted directory refuses it, whether the directory was granted to one function or to any.
+- **`PermissionRequest.lifetimes: []` means "ask every time"**: nothing is remembered, and no stored or
+  configured standing answer decides the act.
 - **A standing answer's label names what is allowed, never for how long** (`function "probe" to import
   node:fs`, not `Always allow …`): the policy words the lifetime. Every call site in this repository is
   updated; a plugin offering `standing` answers should drop the prefix.
@@ -205,6 +209,11 @@ a second host's needs.
   `'#session-store': settings` in the gate's namespace persists it instead — or `gate_action
   session-store`, which also moves the answers already in memory. It is offered only where there is a
   session someone works in. `gate_action` reports and clears session answers (`session`, `inMemory`).
+- **`gate_action deny`** — a standing denial, everywhere, for what is never prompted for because a broader
+  allow covers it (one file inside a granted directory). Asked every time (`gate_action.deny`); refuses
+  `gate_action`'s own gates. Forgetting a denial (`gate_action.forget-denial`) is now asked every time
+  too: it no longer offers "always", and no standing answer decides it. Both prompts are two buttons
+  that say what they do (Deny / Cancel, Forget / Keep), via the new `PermissionRequest.answers`.
 - **`FormField.axes`, `FormAxis`, `FORM_AXIS_SEPARATOR`** — a select that is the product of independent
   choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
   marked `submit` is drawn as the buttons that send the answer.
@@ -250,8 +259,8 @@ a second host's needs.
   deployment's (`docs/SECURITY.md`).
 - **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
   gate: `tool_function.fs-read` / `tool_function.fs-write`, keyed `<function> <realpath>`, offering the
-  path, everything in its directory, and that directory for any function (a directory grant covers its
-  whole subtree). Async and callback
+  path and everything in its directory, each for this function or for any (a directory grant covers its
+  whole subtree; a denial of the file for any function excludes it from one). Async and callback
   calls ask; sync calls consult a snapshot of the answers in force and throw `EACCES` saying how to be
   asked. Symlinks are resolved first, and two-path operations ask about both ends. Pre-authorising or
   denying is a standing answer, configured under the default gate's `default_settings:` (`deny:` entries

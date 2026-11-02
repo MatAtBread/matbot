@@ -70,14 +70,15 @@ default_settings:
     'http.request':    { '#http': ['https://api.example'] }   # what the HTTP door may reach unattended
 ```
 
-**The most specific answer wins.** A call site lists an act's subjects narrowest first (this file, its
-directory, that directory for every function), so where stored answers disagree the one covering the
-earliest of them decides; then the longer of two prefixes, where the subjects nest; then an answer for
-this session before one held everywhere; then a denial, should two answers tie. So an allow of
-`* node:fs` beside a denial of `* node:` admits `node:fs` and no other builtin, and a denial of
-`* /home/me/.ssh/` carves a subtree out of an allow of `* /home/me/` — and an allow of one function's
-directory reopens it inside a denial for every function. A session's broad allow does not lift a
-standing denial of something narrower.
+**The most specific answer wins.** A call site lists an act's subjects narrowest first (this file, this
+file for every function, its directory, that directory for every function). Where stored answers disagree,
+the one nearest the act decides: an exact match before a prefix, and a deeper prefix before a shallower
+one. Then the earlier of the call site's subjects; then an answer for this session before one held
+everywhere; then a denial, should two answers tie. So an allow of `* node:fs` beside a denial of
+`* node:` admits `node:fs` and no other builtin; a denial of `* /home/me/.ssh/`, or of the one file
+`* /home/me/project/.env`, carves it out of an allow of `* /home/me/` or of one function's
+`probe /home/me/`; and an allow of one function's directory reopens it inside a denial for every
+function. A session's broad allow does not lift a standing denial of something narrower.
 
 **Where a session answer is kept** is the policy's one option, `'#session-store'` in the same namespace
 (a `#` key is never a gate id): `memory`, the default — kept until matbot restarts, and out of reach of
@@ -149,12 +150,21 @@ what the replaceable seam is for.
   floor survives it; forgetting entries of a configured list stores the rest of the list.
 
 Forgetting a **denial**, by any form of `clear`, is itself gated — `gate_action.forget-denial`, subject
-`deny:<gate> <subject>` (or `deny:<gate>` for a denial of every subject), `fallback: false`. A denial is a
+`deny:<gate> <subject>` (or `deny:<gate>` for a denial of every subject), `fallback: false`, and asked
+every time: it offers no "always", and no stored or configured answer decides it. A denial is a
 refusal the user chose, and without this a model asking for a refused act could clear the denial and ask
 again; at a door with nobody to ask the act would fall to its site's fallback, which for
 `tools.overwrite` is to proceed. Forgetting an allow is not gated, since it only makes a gate ask again.
 Writes re-read inside the same queue as the policy's own, so two clears at once cannot restore what the
 other removed.
+
+- `{ action: 'deny', gate, subject? }` — a standing denial, everywhere, once the user confirms it
+  (`gate_action.deny`, asked every time like forgetting one). It is for what nobody is ever asked about
+  because a broader answer allows it: one file inside a granted directory
+  (`{ gate: 'tool_function.fs-read', subject: '* /home/me/project/.env' }`). Without `subject` it denies
+  every subject of the gate. The subject must be spelled as the gate asks about it — `list` shows how a
+  gate's subjects look, and the result says when nothing else is stored to compare with, since a denial
+  that matches no request refuses nothing. `gate_action`'s own gates cannot be denied.
 
 - `{ action: 'session-store', store? }` — where *for this session* answers are kept: absent reports it,
   `'memory'` or `'settings'` sets it, `null` reverts to the configured default. Switching to `settings`
@@ -162,8 +172,9 @@ other removed.
   leaves persisted ones where they are, still applying in their sessions. Not gated: it changes how long
   an answer someone gave is kept, never what is allowed.
 
-There is deliberately no `set` for an answer: the write path for a runtime actor is answering a prompt
-that names the specific act.
+There is deliberately no `set` for an allow: the write path for a runtime actor is answering a prompt
+that names the specific act. `deny` is the exception because a denial only narrows, and because the prompt
+it stands in for is one that never appears.
 
 ## Gate ids
 
@@ -171,7 +182,7 @@ that names the specific act.
 `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load` · `provider.add` / `provider.add-unverified` /
 `provider.add-unlisted` / `provider.update` / `provider.update-unverified` / `provider.update-unlisted` /
 `provider.remove` · `mcp_action.add` /
-`mcp_action.remove` · `gate_action.forget-denial` · `tool_function.import` / `tool_function.connect` /
+`mcp_action.remove` · `gate_action.forget-denial` / `gate_action.deny` · `tool_function.import` / `tool_function.connect` /
 `tool_function.edit` (session only) / `tool_function.fs-read` / `tool_function.fs-write` · `http.request` /
 `http.secret`.
 
