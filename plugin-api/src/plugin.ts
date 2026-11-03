@@ -19,7 +19,7 @@ import type { Notifications, Notifier } from './notify.js';
  * It matters at 1.0.0, where a plugin still declaring `'0.x'` fails the major check loudly instead of
  * loading against a contract it was never built for.
  */
-export const PLUGIN_API_VERSION = '0.4';
+export const PLUGIN_API_VERSION = '0.5';
 
 // ── Sub-runner types ──────────────────────────────────────────────────────────
 

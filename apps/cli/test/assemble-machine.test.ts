@@ -42,6 +42,7 @@ async function machine(t: { after(fn: () => Promise<void>): void }, extra: { res
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(assembled.dispose);
   return { ...assembled, boot, other };
 }
 
@@ -121,7 +122,7 @@ test('an ephemeral run\'s turn holds the machine while it runs', { timeout: 1000
       })();
     },
   };
-  const { services } = assembleMachine({
+  const { services, dispose } = assembleMachine({
     bootBackend: new FilesystemStorageBackend(join(dir, 'boot')),
     vault:       vault({}),
     providers:   new ProviderRegistryImpl([['fake', { name: 'fake', module: 'fake-adapter', model: 'fake' }]]),
@@ -134,6 +135,7 @@ test('an ephemeral run\'s turn holds the machine while it runs', { timeout: 1000
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(dispose);
 
   let landed = false;
   let landedDuringTurn: boolean | undefined;
@@ -171,4 +173,12 @@ test('a provider\'s secrets resolve through the host\'s resolver when it supplie
   services.providers.register({ name: 'p', module: 'no-such-adapter', model: 'm', credentials: { apiKey: '${KEY}' } });
   await assert.rejects(services.complete({ provider: 'p', messages: [] }), /no loadable adapter/);
   assert.deepEqual(seen, ['${KEY}']);
+});
+
+test('a second machine in the process is refused while the first stands, and allowed once it is disposed', async t => {
+  const first = await machine(t);
+  await assert.rejects(machine(t), /already assembled in this process/);
+  await first.dispose();
+  const second = await machine(t);
+  assert.ok(second.services.tools.resolve('gate_action'));
 });

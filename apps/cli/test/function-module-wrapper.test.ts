@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { permitted } from '@matatbread/matbot-core';
-import { createVmFunctionRunner, createModuleWrapperRegistry } from '@matatbread/matbot-function-runner-node';
+import { createVmFunctionRunner, createModuleWrapperRegistry, plugin as runnerPlugin } from '@matatbread/matbot-function-runner-node';
+import type { MatbotMachine } from '@matatbread/matbot-core';
 import type { ImportCaller } from '@matatbread/matbot-core';
 
 // The ImportedModuleWrapper seam: function-runner-node owns a registry of per-module wrappers and
@@ -50,4 +51,25 @@ test('the runner applies a registered wrapper to a granted module before returni
   // A module with no wrapper is unchanged.
   const path = await runner.import!('node:path', caller) as typeof import('node:path');
   assert.equal(path.basename('/a/b.txt'), 'b.txt');
+});
+
+test('a reloaded runner keeps the wrappers registered with the one it replaced', async () => {
+  // As the plugin's setup registers them: one machine per load, the second standing in for a reload.
+  const setupOnce = async () => {
+    const registered: Record<string, unknown> = {};
+    const services = {
+      register: async (key: string, value: unknown) => { registered[key] = value; },
+      tools:    { register() {} },
+      settings: () => ({ get: async () => undefined }),
+    } as unknown as MatbotMachine;
+    await runnerPlugin.setup!(services);
+    return registered as { FunctionRunner: { import(spec: string, caller: ImportCaller): Promise<unknown> }; ImportedModuleWrapper: (spec: string, wrap: (m: unknown) => unknown) => { remove(): void } };
+  };
+  const first = await setupOnce();
+  const handle = first.ImportedModuleWrapper('node:os', os => ({ ...(os as object), hostname: () => 'WRAPPED' }));
+  try {
+    const second = await setupOnce();
+    const os = await second.FunctionRunner.import('node:os', caller) as typeof import('node:os');
+    assert.equal(os.hostname(), 'WRAPPED', 'the new runner applies what was registered before it');
+  } finally { handle.remove(); }
 });

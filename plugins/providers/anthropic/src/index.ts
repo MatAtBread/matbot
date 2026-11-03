@@ -1,9 +1,10 @@
 export { AnthropicAdapter } from './adapter.js';
 
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { AnthropicAdapter }  from './adapter.js';
 
 export const plugin: MatbotPluginSpec = {
-  apiVersion: '0.1',
+  apiVersion: PLUGIN_API_VERSION,
   provider: (_config) => new AnthropicAdapter(),
 };

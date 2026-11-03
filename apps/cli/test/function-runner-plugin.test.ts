@@ -99,7 +99,8 @@ test('the retired permit_imports is not read, and says so rather than silently w
   const s = await setupWith({ permit_imports: ['node:os'] });
   await (s.registered['FunctionRunner'] as FunctionRunner).settings!();
   assert.match(s.warnings.join('\n'), /permit_imports is no longer read/);
-  assert.match(s.warnings.join('\n'), /deny:tool_function\.import/);
+  // In the scoped format: a bare list under a gate id is what the gate ignores when it is configured.
+  assert.match(s.warnings.join('\n'), /'deny:tool_function\.import': \{ '\*': \[/);
   const got = await call_ok(await s.call({ action: 'get' }));
   assert.equal(got.problems?.length, 1);
   assert.equal('permitImports' in got, false);

@@ -59,6 +59,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
                      imports onto the gate; function_runner_config reads and changes its time bound.
                      OPTIONAL and not in a default install — without it a body runs unbounded,
                      unshadowed and ungated
+    gate-fs-node/  — puts each path a tool_function body's node:fs names to the gate (fs-read / fs-write),
+                     through function-runner-node's ImportedModuleWrapper seam
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
     caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
@@ -67,7 +69,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
     sessions/      — session_action: list/get/rename/hide
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence
-    json-validation/— toolcall hook validating inputs against inputSchema
+    json-validation/— validate hook checking inputs against inputSchema (cross-runtime)
+    ts-validation/ — validate hook checking inputs against the ToolContract params type (node, via tool-types)
     hook-logger/   — diagnostic: logs every hook channel
     browser/       — IndexedDB store, OPFS files, WebCrypto vault (browser)
     web-principal-user/— WebPrincipalResolver bound to the host OS user
@@ -109,7 +112,8 @@ runtime gate, the import, shape verification, identity stamping, register + setu
 list, name↔specifier mapping. Nothing about that is in a plugin, and core depends on nothing but
 `plugin-api`.
 
-Plugin **acquisition is the CLI's** (`apps/cli/src/plugins`): turning a config string into something importable —
+Plugin **acquisition is the CLI's** (`apps/cli/src/plugins`, and `apps/cli/src/specifiers.ts` for the
+boot's resolution of configured specifiers): turning a config string into something importable —
 `classifySpecifier` (local / npm / http), materialising an http plugin into `.plugins/`, provisioning a
 local one's dependencies with npm, reporting a duplicated singleton. It cannot live in core, because every
 line of it is `node:fs`, `node:child_process`, `createRequire` and symlinks, and **core must run in the
@@ -156,6 +160,12 @@ A host passes only what is genuinely its own: its carriers (installed first), it
 (the browser prompts for a missing one), and the
 members that acquire a plugin (`loadPlugin`, `unloadPlugin`, `resolver`). `preScanStorage` opens a
 configured storage plugin's backend before any store exists, and `loaded()` runs the post-load checks.
+
+**One machine per process at a time, and a second `assembleMachine` throws.** Core's plugin registry and
+settings defaults are the module's, and a plugin is one module instance whatever machine loads it, holding
+what it captured from the machine that set it up — so a second machine would half-share the first, with
+nothing to say so. Isolation is a process (`background-jobs-node`); several principals are one machine.
+`dispose()` frees the slot, which is what lets a test file build a machine per test.
 
 ### Package naming
 - `@matatbread/matbot-foo` — single implementation
@@ -219,8 +229,9 @@ merge has no bounded semantics). No `${NAME}` resolution — secrets are the Vau
 `get` time would give the settings facade a Vault dependency.
 
 **The defaults are consulted INSIDE `makePluginSettings`, not passed to it.** A parameter is a thing a
-call site forgets with no error and no symptom, and one already would: `plugins/browser` builds its own
-facade over a concrete backend to pin the web bundle's plugin list across a `StorageBackend` swap. Same reasoning as
+call site forgets with no error and no symptom, and one already would: the web bundle builds its own
+facade over a concrete backend (`apps/web-bundle/src/extra-plugins.ts`) to pin its plugin list across a
+`StorageBackend` swap. Same reasoning as
 the barrier living inside `machineBusy`.
 
 **The one silent failure is a key naming no loaded plugin** (the name is loader-derived and need not
@@ -319,7 +330,7 @@ type ScratchStore = Store<Session>;
 type MediaStore   = FileStore;      // session media; see Media
 ```
 
-**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: the filesystem backend; the browser: IndexedDB + OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
+**Swappable core members** (`StorageBackend`, `KnowledgeIndex`, `Vault`, `Notifier`; `PermissionGate` and `MediaStore` revert the same way but are read per access rather than through a proxy — see *Permission gates* and *Media*) use `register` to swap live impls behind capture-safe forwarding proxies. A captured reference keeps resolving to the current impl. On `unregister` (i.e. when the providing plugin is unloaded) a swap-member **reverts to the host's captured boot default** rather than dangling on the gone impl — the app decides its own base services (the CLI: the filesystem backend; the browser: IndexedDB + OPFS), and the registry only remembers and restores them. The host's boot default is captured **before** any storage-plugin pre-scan, so a config-supplied backend never poses as the base; a pre-scanned backend is recorded as plugin-owned, so unloading its plugin reverts to that base.
 
 **A plugin's unload withdraws its own registration, not the key.** The registry holds one value per key, but core remembers each plugin's registration in order, for every key. Withdrawing the current one reinstates the one it displaced; withdrawing a displaced one changes nothing; only the last one out reverts to the host (above). It was `unregister(key)`, which removed whatever was current, so where plugins stack by capturing what they displace (`ts-validation` over `json-validation`, a gate over a gate), unloading the one underneath took the one on top with it. `StorageBackend` is the exception on one side only: a displaced backend was closed by the swap, so withdrawing the live one reverts to the host's — but withdrawing a displaced one still leaves the live one alone.
 
@@ -581,7 +592,7 @@ interface Trigger {
 - **`retract`** — judge assistant response in `followup` hook; pop and re-run
 - **`followup`** — judge assistant response in `followup` hook; resubmit as robo turn
 
-The user-surface kinds were one kind named `augment` (= today's `ephemeral`); stored triggers migrate `augment`→`ephemeral` on plugin load.
+The user-surface kinds were one kind named `augment` (= today's `ephemeral`); a stored trigger still carrying it is migrated to `ephemeral` when it is read, with a warning — on read rather than at load, because the store is read per principal (removed in 0.6.0).
 
 **Observational dispatch:** tool's output is the signal. A `result` → inject; no result → silent side-effect. The dispatcher is a dumb transport — tools frame themselves.
 
@@ -717,7 +728,7 @@ correct (different trust root, different decision), but a policy author is keyin
 the host captures a boot default and `unregister` reverts to it — "unload the policy ⇒ back to
 asking", with no revert rule of its own. (Back to the policy it displaced, if a plugin supplied one.) (A do-nothing always-present default *would* be the
 fail-open shape; a default that *asks* is not.) A gate wanting "my rules, else the previous
-behaviour" captures the gate it displaces and delegates, so a pair composes in either load order — and it is the reason this key is the one swap-member the hosts do
+behaviour" captures the gate it displaces and delegates, so a pair composes in either load order — and it is the reason this key is the one swap-member `assembleMachine` does
 **not** put behind `forwardingProxy`. A capture-safe proxy resolves to whatever is current, so a gate
 that captured `services.PermissionGate` and then registered itself would delegate *to itself*, for
 ever; the hosts expose a getter instead, and every consumer resolves per call. Gate ids are open at
@@ -862,8 +873,8 @@ exist to save one keystroke. (0.4.x warned an install still authoring it; 0.5.0 
 through a decision*; it does not put that decision out of the model's reach. The default policy keeps
 its standing answers in plugin settings, so they live wherever the active `StorageBackend` keeps
 settings — on the filesystem and SQLite backends, under `.data` (`.data/settings/`, `.data/matbot.db`).
-That is read-write to `bash`, and `docker-bash` mounts `.data` read-write too, so on any install that
-loads a shell tool the model can write `{"plugin.add": {"*": true}}` itself (or the SQLite row holding it) and
+That is read-write to `bash` (`docker-bash` mounts `settings/` and the SQLite files read-only), so on any
+install that loads `bash` the model can write `{"plugin.add": {"*": true}}` itself (or the SQLite row holding it) and
 every later install proceeds unasked (reads are not cached, so it
 takes effect at once, not at the next restart). The same was true of the `__matbot_core__` key this
 replaces, over a narrower blast radius. So the property is **"a privileged operation is decided
@@ -993,7 +1004,7 @@ Within that, three parts, and only the first two enforce anything:
    dragged `function-tools`' calling convention into `plugin-api` as a declared symbol set, which was worse
    again.
 
-   **Node's runner** (`apps/cli/body-transform.ts`) erases with node's own `stripTypeScriptTypes` — which
+   **Node's runner** (`plugins/function-runner-node/src/body-transform.ts`) erases with node's own `stripTypeScriptTypes` — which
    BLANKS types in place, so every line number in what runs is the one the author wrote
    (`transpileModule` reprints from the AST, inserting a `"use strict"` prologue and normalising
    formatting) — then walks TypeScript's AST for call expressions whose callee is the `import` keyword and

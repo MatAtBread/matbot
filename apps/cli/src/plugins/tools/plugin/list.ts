@@ -10,7 +10,7 @@ export async function* listPlugins(configPath: string): AsyncIterable<ToolEvent<
   // Reported alongside failures because it is the same kind of fact — something about the installed
   // set that is worth knowing and that nothing else would ever mention. It is not a failure: a second
   // copy of a singleton is survivable by design, which is exactly why it would otherwise go unnoticed.
-  const duplicateSingletons = await findDuplicateSingletons({ configDir: projectDir, plugins: listed.loaded });
+  const duplicateSingletons = findDuplicateSingletons({ configDir: projectDir, plugins: listed.loaded });
   yield {
     type:  'result',
     value: {

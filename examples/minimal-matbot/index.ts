@@ -51,8 +51,8 @@ if (prompt.trim() === '') {
 }
 
 const session = createSession();
-await services.sessions!.set(session.id, session);
-const turn = await services.run!.open({
+await services.sessions.set(session.id, session);
+const turn = await services.run.open({
   sessionId: session.id,
   provider:  'jimmy',
   principal: me,

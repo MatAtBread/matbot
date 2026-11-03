@@ -3,6 +3,7 @@ import { systemPrincipal } from '@matatbread/matbot-core';
 import process             from 'node:process';
 import type { MatbotConfig } from './config.js';
 import { versionBanner }   from './banner.js';
+import { findDuplicateSingletons, describeDuplicateSingleton } from './plugins/singletons.js';
 
 export interface CliOpts {
   provider?:   string;
@@ -37,7 +38,10 @@ export function parseArgs(argv: string[]): { opts: CliOpts; prompt: string | und
         else opts.dumpTools = 'tools-dump.json';
       } break;
       case '--help': printHelp(); process.exit(0);
-      case '--version': case '-v': process.stdout.write(versionBanner() + '\n'); process.exit(0);
+      case '--version': case '-v':
+        // No config is read here, so only the CLI's own install is probed — a plugin's copy is boot's to find.
+        process.stdout.write([versionBanner(), ...findDuplicateSingletons({ plugins: [] }).map(d => `⚠ ${describeDuplicateSingleton(d)}`)].join('\n') + '\n');
+        process.exit(0);
       default:
         if (!arg.startsWith('-')) positional.push(arg);
     }

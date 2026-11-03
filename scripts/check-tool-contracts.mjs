@@ -130,6 +130,14 @@ function literalValues(type) {
   for (const a of splitTopLevel(type, '|')) {
     const t = peel(a);
     if (t === 'undefined') continue;
+    if (t === 'null') { values.push(null); continue; }
+    // A parenthesised union — `('memory' | 'settings') | null`, an alias the wire text expanded in place.
+    if (splitTopLevel(t, '|').length > 1) {
+      const inner = literalValues(t);
+      if (inner === null) return null;
+      values.push(...inner);
+      continue;
+    }
     const q = t.match(/^'([^']*)'$/) ?? t.match(/^"([^"]*)"$/);
     if (q) { values.push(q[1]); continue; }
     if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(t)) { values.push(Number(t)); continue; }

@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import process from 'node:process';
 import path from 'node:path';
 import { mirrorPath, mirroredFile, candidatesFor, recordOrigin } from './cache-layout.js';
+import { exportsEntry } from './package-exports.js';
 
 // ── Specifier classification ────────────────────────────────────────────────────
 
@@ -230,23 +231,6 @@ export function githubToHttps(spec: string): string {
   return sub ? new URL(sub + '/', base).href : base;
 }
 
-function resolveExportsEntry(exports: unknown): string | undefined {
-  if (typeof exports === 'string') return exports;
-  if (exports === null || typeof exports !== 'object') return undefined;
-  const obj = exports as Record<string, unknown>;
-  const dot = '.' in obj ? obj['.'] : obj;
-  if (typeof dot === 'string') return dot;
-  if (dot === null || typeof dot !== 'object') return undefined;
-  const conds = dot as Record<string, unknown>;
-  for (const key of ['import', 'module', 'default', ...Object.keys(conds)]) {
-    if (key in conds) {
-      const v = conds[key];
-      if (typeof v === 'string') return v;
-    }
-  }
-  return undefined;
-}
-
 const manifestCache = new Map<string, RemoteManifest>();
 
 async function fetchText(url: string): Promise<{ ok: boolean; status: number; text: string }> {
@@ -312,7 +296,7 @@ export async function fetchRemoteManifest(spec: string, dotPlugins: string, live
   if (typeof pkg['name'] !== 'string') {
     throw new Error(`package.json at ${url} declares no "name" (a remote plugin must be a named package)`);
   }
-  const entryRel = resolveExportsEntry(pkg['exports']) ?? pkg['module'] ?? pkg['main'];
+  const entryRel = exportsEntry(pkg['exports']) ?? pkg['module'] ?? pkg['main'];
   if (typeof entryRel !== 'string') {
     throw new Error(`package.json at ${url} declares no "exports", "module", or "main" entry to load`);
   }

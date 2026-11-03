@@ -8,7 +8,9 @@ import { registerPlugin, setupPlugin, unloadPlugin, recordFailedPlugin, clearFai
  * Read by the declarative pre-import gate and by the import-rejection branch, which re-derived
  * `typeof window` inline until the two could have disagreed.
  */
-const CURRENT_RUNTIME: Runtime = typeof window !== 'undefined' ? 'browser' : 'node';
+// Through `globalThis`, because core ships as source and is compiled by its embedder, whose `lib` need not
+// include the DOM.
+const CURRENT_RUNTIME: Runtime = typeof (globalThis as { window?: unknown }).window !== 'undefined' ? 'browser' : 'node';
 
 /**
  * Query-param marker appended to a plugin entry URL when `bustCache` is set.

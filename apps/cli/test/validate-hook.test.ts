@@ -25,7 +25,7 @@ let seq = 0;
 async function machine(t: { after(fn: () => Promise<void>): void }) {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-validate-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const { services } = assembleMachine({
+  const { services, dispose } = assembleMachine({
     bootBackend: new FilesystemStorageBackend(dir),
     vault:       { resolve: async (r: string) => r } as unknown as Vault,
     providers:   new ProviderRegistryImpl(new Map()),
@@ -38,6 +38,7 @@ async function machine(t: { after(fn: () => Promise<void>): void }) {
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(dispose);
   const calls: unknown[] = [];
   services.tools.register({
     name: 'thing', description: '', inputSchema: { type: 'object' },

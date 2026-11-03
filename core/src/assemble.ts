@@ -11,7 +11,7 @@ import { notifyingStore, createMessage } from '@matatbread/matbot-plugin-api';
 import { mediumGuard } from './storage-base/medium-guard.js';
 import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
-import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins } from './registry.js';
+import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins, unloadPlugin } from './registry.js';
 import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces, storedSettingsData } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 import { ToolRegistryImpl } from './tool-registry.js';
@@ -75,19 +75,26 @@ export interface AssembleOptions {
   builtinTools?:    Tool[];
   /** Resolve one `${NAME}` reference; the browser prompts for a missing secret. Defaults to the vault. */
   resolveSecret?(ref: string, vault: Vault): Promise<string>;
-  /** Reported by `about_matbot`. */
+  /** The application's own version, which `about_matbot` reports as the harness version (the CLI passes
+   *  its package's, which the lockstep release makes core's too). */
   version:          string;
   /** Called with a late-bound handle, since these members call back into the machine being built. */
   host(machine: () => MatbotMachine): HostMembers;
 }
 
 export interface AssembledMachine {
-  services: MatbotMachine;
+  /** With the shared session store and runner, which a plugin's machine types as optional, present. */
+  services: MatbotMachine & { readonly sessions: Store<Session>; readonly run: SessionRunner };
   /** A session runner over any store — the shared one is `services.run`. */
   makeRunner(store: Store<Session>, opts?: { appender?: SessionAppender }): SessionRunner;
   /** Call once the configured plugins have loaded. */
   loaded(): void;
+  /** Unload every plugin, last loaded first, and let this process assemble another machine. */
+  dispose(): Promise<void>;
 }
+
+// Whether a machine is assembled in this process now. See assembleMachine.
+let assembled = false;
 
 const NEVER_ABORT = new AbortController().signal;
 type AnyStore = Store<{ id: string; version: string }>;
@@ -100,8 +107,20 @@ type AnyStore = Store<{ id: string; version: string }>;
  *
  * The host installs its principal and usage carriers first: nothing here reads an identity, but the
  * runner and every plugin will.
+ *
+ * **One machine per process at a time.** Core's plugin registry and the installation's settings defaults
+ * are the module's, and a plugin is a module instance whatever machine loads it, holding what it captured
+ * from the one that set it up — so a second machine would share the first's plugins and replace its
+ * defaults, half-working with nothing to say so. It throws instead. Several principals are one machine
+ * (`runAs`); a machine configured differently is a process of its own, as background-jobs-node runs a
+ * job. `dispose()` frees the slot, for a host (a test, in practice) done with the first.
  */
 export function assembleMachine(opts: AssembleOptions): AssembledMachine {
+  if (assembled) {
+    throw new Error('A matbot machine is already assembled in this process, and plugins and core\'s registry are shared by ' +
+                    'every machine in it. dispose() that one first, or run another machine in a process of its own.');
+  }
+  assembled = true;
   const { bootBackend, preScanned, providers } = opts;
   installSettingsDefaults(opts.defaultSettings);
 
@@ -399,5 +418,10 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     if (name !== undefined) recordServiceKey(name, 'StorageBackend');
   };
 
-  return { services, makeRunner, loaded };
+  const dispose = async (): Promise<void> => {
+    for (const plugin of [...getRegisteredPlugins()].reverse()) await unloadPlugin(plugin.name, services);
+    assembled = false;
+  };
+
+  return { services: services as AssembledMachine['services'], makeRunner, loaded, dispose };
 }

@@ -23,7 +23,7 @@ Each move is listed below under its own category; this section is the overview.
 |---|---|---|
 | `core/src/config/` (`loader.ts`, `yaml.ts`) | `apps/cli/src/config-parse.ts`, `yaml.ts` | `matbot.yaml` is how the CLI is configured, not a core format |
 | `plugins/tool-plugin/` (published) | `apps/cli/src/plugins/` | acquisition and the `plugin`/`provider` tools edit `matbot.yaml` and write `.plugins/`, which only the CLI has |
-| `plugins/browser`'s `plugin` tool | `apps/web-bundle/src/extra-plugins.ts` | the same rule in the browser: the host owns its own plugin list |
+| `plugins/browser`'s list of user-added plugins | `apps/web-bundle/src/extra-plugins.ts` | the same rule in the browser: the host owns its own plugin list (the `plugin` tool stays in `plugins/browser`, built by the bundle over that list) |
 | `apps/cli/src/` `principal-als.ts`, `usage-als.ts`, `plugin-resolver.ts`, `plugin-description.ts`, `env-vault.ts` | `host-node/` (new package) | what any Node host needs and core cannot hold, being Node-only, without the CLI's config or layout |
 | `plugins/default-gate/` | `core/src/default-gate/` | a minimal install's first act is gated, so the policy cannot depend on a `plugins:` line |
 | `plugins/files/` (`files-node`) | `plugins/storage/filesystem/src/file-store.ts` | its only user |
@@ -52,24 +52,29 @@ a second host's needs.
 
 ### Breaking changes
 
-- **Every published package is 0.5.0, and npm will not install a 0.4.x plugin beside it.** This is
-  packaging, not the plugin contract: `PLUGIN_API_VERSION` is still `0.4` and plugin-api's changes are
-  additive, so a 0.4.x plugin loads. But each plugin peer-depends on `plugin-api` with a caret range, and
-  on 0.x `^0.4.x` excludes 0.5.0, so npm refuses the install (`ERESOLVE`). Plugins with no change of their
-  own are republished at 0.5.0 for that reason alone; upgrade them together with the CLI.
+- **`PLUGIN_API_VERSION` is `0.5`, and every published package is 0.5.0.** plugin-api removes exports
+  (`importPermitted`, `configPath`) and changes signatures (`PermissionGate.decide`/`snapshot`,
+  `ToolTypeIndex.check`, `bindGate`), so a 0.4.x plugin that uses one of those fails: at link time for a
+  removed export, at its first call for a changed signature. One that uses none of them still loads, since
+  the loader refuses only a different major. npm will not install a 0.4.x plugin beside 0.5.0 anyway: each
+  plugin peer-depends on `plugin-api` with a caret range, and on 0.x `^0.4.x` excludes 0.5.0 (`ERESOLVE`).
+  Plugins with no change of their own are republished at 0.5.0 for that reason; upgrade them together
+  with the CLI.
 - **`FunctionRunSettings.permittedImports` and `importPermitted` are removed from `plugin-api`.** What a
   `tool_function` body may import is the permission gate's alone: a module refused outright is a standing
-  denial (`deny:tool_function.import`, e.g. `['* node:child_process']` for every function), not a list the
+  denial (`deny:tool_function.import`, e.g. `{ '*': ['* node:child_process'] }` for every function), not a list the
   runner carries in front of the gate. `FunctionRunSettings` declares nothing now; a runner's own fields
   (the node runner's time bound) ride on it as before. A runner that set `permittedImports` should drop
   it — nothing reads it.
-- **A plugin cannot open the `settings` store, and removes only its own tools.** `settings` holds every
+- **A plugin cannot open the `settings` store, and removes only what it registered.** `settings` holds every
   plugin's settings, the default gate's standing answers among them, so a plugin able to open it could
   grant itself anything, and tool-store's `expose` let a model do exactly that. A plugin reaches its own
-  through `services.settings()`; `createStore('settings')` on its machine now throws, in any case.
-  `services.tools.remove` on a plugin's machine leaves another plugin's or the host's tool in place, with
-  a warning: removing it and registering into the gap replaced it without the `tools.overwrite`
-  collision ever being decided.
+  through `services.settings()`; `createStore('settings')` on its machine now throws, in any case, and a
+  store name on a plugin's machine is letters, digits, `_` and `-` (the filesystem backend joins it into a
+  path, where `x/../settings` was the same directory). `services.tools.remove` on a plugin's machine leaves
+  another plugin's or the host's tool in place, with a warning: removing it and registering into the gap
+  replaced it without the `tools.overwrite` collision ever being decided. `tools`, `hooks` and
+  `systemContext.removeByPlugin` likewise act only on the calling plugin's own name.
 - **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
   instead: several co-exist and every one is asked, where the service key held one validator and a second
   had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
@@ -81,7 +86,7 @@ a second host's needs.
   explicit load, a skip recorded in `plugin list`'s `failed` at boot — where it used to import it on
   trust. A third-party plugin without the field must add it, e.g. `"matbotRuntime": ["node", "browser"]`.
   `plugin add` already refused such a package on the npm and http routes; `discover_local` now passes over
-  one without importing it. core, plugin-api, the apps and the library package `tool-plugin` no longer
+  one without importing it. core, plugin-api, host-node and the apps do not
   declare it, since they are not plugins. A host whose `PluginResolver` has no
   `runtimes` has nothing to check, and imports as before.
 - **Two migration warnings are removed.** `default_settings.__matbot_core__.overwriteToolsOnCollision` (moved
@@ -182,6 +187,11 @@ a second host's needs.
   application calling a tool from its own request handler needs no direct plugin-api dependency.
 - **`assembleMachine`'s `gate` is optional**, defaulting to core's `defaultGate`, so an embedder that wants
   matbot's ordinary policy passes nothing.
+- **One machine per process at a time, enforced.** A second `assembleMachine` while one stands throws:
+  core's plugin registry and settings defaults belong to the module, and a plugin is one module instance
+  whatever machine loads it, so a second machine shared the first's plugins and replaced its defaults.
+  `AssembledMachine.dispose()` unloads every plugin and frees the slot; `services.sessions` and
+  `services.run`, which `assembleMachine` always provides, are typed as present.
 - **`plugin` and `provider` are declared in `ToolContracts` by plugin-api**, beside the shapes it already
   held, rather than by each host's implementation. A host builds both tools itself, so a frontend or client
   typing calls to them needs only plugin-api.
@@ -254,15 +264,22 @@ a second host's needs.
   body may import `node:fs`; a wrapper decides *what it can do* with it, asking through the importing
   invocation's own gate (`ModuleWrapContext.caller`), so there is one policy and one store of standing
   answers, not one per module. Registered per specifier and applied in order at `import`. A wrapper may be
-  async, and a specifier with no wrapper is handed through raw. A guardrail against an over-reaching
-  body, not a sandbox: a granted package still gets the raw module, and bounding the process is the
-  deployment's (`docs/SECURITY.md`).
+  async, and a specifier with no wrapper is handed through raw. The registry is the process's, so a
+  reloaded runner keeps the wrappers registered with the one it replaced. A guardrail against an
+  over-reaching body, not a sandbox: a granted package still gets the raw module, and bounding the process
+  is the deployment's (`docs/SECURITY.md`).
 - **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
   gate: `tool_function.fs-read` / `tool_function.fs-write`, keyed `<function> <realpath>`, offering the
   path and everything in its directory, each for this function or for any (a directory grant covers its
   whole subtree; a denial of the file for any function excludes it from one). Async and callback
   calls ask; sync calls consult a snapshot of the answers in force and throw `EACCES` saying how to be
-  asked. Symlinks are resolved first, and two-path operations ask about both ends. Pre-authorising or
+  asked. Symlinks are resolved first (to the name as stored, so `.ENV` is `.env` on a case-insensitive
+  filesystem), and two-path operations ask about both ends; `link` and `rename` read and change their
+  source. The module's CommonJS view (`.default`), the stream classes, `Uint8Array` and URL-shaped paths,
+  and glob patterns whose braces or `..` reach outside their prefix are all asked about, and a function
+  member that takes a path but is in neither of its tables is refused rather than handed through. The
+  filesystem root is never offered as a directory to grant, and is itself refused rather than asked
+  about, since any answer for it is one for every path. Pre-authorising or
   denying is a standing answer, configured under the default gate's `default_settings:` (`deny:` entries
   may name a directory). Closes the class where a body granted `node:fs` reads secrets or runtime state
   without being asked.
@@ -272,8 +289,8 @@ a second host's needs.
   anywhere.
 - **`docker-bash`** — mounts the host's `projectDir` read-only and its `dataDir` read-write, instead of the
   working directory and `.data` inside it. A data directory inside the project keeps its place in the
-  container, so under the CLI scripts see `/app/.data/bash-cwd` as before; one outside it is mounted at
-  `/data`.
+  container, so under the CLI scripts see `/app/.data/bash-cwd` as before, and an existing container is
+  kept; one outside it is mounted at `/data`.
 - **`browser`** / **web bundle** — the `plugin` tool and the list of plugins a user added are the web
   bundle's, as the CLI's are, rather than the `browser` plugin's. The plugins a user added load after the
   configured ones instead of inside the `browser` plugin's own load, and removing the `browser` plugin no
@@ -320,7 +337,11 @@ a second host's needs.
   (the `"legacy": true` rows, and `cancel`'s `legacy` field). A warning at startup still counts any that
   are left; re-create each with `background_job` and delete the old row. To list and cancel them with a
   tool, run 0.4.x once.
-- **`tool-plugin`** — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
+- **CLI** — a duplicated `core` or `plugin-api` is warned about once, after plugins load, rather than on
+  the version banner as well; `plugin list` reports copies reachable from the CLI's own dependencies too.
+  A package's `exports` is read as Node reads it for `import` — conditions in the order the package lists
+  them — in all three places the CLI reads one, which had each used a different order.
+- **CLI `plugin` tool** (formerly `tool-plugin`) — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
   refused; write `github:owner/repo/sub` (with `#ref` after it, if any), which fetches the same files. It
   never worked as an install, and since 0.4.5 it was folded into the path with a warning. Refused when the
   plugin is fetched, so a configured one is a recorded load failure naming the rewrite, not a boot that
@@ -351,6 +372,9 @@ a second host's needs.
   name; the classifier uses the `classifierProvider` setting, else the turn's provider. An install that
   has such a profile and no pin is warned at startup, with the one line that keeps it:
   `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.
+- **`triggers`** — a stored condition of kind `augment` (what `ephemeral` was called) is migrated to
+  `ephemeral` when it is read, with a warning. Unmigrated, it was judged on no surface, so its trigger
+  never fired and nothing said so.
 - **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
   Nor is the Inner Voice trigger's cool-down backfilled onto one seeded before 0.3.8; set it with
@@ -365,14 +389,18 @@ a second host's needs.
   use once it is installed. A plugin that wants its own store exposed calls `defineStore`, as cognition
   does. The generated tool is still `<name>_action`. `store_action`'s `namespace` parameter is now
   `name`. A name whose tool another plugin provides is refused rather than replaced, and `remove`
-  removes a tool only when it removes a definition. Definitions from before 0.5.0 keep their namespace
-  and need no migration. Removing one leaves its documents where a new `create` will not find them. One
+  removes a tool only when it removes a definition. One
   whose namespace the host now refuses (`settings`) is skipped at boot, with a warning, rather than
   failing the plugin. A name is at most 57 characters, so its tool name fits a provider's 64. A store a
   plugin exposes is that plugin's alone: its definition records the `owner`, tool-store's boot leaves it
   for the owner to register (registering it first made the owner's own setup a tool collision, warned
   about at every boot, and kept the store exposed with its owner unloaded), and `store_action remove`
-  refuses it while the owner holds the tool.
+  refuses it while the owner holds the tool. A definition from before 0.5.0, which nothing marked as a
+  store `create` made or an `expose` over a plugin's namespace, is handed to that plugin if it defines the
+  store (cognition's `remembered_facts`); otherwise, on the tool's first use, its documents are copied into
+  `store-<name>` and the store keeps them there — so a model's store keeps its contents, and an old
+  exposure stops reaching the live namespace. The originals stay where they were; removing such a store
+  before it is first used says that its documents are orphaned.
 - **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
   installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
   like a string.

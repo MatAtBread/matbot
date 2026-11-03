@@ -22,7 +22,10 @@ const appDir = join(here, '..');
 
 test('this embedder imports nothing of the CLI app', async () => {
   const source = await readFile(fileURLToPath(import.meta.url), 'utf8');
-  const sources = [...source.matchAll(/^import[^;]*?from '([^']+)'/gms)].map(m => m[1]!);
+  // Every way a module names another: an import or re-export from it, a bare import of it, a dynamic import.
+  const sources = [...source.matchAll(/\b(?:import|export)\b[^;'"()]*?\bfrom\s*(['"])([^'"]+)\1|\bimport\s*\(?\s*(['"])([^'"]+)\3/g)]
+    .map(m => (m[2] ?? m[4])!);
+  assert.ok(sources.includes('@matatbread/matbot-core'), 'the scan finds this file\'s own imports');
   assert.deepEqual(sources.filter(s => !/^(node:|@matatbread\/matbot-(core|host-node|storage-filesystem)$)/.test(s)), []);
 });
 
@@ -84,15 +87,15 @@ test('a machine from core and host-node: per-request principals, a plugin by pat
 
   // A turn carries its submitter's principal into the tool it calls.
   const session = createSession();
-  await services.sessions!.set(session.id, session);
+  await services.sessions.set(session.id, session);
   await runAs(bob, async () => {
-    const view = await services.run!.open({
+    const view = await services.run.open({
       sessionId: session.id, signal: new AbortController().signal, provider: 'p',
       principal: bob, content: [{ type: 'text', text: 'who am I?' }],
     });
     for await (const ev of view.events) if (ev.type === 'idle') break;
   });
-  const results = (await services.sessions!.get(session.id))!.messages
+  const results = (await services.sessions.get(session.id))!.messages
     .flatMap(m => m.content).filter(c => c.type === 'tool-result');
   assert.equal(results.length, 1);
   assert.match(JSON.stringify(results[0]), /"id":"bob"/);

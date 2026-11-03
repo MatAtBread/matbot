@@ -361,7 +361,7 @@ export function makeGateActionTool(settings: PluginSettings): Tool<ToolResultOf<
           }
           if (refusals.length > 0) parts.push(...refusals);
           if (stayed.length > 0) {
-            parts.push(`Still in force from the installation's configured defaults, which this tool cannot change: ${stayed.map(named).join('; ')}. Edit \`default_settings\` for '${DEFAULT_GATE_SETTINGS_NS}' to change those.`);
+            parts.push(`Still in force from the installation's configured defaults, which this tool cannot change: ${stayed.map(named).join('; ')}. Change those in the installation's default settings for '${DEFAULT_GATE_SETTINGS_NS}' (the CLI's \`default_settings:\`).`);
           }
           if (unknown.length > 0) parts.push(`No entry has id ${unknown.join(', ')} — it may have been cleared already; "list" again for current ids.`);
           if (parts.length === 0) {

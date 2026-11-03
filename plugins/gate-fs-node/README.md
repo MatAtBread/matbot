@@ -11,6 +11,10 @@ path the body names is asked about again:
   doesn't allow changing it. Writing includes creating, renaming and deleting.
 - **subject `<function> <realpath>`**, keyed like the import gate's. Symlinks, `..` and relative paths are
   resolved first, so a file has one subject however it is spelled, and a link can't lead out of a grant.
+  The realpath is the name as stored on disk, so on a volume that ignores case (macOS's default) `.ENV`
+  is asked about as `.env`. A subject you configure should be spelled as the path is stored; a **denial**
+  written in lower case also holds for every spelling on such a volume, including a file that does not
+  exist yet. Whether a volume ignores case is measured, once per device.
 - **standing answers on offer:** the path itself, for this function or for **any** function (`* <path>`);
   anything in its directory, for this function or for any function (`* <dir>/`). A directory grant covers everything below it. A body that moves
   above it is asked again, and so is one that follows a symlink out of it, because the link is asked about

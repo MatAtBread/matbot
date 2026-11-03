@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, createConstantPrincipalCarrier, installUsageCarrier,
-  loadPlugins, unloadPlugin,
+  loadPlugins,
 } from '@matatbread/matbot-core';
 import type { Vault } from '@matatbread/matbot-core';
 import type { Triggers } from '@matatbread/matbot-triggers';
@@ -25,7 +25,7 @@ const entry = (dir: string) => new URL(`../../../plugins/${dir}/src/index.ts`, i
 for (const order of [['triggers', 'skills', 'cognition'], ['skills', 'cognition', 'triggers']]) {
   test(`cognition seeds its triggers with plugins loaded as ${order.join(', ')}`, async t => {
     const dir = await mkdtemp(join(tmpdir(), 'matbot-cognition-'));
-    const { services } = assembleMachine({
+    const { services, dispose } = assembleMachine({
       bootBackend: new FilesystemStorageBackend(dir),
       vault:       { resolve: async (r: string) => r } as unknown as Vault,
       providers:   new ProviderRegistryImpl(new Map()),
@@ -39,7 +39,7 @@ for (const order of [['triggers', 'skills', 'cognition'], ['skills', 'cognition'
       }),
     });
     const loaded = await loadPlugins(order.map(p => ({ spec: entry(p), importSpec: entry(p), name: `@matatbread/matbot-${p}` })), services, false, undefined, 'skip');
-    t.after(async () => { for (const p of loaded.reverse()) await unloadPlugin(p.name, services); await rm(dir, { recursive: true, force: true }); });
+    t.after(async () => { await dispose(); await rm(dir, { recursive: true, force: true }); });
     assert.equal(loaded.length, 3);
 
     const triggers = (services as unknown as { Triggers: Triggers }).Triggers;

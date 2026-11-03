@@ -63,9 +63,10 @@ export interface WrapperHandle {
  * through raw, so an installation pays only for what it mediates.
  *
  * Register through `services.mounted.observe({ key: 'ImportedModuleWrapper', replay: true }, m =>
- * m.ImportedModuleWrapper!(…))`, so the registration is re-applied if the runner is reloaded (the new
- * runner's registry starts empty), and withdraw it in the registrant's `teardown()` with the handle's
- * `remove()` — a wrapper is not a host-tracked surface (a tool, a hook), so `unloadPlugin` does not drop
+ * m.ImportedModuleWrapper!(…))`, so the registration is made whichever loads first, replacing your own
+ * earlier one when the runner remounts (a reloaded runner keeps what was registered — see
+ * {@link sharedModuleWrapperRegistry} — so registering again without removing would wrap twice), and
+ * withdraw it in the registrant's `teardown()` with the handle's `remove()` — a wrapper is not a host-tracked surface (a tool, a hook), so `unloadPlugin` does not drop
  * it, and a wrapper from an unloaded plugin would otherwise keep mediating every later import. Removal
  * needs no re-import: the runner re-runs the wrappers on EVERY `import(…)` and caches no wrapped module,
  * so the next import simply excludes a removed wrapper, and the only references to it are inside in-flight
@@ -84,9 +85,8 @@ declare module '@matatbread/matbot-plugin-api' {
 
 /**
  * The registry behind {@link ImportedModuleWrapper}: the `service` a host registers under that key, and
- * the `apply` the runner calls at `import` time. One per runner, so a reload starts empty and registrants
- * re-add through the mount table. `canonicalise` keys both sides the same way, so a wrapper registered
- * for `node:os` also meets an `os` import.
+ * the `apply` the runner calls at `import` time. `canonicalise` keys both sides the same way, so a wrapper
+ * registered for `node:os` also meets an `os` import.
  */
 export function createModuleWrapperRegistry(canonicalise: (spec: string) => string): {
   service: ImportedModuleWrapper;
@@ -118,4 +118,19 @@ export function createModuleWrapperRegistry(canonicalise: (spec: string) => stri
       return mod;
     },
   };
+}
+
+type WrapperRegistry = ReturnType<typeof createModuleWrapperRegistry>;
+// A global symbol, so a reload of this plugin — a fresh module instance — finds the registry the last one made.
+const SHARED = Symbol.for('@matatbread/matbot-function-runner-node#ImportedModuleWrapper');
+
+/**
+ * The process's one registry, which every runner this plugin creates applies. One per runner, a reloaded
+ * runner started with no wrappers, and mediated nothing until each registrant's mount handler re-registered
+ * at the next quiescent edge — while the turn that reloaded it went on, importing `node:fs` raw. Kept for
+ * the process instead, a reload changes the runner and nothing about what its imports are wrapped with.
+ */
+export function sharedModuleWrapperRegistry(canonicalise: (spec: string) => string): WrapperRegistry {
+  const g = globalThis as { [SHARED]?: WrapperRegistry };
+  return g[SHARED] ??= createModuleWrapperRegistry(canonicalise);
 }

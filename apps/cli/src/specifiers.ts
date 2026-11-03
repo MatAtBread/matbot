@@ -5,23 +5,7 @@ import { pathToFileURL }            from 'node:url';
 import path                         from 'node:path';
 import { classifySpecifier, materializeRemote, remoteDependencyNotes,
          type MaterializedRemote } from './plugins/remote-cache.js';
-
-/**
- * Given a package exports field (or any nested value), return the first
- * string entry point, preferring "import" > "default" > first value.
- */
-function resolveExportsEntry(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (typeof value !== 'object' || value === null) return undefined;
-  const obj = value as Record<string, unknown>;
-  // Subpath map: { ".": ... } → unwrap the "." entry
-  if ('.' in obj) return resolveExportsEntry(obj['.']);
-  // Condition map: prefer import > default > first
-  for (const key of ['import', 'default', ...Object.keys(obj)]) {
-    if (key in obj) return resolveExportsEntry(obj[key]);
-  }
-  return undefined;
-}
+import { exportsEntry }             from './plugins/package-exports.js';
 
 // Resolve npm specifiers against the CLI's own install as well as the config dir. The bundled
 // provider adapters are dependencies of the CLI, not of an arbitrary config dir, so a source
@@ -80,7 +64,7 @@ export async function resolvePluginSpecifiers(specifiers: readonly string[], con
       importSpec = pathToFileURL(absDir).href;
       try {
         const pkg  = JSON.parse(await readFile(path.join(absDir, 'package.json'), 'utf8')) as Record<string, unknown>;
-        const main = resolveExportsEntry(pkg['exports']);
+        const main = exportsEntry(pkg['exports']);
         if (typeof main === 'string') importSpec = pathToFileURL(path.resolve(absDir, main)).href;
       } catch { /* no package.json or unparseable — import the directory */ }
     } else {

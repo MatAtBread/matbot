@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { ImportCaller, PermissionDecision, PermissionRequest, PermissionSnapshot } from '@matatbread/matbot-plugin-api';
-import { directoryOf, realResolve, type Access } from './paths.js';
+import { caseInsensitiveAt, directoryOf, realResolve, type Access } from './paths.js';
 
 /**
  * The question a path is put as. Gate `fs-read` or `fs-write` (qualified by the consumer as
@@ -26,6 +26,10 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
   const dir  = directoryOf(real);
   const verb = access === 'read' ? 'read' : 'write to';
   const { fn, who } = caller;
+  // A subject ending at the separator covers everything below it, so an answer for the root — even for
+  // "this path", `/` itself — would be an answer for every path: path gating switched off, from a prompt
+  // about one file. That is removing this plugin, and is said so rather than offered.
+  const atRoot = dir === path.parse(real).root;
   return {
     gate:     `fs-${access}`,
     subject:  `${fn} ${real}`,
@@ -35,8 +39,10 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
     standing: [
       { subject: `${fn} ${real}`, label: `${who} to ${verb} ${real}` },
       { subject: `* ${real}`,     label: `ANY function to ${verb} ${real}` },
-      { subject: `${fn} ${dir}`,  label: `${who} to ${verb} anything in ${dir}` },
-      { subject: `* ${dir}`,      label: `ANY function to ${verb} anything in ${dir}` },
+      ...(atRoot ? [] : [
+        { subject: `${fn} ${dir}`,  label: `${who} to ${verb} anything in ${dir}` },
+        { subject: `* ${dir}`,      label: `ANY function to ${verb} anything in ${dir}` },
+      ]),
     ],
     separators: [path.sep],
   };
@@ -70,13 +76,39 @@ export function decisionsFor(caller: ImportCaller): Promise<Decisions> {
 
 const keyOf = (req: PermissionRequest): string => `${req.gate}\0${req.subject}`;
 
-function refusal(message: string): Error {
+export function refusal(message: string): Error {
   return Object.assign(new Error(message), { code: 'EACCES' });
+}
+
+/**
+ * On a volume that ignores case, a standing DENIAL of the path spelled in lower case. A subject is the name
+ * as stored on disk, which is what an answer given at a prompt names; one typed into the configuration in
+ * another case would otherwise never match, and on such a volume it names the same file. Lower case is
+ * the one other spelling a policy that compares strings can be asked about, so a denial written that way
+ * holds for every spelling — of a file that does not exist yet, too, which has no stored name to resolve
+ * to. Only a denial: folding an ALLOW would let one spelling stand for another.
+ */
+function foldedDenial(st: Decisions, caller: ImportCaller, access: Access, op: string, real: string): PermissionDecision | undefined {
+  const lower = real.toLowerCase();
+  if (lower === real || !caseInsensitiveAt(real)) return undefined;
+  const d = st.snapshot(fsRequest(caller, access, op, lower));
+  return !d.allowed && d.source !== 'fallback' ? d : undefined;
+}
+
+/** The root itself: see {@link fsRequest}. */
+function refuseRoot(real: string, op: string, arg: string): void {
+  if (real !== path.parse(real).root) return;
+  throw refusal(`fs.${op} of "${arg}": the filesystem root is not asked about, since any answer for it would be an answer ` +
+                'for every path. To stop gating the paths a function body touches, remove the gate-fs-node plugin.');
 }
 
 /** Ask, prompting if nothing standing decides. For an asynchronous operation. */
 export async function admit(st: Decisions, caller: ImportCaller, access: Access, op: string, arg: string): Promise<void> {
-  const req = fsRequest(caller, access, op, realResolve(arg));
+  const real = realResolve(arg);
+  refuseRoot(real, op, arg);
+  const denied = foldedDenial(st, caller, access, op, real);
+  if (denied !== undefined) throw refusal(refusalMessage(denied, `fs.${op} of "${arg}"`));
+  const req = fsRequest(caller, access, op, real);
   const key = keyOf(req);
   let decision = st.memo.get(key);
   if (decision === undefined) {
@@ -97,8 +129,10 @@ export async function admit(st: Decisions, caller: ImportCaller, access: Access,
 
 /** Consult what was decided in advance, never asking. For a synchronous operation, which cannot. */
 export function admitSync(st: Decisions, caller: ImportCaller, access: Access, op: string, arg: string): void {
-  const req = fsRequest(caller, access, op, realResolve(arg));
-  const decision = st.memo.get(keyOf(req)) ?? st.snapshot(req);
+  const real = realResolve(arg);
+  refuseRoot(real, op, arg);
+  const req = fsRequest(caller, access, op, real);
+  const decision = foldedDenial(st, caller, access, op, real) ?? st.memo.get(keyOf(req)) ?? st.snapshot(req);
   if (decision.allowed) return;
   if (decision.source === 'fallback') {
     const async = op.endsWith('Sync') ? `fs.promises.${op.slice(0, -'Sync'.length)}` : 'the fs.promises form';

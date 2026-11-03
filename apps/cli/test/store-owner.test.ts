@@ -102,3 +102,61 @@ test('store_action cannot remove a store its owner is exposing, and can tidy one
   h.tools.delete('remembered_facts_action');   // the owner unloaded
   assert.deepEqual(await call(storeAction, { action: 'remove', name: 'remembered_facts' }), { result: { removed: true } });
 });
+
+const legacyDef = (id: string) => ({
+  id, version: 'v0', namespace: id, description: 'from 0.4', shape: 'interface Fact { fact: string }',
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+});
+
+test('a def from before 0.5.0 is handed to its owner when the owner defines it, unmoved', async () => {
+  const h = host();
+  await h.machineOf('@x/tool-store').createStore('store_tools').set('remembered_facts', legacyDef('remembered_facts'));
+  await plugin.setup!(h.machineOf('@x/tool-store'));
+  assert.equal(h.tools.get('remembered_facts_action')?.pluginName, '@x/tool-store', 'still registered, as before');
+
+  await defineStore(h.machineOf('@x/cognition'), spec);
+  assert.deepEqual([h.collisions, h.refusals], [[], []], 'handed over, not collided');
+  assert.equal(h.tools.get('remembered_facts_action')?.pluginName, '@x/cognition');
+  const def = await h.machineOf('@x/tool-store').createStore('store_tools').get('remembered_facts') as { owner?: string; namespace: string } | null;
+  assert.deepEqual([def?.owner, def?.namespace], ['@x/cognition', 'remembered_facts'], 'recorded as the owner\'s, in its own namespace');
+});
+
+test('a def from before 0.5.0 with no owner moves into a namespace of tool-store\'s own on first use, keeping its documents', async () => {
+  const h = host();
+  const ts = h.machineOf('@x/tool-store');
+  await ts.createStore('store_tools').set('notes', legacyDef('notes'));
+  await ts.createStore('notes').set('n1', { id: 'n1', version: 'a', fact: 'kept' });
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (m: unknown) => { warned.push(String(m)); };
+  try {
+    await plugin.setup!(ts);
+    assert.deepEqual(warned, [], 'nothing to say at boot');
+    const got = await call(h.tools.get('notes_action')!, { action: 'get', id: 'n1' });
+    assert.equal((got.result as { fact?: string } | null)?.fact, 'kept');
+    await call(h.tools.get('notes_action')!, { action: 'set', id: 'n2', data: { fact: 'new' } });
+  } finally { console.warn = warn; }
+  assert.ok(warned.some(m => /"notes" was defined before 0\.5\.0.*"store-notes" \(1 copied\)/.test(m)));
+  const def = await ts.createStore('store_tools').get('notes') as { namespace: string } | null;
+  assert.equal(def?.namespace, 'store-notes');
+  assert.ok(await ts.createStore('store-notes').get('n2'), 'later writes land in its own namespace');
+  assert.equal(await ts.createStore('notes').get('n2'), null, 'and never in the old one');
+  assert.ok(await ts.createStore('notes').get('n1'), 'whose documents stay where they were');
+});
+
+test('removing a def from before 0.5.0 that never moved says its documents are orphaned', async () => {
+  const h = host();
+  const ts = h.machineOf('@x/tool-store');
+  await ts.createStore('store_tools').set('jots', legacyDef('jots'));
+  await ts.createStore('jots').set('j1', { id: 'j1', version: 'a', fact: 'left' });
+  await plugin.setup!(ts);
+  const warned: string[] = [];
+  const warn = console.warn;
+  console.warn = (m: unknown) => { warned.push(String(m)); };
+  try {
+    const r = await call(h.tools.get('store_action')!, { action: 'remove', name: 'jots' });
+    assert.deepEqual(r.result, { removed: true });
+  } finally { console.warn = warn; }
+  assert.ok(warned.some(m => /"jots" was removed before it moved out of the namespace "jots".*orphaned/.test(m)));
+  assert.ok(await ts.createStore('jots').get('j1'), 'the documents are where they were');
+});

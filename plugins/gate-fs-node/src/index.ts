@@ -6,7 +6,7 @@ import { decisionsFor } from './gate.js';
 
 export { wrapFsModule } from './wrap.js';
 export { admit, admitSync, decisionsFor, fsRequest, type Decisions } from './gate.js';
-export { directoryOf, realResolve, type Access } from './paths.js';
+export { caseInsensitiveAt, directoryOf, realResolve, type Access } from './paths.js';
 
 /**
  * gate-fs-node — puts each path a `tool_function` body's `node:fs` names to the permission gate.
@@ -36,19 +36,22 @@ export const plugin: MatbotPluginSpec = {
 
   async setup(services: MatbotMachine) {
     // Registered through the mount table so it follows the runner: replay seeds it against the runner
-    // present now, and a runner reload (whose new registry starts empty) re-fires this and re-registers.
-    // The handles are withdrawn in teardown(), since a wrapper is not a host-tracked surface.
+    // present now, and a remount replaces this plugin's registration rather than adding a second (a
+    // reloaded runner keeps the wrappers it had). The handles are withdrawn in teardown(), since a wrapper
+    // is not a host-tracked surface.
     for (const spec of ['node:fs', 'node:fs/promises'] as const) {
       services.mounted.observe({ key: 'ImportedModuleWrapper', replay: true }, m => {
-        handles.push(m.ImportedModuleWrapper!(spec, async (mod, ctx) =>
+        handles.get(spec)?.remove();
+        handles.set(spec, m.ImportedModuleWrapper!(spec, async (mod, ctx) =>
           wrapFsModule(mod as object, spec === 'node:fs' ? 'fs' : 'promises', await decisionsFor(ctx.caller), ctx.caller)));
       });
     }
   },
 
   async teardown() {
-    for (const h of handles.splice(0)) h.remove();
+    for (const h of handles.values()) h.remove();
+    handles.clear();
   },
 };
 
-const handles: WrapperHandle[] = [];
+const handles = new Map<string, WrapperHandle>();

@@ -8,6 +8,9 @@ import type {
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
 import { makePluginSettings, SETTINGS_NAMESPACE } from './settings.js';
+
+/** What a plugin may name a store: see the machine's `createStore`. */
+const PLUGIN_NAMESPACE = /^[\w-]+$/;
 import type { SettingsDoc } from './settings.js';
 
 // ── Internal state ────────────────────────────────────────────────────────────
@@ -352,6 +355,15 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // Plugin-scoped notifier, likewise built once. See the `Notifier` member below.
   const ownNotifier = scopedNotifier(services.Notifier, plugin.name);
 
+  // `removeByPlugin` reaches only this plugin's own registrations, for the reason `tools.remove` does (below):
+  // another plugin's hooks or tools removed are its validators gone, or a gap a replacement registers into
+  // unasked. Nothing to do but its own, which is what its unload does anyway.
+  const ownName = (name: string, what: string): boolean => {
+    if (name === plugin.name) return true;
+    console.warn(`[matbot] Plugin "${plugin.name}" cannot remove the ${what} of "${name}": a plugin removes only its own.`);
+    return false;
+  };
+
   // Per-plugin `mounted`: a thin adapter over the host mount table that delivers *this plugin's* scoped
   // machine (and scoped onUnmount) to handlers. The stable `scoped` object reads through the host's
   // re-pointing proxies/registry, so `scoped[key]` is the host's live service by the time a transition
@@ -378,8 +390,11 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
     // would undo it: one document per plugin, the default gate's standing answers among them, so a
     // plugin opening it (or exposing it to a model, as tool-store's `expose` once could) can grant
     // itself anything. Case-folded because a namespace is a directory on the filesystem backend, and
-    // `Settings` is the same one on macOS and Windows.
+    // `Settings` is the same one on macOS and Windows; restricted to word characters and `-` because that
+    // backend joins it into a path, where `./settings` and `x/../settings` are the same directory.
     createStore<T extends { id: string; version: string }>(namespace: string): Store<T> {
+      if (!PLUGIN_NAMESPACE.test(namespace))
+        throw new Error(`Plugin "${plugin.name}" cannot open the store "${namespace}": a store's name is letters, digits, "_" and "-".`);
       if (namespace.toLowerCase() === SETTINGS_NAMESPACE)
         throw new Error(`Plugin "${plugin.name}" cannot open the "${namespace}" store: a plugin reaches its own settings through services.settings(), and no other plugin's.`);
       return services.createStore<T>(namespace);
@@ -420,7 +435,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
       },
       resolve:       (name: string) => services.tools.resolve(name),
       list:          ()             => services.tools.list(),
-      removeByPlugin:(name: string) => services.tools.removeByPlugin(name),
+      removeByPlugin:(name: string) => { if (ownName(name, 'tools')) services.tools.removeByPlugin(name); },
       validate:      async (name: string, parameters: unknown) => services.tools.validate?.(name, parameters),
     },
     hooks: {
@@ -428,14 +443,14 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
         state.hookPlugins.add(plugin.name);
         services.hooks.register({ ...hook, pluginName: plugin.name } as Hook);
       },
-      removeByPlugin: (name: string) => services.hooks.removeByPlugin(name),
+      removeByPlugin: (name: string) => { if (ownName(name, 'hooks')) services.hooks.removeByPlugin(name); },
     },
     systemContext: {
       register(contributor) {
         state.systemContextPlugins.add(plugin.name);
         services.systemContext.register(contributor, plugin.name);
       },
-      removeByPlugin: (name: string) => services.systemContext.removeByPlugin(name),
+      removeByPlugin: (name: string) => { if (ownName(name, 'system-context contributors')) services.systemContext.removeByPlugin(name); },
       build:          (ctx)          => services.systemContext.build(ctx),
       parts:          (ctx)          => services.systemContext.parts(ctx),
     },

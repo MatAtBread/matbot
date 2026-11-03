@@ -8,8 +8,8 @@ export interface StoreDef {
   id:          string;
   version:     string;
   /** The namespace of the governed `Store<StoreRecord>`: `store-<id>` for a store `create` made,
-   *  `id` itself for one its owning plugin exposed through `defineStore` (and for any def from
-   *  before 0.5.0). */
+   *  `id` itself for one its owning plugin exposed through `defineStore` (and for a def from before
+   *  0.5.0 until it is first used, when it moves to `store-<id>`). */
   namespace:   string;
   /** The plugin that exposed its OWN store through `defineStore`, and so registers its tool from its own
    *  setup — which is why this plugin's boot leaves the def alone: registering it first put the tool under

@@ -17,7 +17,10 @@ import { MemoryStorageBackend } from '@matatbread/matbot-core/storage-base';
 
 test('this embedder imports nothing but core', async () => {
   const source = await readFile(fileURLToPath(import.meta.url), 'utf8');
-  const sources = [...source.matchAll(/^import[^;]*?from '([^']+)'/gms)].map(m => m[1]!);
+  // Every way a module names another: an import or re-export from it, a bare import of it, a dynamic import.
+  const sources = [...source.matchAll(/\b(?:import|export)\b[^;'"()]*?\bfrom\s*(['"])([^'"]+)\1|\bimport\s*\(?\s*(['"])([^'"]+)\3/g)]
+    .map(m => (m[2] ?? m[4])!);
+  assert.ok(sources.includes('@matatbread/matbot-core'), 'the scan finds this file\'s own imports');
   assert.deepEqual(sources.filter(s => !/^(node:|@matatbread\/matbot-core(\/storage-base)?$)/.test(s)), []);
 });
 
@@ -66,14 +69,14 @@ test('a machine from core alone: in-memory storage, a plugin by package name, a 
   assert.ok(names.includes('gate_action'));
 
   const session = createSession();
-  await services.sessions!.set(session.id, session);
-  const view = await services.run!.open({
+  await services.sessions.set(session.id, session);
+  const view = await services.run.open({
     sessionId: session.id, signal: new AbortController().signal, provider: 'p',
     principal: { id: 'me', type: 'user' }, content: [{ type: 'text', text: 'hi' }],
   });
   for await (const ev of view.events) if (ev.type === 'idle') break;
 
-  const stored = await services.sessions!.get(session.id);
+  const stored = await services.sessions.get(session.id);
   assert.match(JSON.stringify(stored!.messages.at(-1)), /hello/);
   assert.ok((await backend.namespaces()).includes('sessions'), 'and the session is in the memory backend');
 });

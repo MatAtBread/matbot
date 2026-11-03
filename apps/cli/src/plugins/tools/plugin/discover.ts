@@ -4,6 +4,7 @@ import { pathToFileURL, fileURLToPath }  from 'node:url';
 import path                              from 'node:path';
 import { readPluginsList, readProviderModules } from '../../config-entries.js';
 import { normalizeRuntimes }             from './identity.js';
+import { exportsEntry }                  from '../../package-exports.js';
 
 export async function* discoverPlugins(configPath: string): AsyncIterable<ToolEvent<ToolResultOf<'plugin'>>> {
   const projectDir = path.dirname(configPath);
@@ -19,29 +20,6 @@ export async function* discoverPlugins(configPath: string): AsyncIterable<ToolEv
                    : null,
     })),
   };
-}
-
-// Resolve package.json `exports["."]` to a node-importable entry. Discovery imports under node, so we
-// honour the node ESM conditions ({node, import, default}) and skip browser/require — frontend-web's
-// `{ browser, import, default }` form would otherwise resolve to `undefined` and be silently dropped.
-function resolveCondition(target: unknown): string | undefined {
-  if (typeof target === 'string') return target;
-  if (target === null || typeof target !== 'object') return undefined;
-  for (const [key, value] of Object.entries(target as Record<string, unknown>)) {
-    if (key === 'node' || key === 'import' || key === 'default') {
-      const resolved = resolveCondition(value);
-      if (resolved !== undefined) return resolved;
-    }
-  }
-  return undefined;
-}
-
-function resolveExportsMain(exports: unknown): string | undefined {
-  if (typeof exports === 'string') return exports;
-  if (exports !== null && typeof exports === 'object') {
-    return resolveCondition((exports as Record<string, unknown>)['.']);
-  }
-  return undefined;
 }
 
 // What `discoverLocalPlugins` builds, before the caller stamps `configuredVia` from the config it read.
@@ -63,7 +41,7 @@ async function inspectPluginDir(sub: string, specifier: string, source: { type: 
 
   // The entry is resolved from exports["."] (so we import the .ts file directly, not the directory).
   // No resolvable entry, an import that rejects, or a module with no `plugin` export → not a plugin.
-  const exportsMain = resolveExportsMain(pkg.exports);
+  const exportsMain = exportsEntry(pkg.exports);
   if (!exportsMain) return null;
   let p: MatbotPlugin | undefined;
   try {

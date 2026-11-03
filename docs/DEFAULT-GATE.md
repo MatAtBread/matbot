@@ -86,6 +86,13 @@ every tool, being in no file — or `settings`, beside the `'*'` answers under t
 forgotten. Sessions are never deleted, so persisted session answers accumulate until `gate_action`
 clears them. `gate_action`'s `session-store` action changes it at run time, as below.
 
+**Who a session answer is for** differs between the two. In memory it is keyed by principal as well as
+session: one person's "for this session" is not another's. In settings it is kept wherever that
+principal's settings are, and nothing says a session has one user: a session may be shared, and
+whether settings are partitioned by principal is the storage's business (the `profiles` backend asks
+whether sessions are common or per-principal). Where several principals share a session and settings
+are not partitioned, a persisted session answer given by one applies to the others working in it.
+
 This is also the supported way to make a gated operation work for callers that have **no prompt
 channel** — `invokeTool`, a trigger, a compiled skill, `POST /tools/:name` — which otherwise get the
 call site's `fallback` (a refusal, for everything but `tools.overwrite`). Connecting an MCP server
@@ -94,7 +101,7 @@ from a script is the usual case:
 ```yaml
 default_settings:
   '@matatbread/matbot-default-gate':
-    'mcp_action.add': true
+    'mcp_action.add': { '*': true }
 ```
 
 Naming the gate is the whole point of the seam: the alternative is editing the plugin that declares

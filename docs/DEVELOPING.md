@@ -1481,6 +1481,27 @@ way, so a package name works and a path must name the entry file, not the direct
 `apps/cli/test/core-alone.test.ts` is that host, and [examples/minimal-matbot](../examples/minimal-matbot)
 is the same as a program: stdin to a provider, the reply to stdout.
 
+**Start it with `node --import @matatbread/matbot-host-node/register`.** matbot's packages are TypeScript
+source importing `./x.js` for `./x.ts`, and Node strips types natively but neither tries `.ts` for `.js`
+nor strips anything under `node_modules`. `apps/cli/test/embedder-subprocess.test.ts` runs a machine with
+those hooks and nothing else.
+
+**One machine per process.** Core's plugin registry (which plugins are loaded, the providers they supply,
+what each registered) and the installation's settings defaults are held by the module, not by a machine,
+and a plugin is one module instance whatever machine loads it, holding what it captured from the machine
+that set it up. A second machine would share the first's plugins and replace its defaults, so a second
+`assembleMachine` while one stands throws; `dispose()` unloads the first's plugins and frees the slot (a
+test file building a machine per test is the use). Several tenants are one machine with a principal each
+(`runAs`), which is what the principal carrier and the storage partitioning are for; a machine configured
+differently is a process of its own, as `background-jobs-node` runs each job.
+
+**The carriers.** The principal carrier is required — a turn with no identity throws, since every store,
+vault and gate decision is made for someone. The usage carrier is not: it is the ambient sink that
+attributes each provider call's tokens to the turn, tool or hook that made it (*Accounting* in
+CLAUDE.md), and with none installed a turn runs and records no activity on its messages. Install
+`createAlsUsageCarrier()` (host-node) or core's `createSerialUsageCarrier()` beside the principal carrier
+unless you mean to account for nothing.
+
 **Running it needs two module hooks.** matbot's packages are published as TypeScript source that imports
 `./x.js` where the file is `./x.ts`. Node strips types itself, but it does not try `.ts` for a `.js` import,
 and it refuses to strip anything under `node_modules`. Run the application with

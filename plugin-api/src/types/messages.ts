@@ -1,6 +1,6 @@
 import type { HookPoint } from './hooks.js';
 import type { ISODate, MimeType } from './primitives.js';
-import type { ProviderMeta, TurnEntry, UsageRecord } from './provider.js';
+import type { ProviderMeta, TurnEntry } from './provider.js';
 
 // ── Messages & Session ────────────────────────────────────────────────────────
 

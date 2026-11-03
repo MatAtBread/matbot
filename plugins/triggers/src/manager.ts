@@ -7,6 +7,7 @@ const MAX_MSG_CHARS = 4000;
 // The provider name the classifier used to pick up implicitly. It no longer does; setup warns when an
 // install still has one and has not pinned it. Removed in 0.6.0, with that warning.
 export const RETIRED_CLASSIFIER = 'skills-classifier';
+const RETIRED_KIND = 'augment';
 
 function clip(text: string): string {
   if (text.length <= MAX_MSG_CHARS) return text;
@@ -70,11 +71,30 @@ export class TriggerManager implements Triggers {
    *  belongs in the StorageBackend, not in this consumer. */
   async all(): Promise<Trigger[]> {
     const { items } = await this.store.query({});
-    return items;
+    return Promise.all(items.map(t => this.migrated(t)));
   }
 
   async get(id: string): Promise<Trigger | undefined> {
-    return (await this.store.get(id)) ?? undefined;
+    const t = await this.store.get(id);
+    return t === null ? undefined : this.migrated(t);
+  }
+
+  /**
+   * `augment` is what `ephemeral` was called before the user-surface kinds became a pair. Unrecognised, a
+   * condition of that kind was judged on no surface, so its trigger silently never fired. Read as
+   * `ephemeral` and written back on read — not once at setup, because the store is read per principal and
+   * a setup pass would migrate only the boot principal's. Said every time one is migrated; a write that
+   * loses its CAS is left for the next read, which is reading it anyway. Removed in 0.6.0.
+   */
+  private async migrated(t: Trigger): Promise<Trigger> {
+    if (!t.conditions.some(c => (c.kind as string) === RETIRED_KIND)) return t;
+    const next = (cur: Trigger): Trigger => ({
+      ...cur, conditions: cur.conditions.map(c => (c.kind as string) === RETIRED_KIND ? { ...c, kind: 'ephemeral' as const } : c),
+    });
+    const r = await this.store.cas(t.id, t.version, { ...next(t), version: crypto.randomUUID() });
+    console.warn(`[triggers] Trigger "${t.id}" has a condition of kind "${RETIRED_KIND}", the name "ephemeral" had before 0.5.0; ` +
+                 (r.ok ? 'it is now stored as "ephemeral".' : 'it is read as "ephemeral", and will be stored so when it next can be.'));
+    return r.ok ? r.doc : next(t);
   }
 
   /** Triggers whose invocation matches the filter: `tool` (if given) must equal `invoke.tool`, and

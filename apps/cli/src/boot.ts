@@ -78,7 +78,7 @@ export async function loadCliConfig(opts: CliOpts): Promise<{ config: MatbotConf
   return { config, configPath };
 }
 
-export type BootedMachine = Omit<AssembledMachine, 'loaded'> & { providers: ProviderRegistryImpl };
+export type BootedMachine = Omit<AssembledMachine, 'loaded' | 'dispose'> & { providers: ProviderRegistryImpl };
 
 /** Stand the machine up: carriers and boot identity, the boot storage and vault, then every configured plugin. */
 export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPath: string): Promise<BootedMachine> {
@@ -193,7 +193,7 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   // singleton is survivable by design — which is precisely why nothing else would ever mention it — and
   // it is not repaired here: replacing a package-manager-installed directory with a symlink invites the
   // next `install` to undo it. `plugin list` reports the same thing on demand.
-  for (const dup of await findDuplicateSingletons({
+  for (const dup of findDuplicateSingletons({
     configDir,
     plugins:   getRegisteredPlugins(),
   })) console.warn(`[matbot] ${describeDuplicateSingleton(dup)}`);

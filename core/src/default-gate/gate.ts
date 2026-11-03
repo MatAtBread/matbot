@@ -51,7 +51,8 @@ export function toStandingAnswer(value: unknown): StandingAnswer | undefined {
   return undefined;
 }
 
-/** The format before scopes: a list, or `true`, straight under the gate id. */
+/** The format before scopes: a list, or `true`, straight under the gate id. Its migration and its warning
+ *  are removed in 0.6.0, when it is simply not an answer. */
 export const isUnscoped = (value: unknown): boolean => value === true || Array.isArray(value);
 
 /** A gate key's value as {@link ScopedAnswers}, or `undefined` when it is not one — absent, malformed, or in
@@ -76,7 +77,7 @@ function warnUnscoped(key: string, value: unknown): void {
   if (!isUnscoped(value) || warned.has(key)) return;
   warned.add(key);
   console.warn(`[matbot] Permission answer "${key}" is in the unscoped format (a list or true) and is ignored. ` +
-               `Write it as { "${EVERYWHERE}": ${JSON.stringify(value)} } — in default_settings for '${DEFAULT_GATE_SETTINGS_NS}' if it is configured there.`);
+               `Write it as { "${EVERYWHERE}": ${JSON.stringify(value)} } — in the installation's default settings for '${DEFAULT_GATE_SETTINGS_NS}' (the CLI's default_settings:) if it is configured there.`);
 }
 
 /** A gate key's value read for a decision: scoped, or warned about and treated as absent. */
@@ -410,7 +411,7 @@ export const migratedFor = (settings: PluginSettings): Promise<void> => migratio
  */
 export function createDefaultGate(settings: PluginSettings, previous?: PermissionGate, stored?: () => Promise<Record<string, unknown>>): PermissionGate {
   // Once per principal, settings being partitioned by principal where a backend does that. Awaited by every
-  // read, so nothing decides on a document still in the old format. A failure is reported and not retried
+  // read, so nothing decides on a document still in the old format. Removed in 0.6.0. A failure is reported and not retried
   // per call — the unscoped answers then fall to the warning, which says what to do.
   const migratedBy = new Map<string, Promise<void>>();
   const migrated = (): Promise<void> => {

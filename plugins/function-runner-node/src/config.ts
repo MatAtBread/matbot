@@ -8,10 +8,10 @@ import type { MatbotMachine, PluginSettings, Tool, ToolContext, ToolContract, To
  */
 export const TIMEOUT_KEY = 'timeout_ms';
 /**
- * Retired before 0.5.0: an import restriction this runner carried, in front of the permission gate. The
+ * Retired in 0.5.0: an import restriction this runner carried, in front of the permission gate. The
  * gate says the same thing — a standing denial refuses a module outright — so it is not read. Still
  * NAMED, because an installation that authored it would otherwise have its restriction silently become
- * "ask at the call", which is a widening nobody chose.
+ * "ask at the call", which is a widening nobody chose. The warning goes in 0.6.0.
  */
 const RETIRED_IMPORTS_KEY = 'permit_imports';
 
@@ -52,7 +52,7 @@ export async function readRunnerConfig(settings: PluginSettings, codeDefaultMs: 
   if (await settings.get<unknown>(RETIRED_IMPORTS_KEY) !== undefined) {
     problems.push(`${RETIRED_IMPORTS_KEY} is no longer read, so it restricts nothing: every import is asked about at the call. `
       + 'Refuse a module outright with a standing denial in the permission gate instead — under default_settings: '
-      + "'@matatbread/matbot-default-gate': { 'deny:tool_function.import': ['* node:child_process'] } — and remove this key.");
+      + "'@matatbread/matbot-default-gate': { 'deny:tool_function.import': { '*': ['* node:child_process'] } } — and remove this key.");
   }
   return { timeoutMs, problems };
 }

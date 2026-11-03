@@ -89,25 +89,28 @@ asked. The registered `PermissionGate` **decides** it. The default policy
 (core's default gate, always present unless an embedder supplies another — see
 [DEFAULT-GATE.md](DEFAULT-GATE.md)) decides in this order:
 
-1. **A standing denial of exactly this subject** refuses it, without asking.
-2. **A standing answer that covers the subject** allows it, without asking.
-3. **Otherwise, if someone can be asked** (the web UI or the terminal of the turn that raised it), it
-   asks, offering:
-   - **Deny**, this once;
-   - **Always deny** this exact act;
-   - **Allow**, this once;
-   - **Always allow** the subject, or one of the broader subjects the plugin offers, narrowest first
-     ("any builtin", "any function");
-   - **Always allow every** `<gate>`.
-4. **Otherwise** it does what the plugin declared for nobody being there, which for every gate above is
+1. **A standing answer that covers the act** decides it, without asking. Where several do — an allow of a
+   directory and a denial of one file in it — **the most specific wins**: the one nearest the act, then
+   one held for this session before one held everywhere, then a denial should two tie.
+2. **Otherwise, if someone can be asked** (the web UI or the terminal of the turn that raised it), it
+   asks, as three choices:
+   - **allow or deny**;
+   - **for how long**: *this time*, *for this session*, or *always*;
+   - **what**: the subject, or one of the broader subjects the plugin offers, narrowest first ("anything
+     in this directory", "any builtin", "any function"), or every subject of the gate.
+3. **Otherwise** it does what the plugin declared for nobody being there, which for every gate above is
    to refuse, and logs the refusal.
 
 A refusal tells the model which of these refused, and, where nothing in the turn can change that, says
 so, so that it does not go looking for a way round.
 
-**Standing answers** are kept in the default policy's plugin settings: `true` for every subject of a
-gate, or a list of exact subjects. Denials sit beside them under `deny:<gate>`, in the same shapes. An installation can configure them under `default_settings:` (see
-[egress controlled outside matbot](#when-egress-is-controlled-outside-matbot) for an example). Settings
+**Standing answers** are kept in the default policy's plugin settings, one key per gate mapping a scope
+(`'*'` everywhere, a session's id, `#http` for the HTTP tool door) to `true` for every subject of the
+gate, or a list of subjects. Denials sit beside them under `deny:<gate>`, in the same shape. A session
+answer is kept in memory unless `gate_action session-store` says otherwise. An installation can configure
+them under `default_settings:` (see
+[egress controlled outside matbot](#when-egress-is-controlled-outside-matbot) for an example), and
+[DEFAULT-GATE.md](DEFAULT-GATE.md#configuring-it) has the format. Settings
 are layered per gate: answering a prompt stores the subjects in effect plus the new one, and from then on
 the stored list is what applies, so a later edit to that gate's configured value has no effect until the
 stored one is cleared. `gate_action get` reports the answers in effect (and any `denials`); `list`
@@ -127,20 +130,20 @@ defaults. The point is that model-written code does nothing the user has not per
 what a user permits: an answer means what it says. "Always allow every `plugin.add`" means anything that
 reaches the tool endpoint installs any plugin, with full access, unasked.
 
-**Always deny** narrows one thing: the exact act asked about, refused from then on without asking,
-which is what stops a model asking the same question again. It is never broader. A denial wins over an
-allow that also covers the act, which arises only where the denial came first and a broader allow
-after, or both are configured, since an allow that covers an act keeps it from being asked about.
+A **denial** narrows what it names, refused from then on without asking, which is what stops a model
+asking the same question again. It is as broad as the subject chosen — one file, or a directory and
+everything below it — and, being the more specific answer, it carves what it names out of a broader
+allow. It does not lift an allow of something narrower inside it.
 
-A broader restriction is expressed somewhere else:
+A restriction is also expressed:
 
-- **don't load the plugin**, or the tool, that does the thing;
-- **a configured denial**, `deny:<gate>`, a list of subjects or `true` for all of them — for a body's
-  imports, `deny:tool_function.import: ['* node:child_process']` forbids a module to every function, and
+- **by not loading the plugin**, or the tool, that does the thing;
+- **as a configured denial**, `deny:<gate>` — for a body's imports,
+  `'deny:tool_function.import': { '*': ['* node:child_process'] }` forbids a module to every function, and
   a body naming it fails its type-check;
-- **a replacement `PermissionGate`** with its rules compiled in, which can refuse what the default would
+- **by a replacement `PermissionGate`** with its rules compiled in, which can refuse what the default would
   ask about, and whose rules are out of reach of anything that can write settings;
-- **the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.
+- **by the deployment**: the OS user matbot runs as, a container, a firewall or egress proxy.
 
 ## Settings and the tool registry
 
@@ -148,13 +151,19 @@ Two invariants keep a tool — bundled, or one a model drives — from reaching 
 without a gate:
 
 - **A plugin reaches only its own settings.** `services.settings()` is scoped to the plugin; the raw
-  `settings` store cannot be opened through a plugin's `createStore`, because it holds every plugin's
+  `settings` store cannot be opened through a plugin's `createStore` (whose store names are letters,
+  digits, `_` and `-`, so no spelling of a path reaches it either), because it holds every plugin's
   settings, the default gate's standing answers among them. `tool-store`'s `store_action` once *exposed*
   any namespace, `settings` included, which let a model write the gate answers and grant itself every
   gate; it now keeps the stores it creates in a namespace of its own and cannot open another's.
-- **A plugin removes only the tools it registered.** Removing another plugin's tool through a plugin's
-  machine and registering into the gap would replace it without the `tools.overwrite` gate; the registry
-  refuses it.
+- **A plugin removes only what it registered.** Removing another plugin's tool through a plugin's
+  machine and registering into the gap would replace it without the `tools.overwrite` gate, and removing
+  another's hooks would take its validators away; the registry refuses both (`tools.remove`, and
+  `removeByPlugin` for tools, hooks and system-context contributors).
+
+These keep a plugin from handing a model more than it means to. They are not a sandbox for the plugin
+itself, which has full Node capability: it can still reach the active `StorageBackend` directly
+(`services.StorageBackend.createStore('settings')`), or the files under it.
 
 ## The web UI's endpoints
 

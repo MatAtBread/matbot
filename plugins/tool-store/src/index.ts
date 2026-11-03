@@ -20,8 +20,8 @@ const META_NAMESPACE = 'store_tools';
 // Where a store the model creates keeps its documents. A namespace of its own is what keeps a model-named
 // store out of every plugin's: unprefixed, `create email_accounts` before matbot-email is installed
 // would hand that plugin's store to a model-writable tool, and no check made at create time can see a
-// plugin that is not loaded yet. Defs from before 0.5.0 keep the unprefixed namespace they were created
-// with (`id === namespace`), so nothing is migrated.
+// plugin that is not loaded yet. A def from before 0.5.0 (`id === namespace`, no owner) is moved into one
+// on first use, unless its owner takes it over first (see `migratedOnUse`).
 const OWN_PREFIX = 'store-';
 
 function now(): string { return new Date().toISOString(); }
@@ -55,8 +55,60 @@ function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
   }
   // Only a tool of this plugin's is replaced (the host refuses to remove another's), and a name another
   // plugin holds goes through the host's collision decision rather than round it.
+  const tool = makeStoreTool(services.self?.name, def, store);
   services.tools.remove(actionToolName(def.id));
-  services.tools.register(makeStoreTool(services.self?.name, def, store));
+  services.tools.register(isLegacy(def) ? migratedOnUse(services, def, tool) : tool);
+}
+
+/** A def from before 0.5.0: no owner, and the namespace its own name rather than one of tool-store's. */
+const isLegacy = (def: StoreDef): boolean => def.owner === undefined && def.namespace === def.id;
+
+/**
+ * A def from before 0.5.0 reads and writes the namespace named after it, and nothing recorded whether that
+ * was a store `create` made or an `expose` over a namespace a plugin owns. Either way, moving the store into
+ * one of tool-store's own namespaces is safe: a model's store keeps its documents, and an exposure stops
+ * reaching the live data — the model keeps a copy of what it could already read and write.
+ *
+ * On first USE rather than at boot, because a plugin that owns the namespace and exposes it takes the store
+ * over in its own setup (see `defineStore`), and may load after this plugin: by the time the model calls
+ * the tool, the owner has had its chance, and a store it took is not this tool's to move. The originals stay
+ * where they were.
+ */
+function migratedOnUse(services: MatbotMachine, def: StoreDef, tool: Tool): Tool {
+  let moved: Promise<Tool> | undefined;
+  return {
+    ...tool,
+    executor: {
+      async *execute(input, ctx) {
+        yield* (await (moved ??= migrate(services, def, tool))).executor.execute(input, ctx);
+      },
+    },
+  };
+}
+
+async function migrate(services: MatbotMachine, def: StoreDef, tool: Tool): Promise<Tool> {
+  const meta = services.createStore<StoreDef>(META_NAMESPACE);
+  const current = await meta.get(def.id);
+  if (current === null || !isLegacy(current)) return tool;
+  const from = services.createStore<StoreRecord>(current.namespace);
+  const to   = services.createStore<StoreRecord>(OWN_PREFIX + current.id);
+  let copied = 0;
+  for (let cursor: string | undefined, first = true; first || cursor !== undefined; first = false) {
+    const page = await from.query(cursor !== undefined ? { cursor } : {});
+    for (const doc of page.items) {
+      if (await to.get(doc.id) === null) { await to.set(doc.id, doc); copied++; }
+    }
+    cursor = page.cursor;
+  }
+  const next: StoreDef = { ...current, namespace: OWN_PREFIX + current.id, version: crypto.randomUUID(), updatedAt: now() };
+  const r = await meta.cas(current.id, current.version, next);
+  if (!r.ok) return tool;   // redefined meanwhile: what replaced it is registered by whoever did
+  console.warn(`[tool-store] Store "${current.id}" was defined before 0.5.0 over the namespace "${current.namespace}" itself. ` +
+               `It now keeps its documents in "${next.namespace}" (${copied} copied); the originals stay in "${current.namespace}".`);
+  const migrated = makeStoreTool(services.self?.name, next, to);
+  services.tools.remove(actionToolName(next.id));
+  services.tools.register(migrated);
+  return migrated;
 }
 
 async function saveDef(
@@ -89,8 +141,17 @@ export async function defineStore(
   spec: { namespace: string; description: string; shape: string },
 ): Promise<StoreDef> {
   const owner = services.self?.name;
+  // A def from before 0.5.0 has no owner, so this plugin's boot registered its tool, under this plugin's
+  // name; the owner could not remove it, and registering over it was a collision. Handed back here, which
+  // is the migration: the def is rewritten below with its owner, and the owner registers the tool.
+  const legacy = await services.createStore<StoreDef>(META_NAMESPACE).get(spec.namespace);
+  if (legacy !== null && legacy.owner === undefined && legacy.namespace === legacy.id) own?.tools.remove(actionToolName(legacy.id));
   return saveDef(services, { id: spec.namespace, ...spec, ...(owner !== undefined ? { owner } : {}) });
 }
+
+// This plugin's own machine, for the one thing another plugin's `defineStore` needs it for: removing a tool
+// this plugin registered, which only its own machine may.
+let own: MatbotMachine | undefined;
 
 // A store's name is LLM-supplied, and this is the boundary it enters through — so it is checked here
 // rather than defended against in every backend. It becomes part of a namespace, which is not an opaque
@@ -453,13 +514,20 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
             // A plugin's own store is that plugin's to withdraw: the def would go and its tool, which the
             // owner holds, would stay, until its next setup defined both again. Once the owner is no longer
             // loaded the def is a leftover, and removing it is housekeeping.
-            const owner = (await meta.get(input.name))?.owner;
+            const def = await meta.get(input.name);
+            const owner = def?.owner;
             if (owner !== undefined && services.tools.resolve(actionToolName(input.name))?.pluginName === owner) {
               yield { type: 'error', message: `Store "${input.name}" belongs to the plugin "${owner}", which exposes it; it is not this tool's to remove.` };
               return;
             }
             const removed = await meta.delete(input.name);
             if (removed) services.tools.remove(actionToolName(input.name));
+            // Never used since 0.5.0, so never moved (see `migratedOnUse`): a `create` of the name lands in
+            // `store-<name>` and does not find these.
+            if (removed && def !== null && isLegacy(def)) {
+              console.warn(`[tool-store] Store "${def.id}" was removed before it moved out of the namespace "${def.namespace}", ` +
+                           `so its documents there are orphaned: creating "${def.id}" again will not find them.`);
+            }
             yield { type: 'result', value: { removed } };
             return;
           }
@@ -490,6 +558,7 @@ export const plugin: MatbotPluginSpec = {
 
     services.tools.register(makeStoreActionTool(services, meta));
 
+    own = services;
     // Re-register a tool for every managed store, so definitions survive a restart — except a plugin's own,
     // which that plugin registers from its own setup, and only while it is loaded.
     for (const def of await listDefs(meta)) {

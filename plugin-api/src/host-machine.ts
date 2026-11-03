@@ -1,5 +1,5 @@
 import type {
-  CompletionRequest, MatbotMachine, MatbotServices, Mounted, MountConsumeOptions, SingleTurnRequest,
+  CompletionRequest, MatbotMachine, MatbotServices, Mounted, SingleTurnRequest,
 } from './plugin.js';
 import { RegistryChangeKind } from './notify.js';
 import { createMessage } from './session.js';

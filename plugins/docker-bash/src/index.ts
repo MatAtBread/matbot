@@ -568,12 +568,14 @@ function createContainerExecutor(settings: PluginSettings, host: HostPaths): Too
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
-const TOOL_DESCRIPTION =
+// Functions of where the data directory lands, which is the host's to say: under the project for the CLI's
+// `.data`, at `/data` for a host keeping it elsewhere. The model's paths are only right if these are.
+const toolDescription = (dataMount: string): string =>
   'Run a bash script inside the persistent docker container and stream stdout/stderr in real time. ' +
   'Pass any shell command or multi-line script in the `script` field — it is executed as `bash -c <script>`. ' +
   'The container runs node:24-bookworm (Debian 12, Node 24 + npm preinstalled) with network access; ' +
   'install standard packages with apt freely. ' +
-  'The project root is mounted read-only at /app, with its .env hidden (it reads as empty); /app/.data is read-write, except its settings and any SQLite database, which are read-only. ' +
+  `The project root is mounted read-only at ${CONTAINER.mountPoint}, with its .env hidden (it reads as empty); ${dataMount} is read-write, except its settings and any SQLite database, which are read-only. ` +
   'A non-zero exit code yields an error event with accumulated stdout/stderr attached. ' +
   `The script and every process it spawns are killed after \`timeout\` milliseconds (default ${DEFAULT_TIMEOUT_MS}) ` +
   `or once combined stdout+stderr reaches \`maxOutputBytes\` (default ${DEFAULT_MAX_OUTPUT_BYTES}), whichever comes ` +
@@ -592,7 +594,7 @@ const BASH_INPUT_SCHEMA = {
   },
 } as const;
 
-const BASH_CONFIG_DESCRIPTION =
+const bashConfigDescription = (dataMount: string): string =>
   'View or update the docker-bash container configuration. Configurable fields:\n' +
   '  - `dns`: DNS server IPs (e.g. ["1.1.1.1"]), or the token "host" to use the host\'s current resolvers. ' +
   'Omit, or pass [], to inherit the host\'s DNS (the default).\n' +
@@ -604,7 +606,7 @@ const BASH_CONFIG_DESCRIPTION =
   'A `restart` force-recreates the container now (e.g. to re-resolve "host" DNS after the host\'s resolvers change). ' +
   'A `pull` fetches the configured image (streaming the pull\'s progress) and then recreates the container from it — ' +
   'use it to pick up a newer build of the image, or after the image the container was created from has changed. ' +
-  'Neither keeps anything installed inside the old container; the read-only project mount and /app/.data are unaffected.';
+  `Neither keeps anything installed inside the old container; the read-only project mount and ${dataMount} are unaffected.`;
 
 const BASH_CONFIG_INPUT_SCHEMA = {
   type:       'object',
@@ -637,7 +639,7 @@ export const plugin: MatbotPluginSpec = {
     // Register the bash execution tool
     const bashTool: Tool<ToolResultOf<'bash'>> = {
       name:        'bash',
-      description: TOOL_DESCRIPTION,
+      description: toolDescription(host.dataMount),
       inputSchema: BASH_INPUT_SCHEMA,
       executor:    createContainerExecutor(settings, host),
     };
@@ -646,7 +648,7 @@ export const plugin: MatbotPluginSpec = {
     // Register the configuration management tool
     const configTool: Tool<ToolResultOf<'bash_config'>> = {
       name:        'bash_config',
-      description: BASH_CONFIG_DESCRIPTION,
+      description: bashConfigDescription(host.dataMount),
       inputSchema: BASH_CONFIG_INPUT_SCHEMA,
       executor:    { execute: (input, ctx) => bashConfigExecutor(input, settings, host, ctx.signal) },
     };

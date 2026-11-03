@@ -67,7 +67,11 @@ npx matbot                     # runs the locally-installed `matbot` bin
 > pnpm install
 > pnpm repl
 > ```
-> `pnpm repl` is the from-source alias for `matbot`.
+> `pnpm repl` is the from-source alias for `matbot`. Run that way, pnpm's own `npm_config_*` environment
+> reaches the npm that `plugin add` runs to install a package's dependencies; npm warns about the keys it
+> does not know, and can behave differently from a plain `npm install` in the same directory. Running the
+> CLI directly (`node apps/cli/bin.js`, or an installed `matbot`) does not. The same is why a few install
+> tests can fail under `pnpm test` and pass under `node --test`.
 
 No config file needed — on first run matbot walks you through setting up a provider. After
 that, capabilities are added with the built-in `plugin` tool; each is its own npm package

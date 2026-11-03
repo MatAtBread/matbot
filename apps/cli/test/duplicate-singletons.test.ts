@@ -38,13 +38,13 @@ test('nothing is reported when every path leads to the host copy', async () => {
   try {
     // a link, which is what the symlink farm and the compiled-plugin scaffold both write
     await install(dir, { link: true });
-    assert.deepEqual(await findDuplicateSingletons({ configDir: dir, plugins: [] }), []);
+    assert.deepEqual(findDuplicateSingletons({ configDir: dir, plugins: [] }), []);
 
     // …and a plugin dir carrying the same link
     const pluginDir = join(dir, 'my-plugin');
     await mkdir(pluginDir, { recursive: true });
     await install(pluginDir, { link: true });
-    const found = await findDuplicateSingletons({
+    const found = findDuplicateSingletons({
       configDir: dir,
       plugins: [{ name: 'my-plugin', resolvedUrl: pathToFileURL(join(pluginDir, 'index.ts')).href }],
     });
@@ -64,7 +64,7 @@ test('the singleton link the remote cache writes is not a duplicate', async () =
     const fetched = join(dir, '.plugins', 'raw.githubusercontent.com', 'o', 'r', 'plugins', 'thing');
     await mkdir(fetched, { recursive: true });
     await install(join(dir, '.plugins'), { link: true });        // linkHostSingletons' output
-    const found = await findDuplicateSingletons({
+    const found = findDuplicateSingletons({
       configDir: dir,
       plugins: [{ name: '@fixture/matbot-thing', resolvedUrl: pathToFileURL(join(fetched, 'index.ts')).href }],
     });
@@ -78,7 +78,7 @@ test('a real second copy is reported, naming both versions and where it is', asy
   const { dir, cleanup } = await scratch();
   try {
     const at = await install(dir, { version: '0.4.4' });
-    const found = await findDuplicateSingletons({ configDir: dir, plugins: [] });
+    const found = findDuplicateSingletons({ configDir: dir, plugins: [] });
     assert.equal(found.length, 1, `expected one duplicate, got ${JSON.stringify(found)}`);
     const dup = found[0]!;
     assert.equal(dup.package, API);
@@ -100,7 +100,7 @@ test('a plugin resolving to the second copy is named as reaching it', async () =
     const pluginDir = join(dir, 'npm-installed-plugin');
     await mkdir(pluginDir, { recursive: true });
     await install(pluginDir, { version: '0.3.1' });
-    const found = await findDuplicateSingletons({
+    const found = findDuplicateSingletons({
       configDir: dir,
       plugins: [{ name: '@vendor/matbot-thing', resolvedUrl: pathToFileURL(join(pluginDir, 'src', 'index.ts')).href }],
     });
@@ -119,7 +119,7 @@ test('one copy reached from several places is one finding, not several', async (
     await install(dir, { version: '0.4.4' });          // at the config dir, so everything below inherits it
     const a = join(dir, 'plugin-a'), b = join(dir, 'plugin-b');
     await mkdir(a, { recursive: true }); await mkdir(b, { recursive: true });
-    const found = await findDuplicateSingletons({
+    const found = findDuplicateSingletons({
       configDir: dir,
       plugins: [
         { name: 'plugin-a', resolvedUrl: pathToFileURL(join(a, 'index.ts')).href },
@@ -137,7 +137,7 @@ test('one copy reached from several places is one finding, not several', async (
 test('a plugin with no local location is skipped, not guessed at', async () => {
   const { dir, cleanup } = await scratch();
   try {
-    const found = await findDuplicateSingletons({
+    const found = findDuplicateSingletons({
       configDir: dir,
       plugins: [{ name: 'built-by-hand' }, { name: 'fetched', resolvedUrl: 'https://esm.sh/x/index.ts' }],
     });
@@ -151,6 +151,6 @@ test('a plugin with no local location is skipped, not guessed at', async () => {
 // learns to ignore.
 test('this workspace reports no duplication', async () => {
   const repo = fileURLToPath(new URL('../../../', import.meta.url));
-  const found = await findDuplicateSingletons({ configDir: repo, plugins: [] });
+  const found = findDuplicateSingletons({ configDir: repo, plugins: [] });
   assert.deepEqual(found, [], `a source checkout must be silent; got ${JSON.stringify(found)}`);
 });

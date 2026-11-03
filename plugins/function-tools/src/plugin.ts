@@ -153,9 +153,6 @@ function assertNoInjectedClash(params: ParsedParam[]): void {
   throw new DefinitionError(`parameter "${clash.name}" collides with an injected binding (${INJECTED.join(', ')}) — inside the body it would shadow it. Rename the parameter.`);
 }
 
-/** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
- *  types via {@link ToolTypeIndex.check}. A declared return type is Promise-wrapped and verified against the
- *  body; without one (a session function may omit it) TS infers it, still checking the body and its `tool` calls. */
 /** The check option that keeps a body from being graded against a module the gate refuses it — what the
  *  call would refuse, for whoever the code runs as (see {@link importRefusal}). Empty with no runner. */
 async function refusedFor(machine: MatbotMachine, ctx: ToolContext, subjects: readonly CheckSubject[]): Promise<Pick<ToolCheckOptions, 'importRefused'>> {
@@ -163,6 +160,9 @@ async function refusedFor(machine: MatbotMachine, ctx: ToolContext, subjects: re
   return importRefused !== undefined ? { importRefused } : {};
 }
 
+/** The type-check snippet for a parsed function: its body as an async fn, checked against the live tool
+ *  types via {@link ToolTypeIndex.check}. A declared return type is Promise-wrapped and verified against the
+ *  body; without one (a session function may omit it) TS infers it, still checking the body and its `tool` calls. */
 function checkSnippet(sig: ParsedSignature): string {
   if (sig.returnType === undefined) return `async function __fn(${sig.paramsText}) ${sig.body}`;
   const ret = /^Promise\s*</.test(sig.returnType) ? sig.returnType : `Promise<${sig.returnType}>`;
