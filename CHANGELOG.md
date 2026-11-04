@@ -281,8 +281,20 @@ a second host's needs.
   filesystem root is never offered as a directory to grant, and is itself refused rather than asked
   about, since any answer for it is one for every path. Pre-authorising or
   denying is a standing answer, configured under the default gate's `default_settings:` (`deny:` entries
-  may name a directory). Closes the class where a body granted `node:fs` reads secrets or runtime state
-  without being asked.
+  may name a directory).
+
+  What a call opens is what was asked about. A path is read once and only that string goes to node, so a
+  `Buffer` or `URL` changed after an async call, a glob's patterns and `cwd`, and an options getter cannot
+  change it; a path that is not valid UTF-8 is refused. A stream asks again when it opens, so assigning its
+  `path` or `flags`, or calling `Utf8Stream.reopen`, is asked about, and the raw module is no longer reachable
+  through it. A flag is asked about as what it does (`readFile(p, { flag: 'w' })` needs the write gate, `open(p,
+  'r+')` needs both), a symlink changed while a question is open is asked about again, and a dangling one is
+  asked about at the file a write through it would create. The module's property descriptors are guarded and
+  it cannot be written through, and a stream's `constructor` is the guarded class.
+
+  This stops a body that over-reaches by using the module. It does not stop code written to defeat it: rewriting
+  a built-in the gate reads, walking a prototype by hand to node's own classes, or using a descriptor number the
+  body did not open, since fd-based calls are not asked about. See its README and `docs/SECURITY.md`.
 - **`background-jobs-node`** — its host is the matbot CLI, which it starts again for each job, and it now
   says so: it extends the config the CLI publishes as `MATBOT_CONFIG` rather than reading one off the
   machine. Under any other host it disables itself, as before; `background-jobs` runs jobs in-process
@@ -344,6 +356,7 @@ a second host's needs.
   has accepted deleting its row.
 - **CLI** — a duplicated `core` or `plugin-api` is warned about once, after plugins load, rather than on
   the version banner as well; `plugin list` reports copies reachable from the CLI's own dependencies too.
+  At boot a plugin that failed to load is probed as well, so a copy it nests is named beside its failure.
   A package's `exports` is read as Node reads it for `import` — conditions in the order the package lists
   them — in all three places the CLI reads one, which had each used a different order.
 - **CLI `plugin` tool** (formerly `tool-plugin`) — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
@@ -379,7 +392,8 @@ a second host's needs.
   `default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.
 - **`triggers`** — a stored condition of kind `augment` (what `ephemeral` was called) is migrated to
   `ephemeral` when it is read, with a warning. Unmigrated, it was judged on no surface, so its trigger
-  never fired and nothing said so.
+  never fired and nothing said so. A write-back that fails or is refused (a trigger shared in read-only) still
+  reads as `ephemeral`, and costs no other trigger.
 - **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
   Nor is the Inner Voice trigger's cool-down backfilled onto one seeded before 0.3.8; set it with
@@ -405,7 +419,11 @@ a second host's needs.
   store (cognition's `remembered_facts`); otherwise, on the tool's first use, its documents are copied into
   `store-<name>` and the store keeps them there — so a model's store keeps its contents, and an old
   exposure stops reaching the live namespace. The originals stay where they were; removing such a store
-  before it is first used says that its documents are orphaned.
+  before it is first used says that its documents are orphaned. Whether to move is decided per call, per
+  principal: each principal's def moves with that principal's documents, a failed move is tried again by the
+  next call, and a def another process has moved or handed to its owner is honoured without a restart. `defineStore`
+  takes over any def of its name that has no owner, including one already moved and one a model created, whose
+  documents stay in `store-<name>`.
 - **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
   installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
   like a string.

@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { ImportCaller, PermissionDecision, PermissionRequest, PermissionSnapshot } from '@matatbread/matbot-plugin-api';
-import { caseInsensitiveAt, directoryOf, realResolve, type Access } from './paths.js';
+import { caseInsensitiveAt, directoryOf, realResolve, refusal, type Access } from './paths.js';
 
 /**
  * The question a path is put as. Gate `fs-read` or `fs-write` (qualified by the consumer as
@@ -76,10 +76,6 @@ export function decisionsFor(caller: ImportCaller): Promise<Decisions> {
 
 const keyOf = (req: PermissionRequest): string => `${req.gate}\0${req.subject}`;
 
-export function refusal(message: string): Error {
-  return Object.assign(new Error(message), { code: 'EACCES' });
-}
-
 /**
  * On a volume that ignores case, a standing DENIAL of the path spelled in lower case. A subject is the name
  * as stored on disk, which is what an answer given at a prompt names; one typed into the configuration in
@@ -102,8 +98,9 @@ function refuseRoot(real: string, op: string, arg: string): void {
                 'for every path. To stop gating the paths a function body touches, remove the gate-fs-node plugin.');
 }
 
-/** Ask, prompting if nothing standing decides. For an asynchronous operation. */
-export async function admit(st: Decisions, caller: ImportCaller, access: Access, op: string, arg: string): Promise<void> {
+/** Ask, prompting if nothing standing decides. For an asynchronous operation. Resolves to the file the answer
+ *  is about, which by then may not be where `arg` leads: see `whenAdmitted` in wrap.ts. */
+export async function admit(st: Decisions, caller: ImportCaller, access: Access, op: string, arg: string): Promise<string> {
   const real = realResolve(arg);
   refuseRoot(real, op, arg);
   const denied = foldedDenial(st, caller, access, op, real);
@@ -125,6 +122,7 @@ export async function admit(st: Decisions, caller: ImportCaller, access: Access,
     decision = await asking;
   }
   if (!decision.allowed) throw refusal(refusalMessage(decision, `fs.${op} of "${arg}"`));
+  return real;
 }
 
 /** Consult what was decided in advance, never asking. For a synchronous operation, which cannot. */

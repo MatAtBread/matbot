@@ -223,7 +223,14 @@ replace it.
   (`tool_function.fs-read` / `fs-write`) through the same gate: an asynchronous call prompts, and a
   synchronous one, which cannot, is allowed only by a standing answer already in force. It covers the
   body's own `import('node:fs')`, not a granted package's. A grant for a directory covers everything
-  below it, so "anything in /home/me/" includes `.ssh` and `.env` there unless a denial carves them out. Bounding what the *process* may touch is still the deployment's (the user
+  below it, so "anything in /home/me/" includes `.ssh` and `.env` there unless a denial carves them out.
+  What it opens is what was asked about, whatever the body then changes of its own: a `Buffer` or `URL`
+  rewritten after the call, a stream's `path` or `flags` assigned, `Utf8Stream.reopen`, a symlink repointed
+  while a question is open. Those use the module as handed and rewrite nothing shared, so they count as
+  reaching past the gate, and it holds against them. Three things get past it because a body shares matbot's
+  process: rewriting a built-in the gate reads (the tampering in the next point), walking a prototype by hand
+  to node's own unguarded classes, and using a descriptor number it did not open, since fd-based calls are not
+  asked about. Closing the second would need a wrapper around everything handed out. Bounding what the *process* may touch is still the deployment's (the user
   matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/`--allow-fs-write` cap
   the process whatever a grant allows). Network has a finer gate already — `fetch`/`WebSocket` ask per
   origin (`tool_function.connect`) — but a raw `node:net` socket, once the module is granted, does not.
@@ -253,7 +260,7 @@ replace it.
   later, including one written under the influence of injected content, and an edit permitted to keep its
   grants keeps them whatever the edit added. That is what those answers say.
 
-The `function-runner-node` implementation of `FunctionRunner` can **optionally** implement gates on any module imported by code written by the LLM. This is acheived by a plugin that registers a module name and re-implements with gates. The `@matatbread/matbot-gate-fs-node`, also in the repo, does this for the `node:fs` module, and prevents the LLM reading or writing files unless the user approves for specific tool functions. There are no other implementations of this module wrapping by default, but the included one shows the pattern for doing so.
+The `function-runner-node` implementation of `FunctionRunner` can **optionally** implement gates on any module imported by code written by the LLM. This is acheived by a plugin that registers a module name and re-implements with gates. The `@matatbread/matbot-gate-fs-node`, also in the repo, does this for the `node:fs` module, and asks the user before a function body reads or writes a file, for specific tool functions. That stops a body that over-reaches, not code written to defeat it (see *A granted module is granted whole*). There are no other implementations of this module wrapping by default, but the included one shows the pattern for doing so.
 
 ### Prompt injection
 

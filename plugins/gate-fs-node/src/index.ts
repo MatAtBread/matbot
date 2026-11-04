@@ -6,7 +6,7 @@ import { decisionsFor } from './gate.js';
 
 export { wrapFsModule } from './wrap.js';
 export { admit, admitSync, decisionsFor, fsRequest, type Decisions } from './gate.js';
-export { caseInsensitiveAt, directoryOf, realResolve, type Access } from './paths.js';
+export { caseInsensitiveAt, directoryOf, openAccesses, realResolve, type Access } from './paths.js';
 
 /**
  * gate-fs-node — puts each path a `tool_function` body's `node:fs` names to the permission gate.
@@ -23,10 +23,12 @@ export { caseInsensitiveAt, directoryOf, realResolve, type Access } from './path
  * blocks the very thread a prompt needs — so it consults the answers in force when the module was
  * imported, plus any given since, and throws when they do not allow it.
  *
- * **What it is.** A guardrail against an OVER-REACHING body. It is NOT a sandbox against hostile code: a
- * granted PACKAGE gets the raw `node:fs` (it is trusted as itself), and code can reach another IO module
+ * **What it is.** A guardrail against an OVER-REACHING body: what a call opens is what was asked about,
+ * whatever the body then changes of its own. It is NOT a sandbox against hostile code: a body can rewrite a
+ * built-in the gate reads, walk a prototype by hand to node's own classes, or use a descriptor it did not open;
+ * a granted PACKAGE gets the raw `node:fs` (it is trusted as itself); and code can reach another IO module
  * (`node:child_process`). Bounding what the PROCESS may touch is the deployment's — the OS user matbot runs
- * as, a container, or node's `--permission` model. See docs/SECURITY.md.
+ * as, a container, or node's `--permission` model. See the README and docs/SECURITY.md.
  *
  * Needs a `FunctionRunner` that offers `ImportedModuleWrapper` (the node runner does). Without one, the
  * `mounted.observe` never fires and the plugin does nothing.

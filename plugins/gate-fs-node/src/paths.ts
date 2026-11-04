@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { constants, realpathSync, statSync } from 'node:fs';
+import { constants, readlinkSync, realpathSync, statSync } from 'node:fs';
 
 /** Which of the two gates a path argument is put to. A grant to read a path does not let a body change it. */
 export type Access = 'read' | 'write';
@@ -19,13 +19,20 @@ type PathArgs = (args: readonly unknown[]) => readonly (readonly [index: number,
  * legitimately holds.
  */
 const READ = [
-  'readFile', 'readdir', 'stat', 'lstat', 'statfs', 'access', 'opendir', 'realpath', 'readlink', 'exists',
-  'openAsBlob', 'createReadStream', 'watch', 'watchFile',
+  'readdir', 'stat', 'lstat', 'statfs', 'access', 'opendir', 'realpath', 'readlink', 'exists',
+  'openAsBlob', 'watch', 'watchFile',
 ] as const;
 const WRITE = [
-  'writeFile', 'appendFile', 'mkdir', 'rmdir', 'rm', 'unlink', 'truncate', 'chmod', 'lchmod', 'chown',
-  'lchown', 'utimes', 'lutimes', 'mkdtemp', 'mkdtempDisposable', 'createWriteStream',
+  'mkdir', 'rmdir', 'rm', 'unlink', 'truncate', 'chmod', 'lchmod', 'chown',
+  'lchown', 'utimes', 'lutimes', 'mkdtemp', 'mkdtempDisposable',
 ] as const;
+
+/** The calls taking an open flag in an options argument, with where it is and what it defaults to. They are
+ *  asked about as what the flag does: `readFile(p, { flag: 'w' })` truncates, whatever its name says. */
+export const FLAG_OPTION: ReadonlyMap<string, readonly [index: number, flag: string]> = new Map(
+  ([['readFile', [1, 'r']], ['writeFile', [2, 'w']], ['appendFile', [2, 'a']]] as const)
+    .flatMap(([n, at]) => [[n, at] as const, [`${n}Sync`, at] as const]),
+);
 
 /**
  * The function members known to take no path — fd-based calls, `unwatchFile` (which only removes a
@@ -55,20 +62,38 @@ export function fsPathArgs(withSync: boolean): Map<string, PathArgs> {
   m.set('rename',   fixed([0, 'read'], [0, 'write'], [1, 'write']));
   m.set('symlink',  fixed([1, 'write']));                   // the target is not touched; reading through
                                                             // the link is asked about at its real target
-  m.set('open',     args => [[0, openAccess(args[1])]]);
+  m.set('open',     args => openAccesses(args[1]).map(access => [0, access] as const));
+  for (const [name, [index, flag]] of FLAG_OPTION) {
+    m.set(name, args => {
+      const o = args[index];
+      const given = typeof o === 'object' && o !== null ? (o as { flag?: unknown }).flag : undefined;
+      return openAccesses(given ?? flag).map(access => [0, access] as const);
+    });
+  }
   if (withSync) for (const [name, args] of [...m]) m.set(`${name}Sync`, args);
   return m;
 }
 
-/** `open`'s flags, as the access they ask for. Anything unrecognised asks the stricter question. */
-export function openAccess(flags: unknown): Access {
-  if (flags === undefined || flags === null) return 'read';
-  if (typeof flags === 'string') return /[wa+]/.test(flags) ? 'write' : 'read';
-  if (typeof flags === 'number') {
-    const writes = constants.O_WRONLY | constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_TRUNC;
-    return (flags & writes) !== 0 ? 'write' : 'read';
+/**
+ * What a flag opens a file to do, which is more than one thing: `r+` hands back a descriptor that both reads
+ * and writes, so asking only the write gate would let a grant to write read a file denied for reading. `w` is
+ * write alone, since the descriptor cannot read. Anything creating or truncating writes, whatever else it
+ * says. Absent (or the callback, in `fs.open(p, cb)`) means node's default, `r`. Anything unrecognised asks
+ * both, and node then rejects it.
+ */
+export function openAccesses(flags: unknown): Access[] {
+  if (flags === undefined || flags === null || typeof flags === 'function') return ['read'];
+  let reads = true, writes = true;
+  if (typeof flags === 'string') {
+    reads  = /[r+]/.test(flags);
+    writes = /[wa+]/.test(flags);
+    if (!reads && !writes) reads = writes = true;
+  } else if (typeof flags === 'number') {
+    const mode = flags & (constants.O_RDONLY | constants.O_WRONLY | constants.O_RDWR);
+    reads  = mode !== constants.O_WRONLY;
+    writes = mode !== constants.O_RDONLY || (flags & (constants.O_APPEND | constants.O_CREAT | constants.O_TRUNC)) !== 0;
   }
-  return 'write';
+  return [...(reads ? ['read'] as const : []), ...(writes ? ['write'] as const : [])];
 }
 
 /** `glob`/`globSync` take patterns, not paths: each is asked about as a read of the directory it starts
@@ -139,19 +164,36 @@ function splitTopLevelCommas(body: string): string[] {
   return parts;
 }
 
-/** A path argument reduced to a filesystem string, or `undefined` for anything that is not a path (an
- *  `fd`, a FileHandle, a missing optional arg). `node:fs` accepts a string, any `Uint8Array` (not only a
- *  `Buffer`), and anything it takes for a URL — which is any object with an `href` and a `protocol`, a
- *  `URL` instance or not, read through the same `fileURLToPath` node itself uses. */
+export function refusal(message: string): Error {
+  return Object.assign(new Error(message), { code: 'EACCES' });
+}
+
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * A path argument reduced, ONCE, to the string that is both asked about and handed to node. Everything but a
+ * string can change after it has been read — a `Buffer` or `URL` the body still holds, a getter, a Proxy — so
+ * a call never passes the original on (see `prepare` in wrap.ts). `undefined` for what is not a path: an `fd`,
+ * a missing optional argument, or anything else node rejects by itself.
+ *
+ * An object is what node would take for a URL or nothing, and `fileURLToPath` is node's own reading of one: it
+ * throws what node would (`ERR_INVALID_URL_SCHEME`, `ERR_INVALID_ARG_TYPE`), so there is no "not a path"
+ * outcome to pass through unasked, which a getter answering differently the second time could exploit.
+ *
+ * Bytes that are not UTF-8 name a file no string can, and decoded lossily they name a different one: the
+ * question would be about `\uFFFD` while node opened the real bytes. So they are refused, with no way to ask.
+ */
 export function toPath(arg: unknown): string | undefined {
   if (typeof arg === 'string') return arg;
-  if (arg instanceof Uint8Array) return Buffer.from(arg.buffer, arg.byteOffset, arg.byteLength).toString();
-  if (typeof arg === 'object' && arg !== null && 'href' in arg && 'protocol' in arg) {
-    // A non-`file:` URL is refused by fs too, so there is no path to ask about.
-    try { return fileURLToPath(arg as URL); } catch { return undefined; }
+  if (arg instanceof Uint8Array) {
+    try { return utf8.decode(arg); }
+    catch { throw refusal('A path that is not valid UTF-8 cannot be asked about, so it is refused. Pass it as a string.'); }
   }
-  return undefined;
+  return typeof arg === 'object' && arg !== null ? fileURLToPath(arg as URL) : undefined;
 }
+
+/** More links than this on the way to a file is more than the kernel would follow (`ELOOP`). */
+const MAX_LINKS = 40;
 
 /**
  * Resolve `p` to an absolute path with symlinks collapsed, so one file has one subject however it is
@@ -159,6 +201,10 @@ export function toPath(arg: unknown): string | undefined {
  * `src/escape → /etc/shadow` is asked about as `/etc/shadow`. A path that does not exist yet (a file about
  * to be created) has its nearest existing ancestor realpath'd and the rest re-appended, so a write cannot
  * be aimed through a symlinked parent either.
+ *
+ * A dangling link is the one thing in that walk which "does not exist" and still leads somewhere: `open`
+ * with `O_CREAT` follows it and creates its target, so it is followed here too, rather than asked about at
+ * the link's own name. A cycle resolves to itself, and the call then fails with `ELOOP`.
  *
  * The native realpath, because it is the one that returns the name as stored: the JS one keeps the case
  * it was given, so on a case-insensitive filesystem (macOS's default) `.ENV` would be a different subject
@@ -168,15 +214,18 @@ export function realResolve(p: string): string {
   const abs = path.resolve(p);
   const tail: string[] = [];
   let cur = abs;
-  for (;;) {
+  for (let links = 0; links < MAX_LINKS;) {
     try { return path.join(realpathSync.native(cur), ...tail.reverse()); }
-    catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return abs;      // reached the root with nothing existing
-      tail.push(path.basename(cur));
-      cur = parent;
-    }
+    catch { /* not all there */ }
+    let target: string | undefined;
+    try { target = readlinkSync(cur); } catch { /* not a link */ }
+    if (target !== undefined) { cur = path.resolve(path.dirname(cur), target); links++; continue; }
+    const parent = path.dirname(cur);
+    if (parent === cur) return abs;      // reached the root with nothing existing
+    tail.push(path.basename(cur));
+    cur = parent;
   }
+  return abs;
 }
 
 const insensitiveByDevice = new Map<number, boolean>();

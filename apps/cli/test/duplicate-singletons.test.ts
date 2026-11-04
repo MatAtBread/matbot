@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findDuplicateSingletons, describeDuplicateSingleton } from '../src/plugins/singletons.js';
 
@@ -15,6 +17,7 @@ import { findDuplicateSingletons, describeDuplicateSingleton } from '../src/plug
 // entry named `@matatbread/matbot-plugin-api` pointing AT the host's copy. Hence realpath, not existence.
 
 const API = '@matatbread/matbot-plugin-api';
+const run = promisify(execFile);
 const hostApiDir = fileURLToPath(new URL('../../../plugin-api/', import.meta.url));
 
 /** A resolvable package under `<dir>/node_modules`, either a real copy or a link to the host's. */
@@ -153,4 +156,38 @@ test('this workspace reports no duplication', async () => {
   const repo = fileURLToPath(new URL('../../../', import.meta.url));
   const found = findDuplicateSingletons({ configDir: repo, plugins: [] });
   assert.deepEqual(found, [], `a source checkout must be silent; got ${JSON.stringify(found)}`);
+});
+
+// The case the duplicate is the CAUSE of: a plugin importing what its own older copy of plugin-api does not
+// export fails to load, boot carries on past it, and only loaded plugins used to be probed, so the one directory
+// holding the diagnosis was the one nobody looked in. It is a real boot, because that is the seam: boot is what
+// knows which specifiers failed and where they resolved to.
+test('a plugin that failed to load is probed too, so its nested copy is named beside the failure', async () => {
+  const { dir, cleanup } = await scratch();
+  try {
+    const pluginDir = join(dir, 'skew');
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(join(pluginDir, 'package.json'), JSON.stringify({
+      name: 'skew-plugin', version: '1.0.0', type: 'module', exports: { '.': './index.js' }, matbotRuntime: ['node'],
+    }));
+    await writeFile(join(pluginDir, 'index.js'),
+      `import { notInTheOldCopy } from '${API}';\nexport const plugin = { apiVersion: '0.5', async setup() {} };\n`);
+    await install(pluginDir, { version: '0.3.1' });
+    await writeFile(join(pluginDir, 'node_modules', API, 'package.json'), JSON.stringify({ name: API, version: '0.3.1', type: 'module', main: 'index.js' }));
+    const config = join(dir, 'matbot.yaml');
+    await writeFile(config, [
+      'providers:', '  none:', "    module: '@matatbread/matbot-provider-chatjimmy'", '    endpoint: http://127.0.0.1:9', '    model: none',
+      'plugins:', '  - ./skew', '',
+    ].join('\n'));
+
+    const cliDir = fileURLToPath(new URL('..', import.meta.url));
+    const { stderr } = await run(process.execPath, [
+      '--import', join(cliDir, 'register.js'), join(cliDir, 'src', 'index.ts'),
+      '--config', config, '--dump-tools', join(dir, 'tools.json'),
+    ], { cwd: dir, timeout: 60_000 });
+    assert.match(stderr, /Skipping plugin "\.\/skew"/, 'the failure');
+    assert.match(stderr, /Two copies of @matatbread\/matbot-plugin-api.*holds 0\.3\.1 \(reached from \.\/skew\)/, 'and why');
+  } finally {
+    await cleanup();
+  }
 });

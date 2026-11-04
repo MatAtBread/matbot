@@ -1128,6 +1128,18 @@ separate `vm` context was weighed and dropped: a body holding a granted package'
 parent's built-ins through them, and closing that is a membrane — the `vm2` road. A more thorough
 in-process runner is possible; finding and closing what V8 exposes is that runner's project, not this one.
 
+**A module wrapper is held to the same line** (`gate-fs-node`, through `ImportedModuleWrapper`). A body that
+uses the module as handed and changes only its own objects is REACHING, however deliberate it looks, because
+nothing shared was rewritten: a `Buffer` or `URL` altered after the call (the question and the call are apart by
+a whole human answer), a stream's `path` assigned before its open on a later tick, `Utf8Stream.reopen`. So a
+wrapper checks what is USED rather than what was passed: a path is read once and only that string goes on, a
+stream is handed the guarded fs as its `fs` option so each open it ever makes is an ordinary guarded call, and a
+link is resolved again in the tick of the call. A `Proxy` also needs its reflective traps, or a descriptor hands
+back the raw function. Rewriting a built-in the gate reads is tampering, and stays open. Walking a prototype by
+hand to node's own class rewrites nothing, but what a call returns is node's object, so closing that is the
+membrane again: names are closed (a stream's `constructor` is the guarded class), the walk is not, and the
+README says so. An fd-based call is unasked, so a descriptor number the body never opened is open too.
+
 **The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
 and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of
 `import('node:buffer')` describing it as full access, which teaches a human to click "always". What it

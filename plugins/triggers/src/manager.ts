@@ -83,18 +83,26 @@ export class TriggerManager implements Triggers {
    * `augment` is what `ephemeral` was called before the user-surface kinds became a pair. Unrecognised, a
    * condition of that kind was judged on no surface, so its trigger silently never fired. Read as
    * `ephemeral` and written back on read — not once at setup, because the store is read per principal and
-   * a setup pass would migrate only the boot principal's. Said every time one is migrated; a write that
-   * loses its CAS is left for the next read, which is reading it anyway. Removed in 0.6.0.
+   * a setup pass would migrate only the boot principal's. Said every time one is migrated. The write is a
+   * courtesy to the next read, so it never costs this one: a lost CAS, or a refusal (a trigger shared in
+   * read-only, which only its owner's next read can store), reads as `ephemeral` all the same. A throw here
+   * would reject the whole listing, so none of the principal's triggers would fire. Removed in 0.6.0.
    */
   private async migrated(t: Trigger): Promise<Trigger> {
     if (!t.conditions.some(c => (c.kind as string) === RETIRED_KIND)) return t;
     const next = (cur: Trigger): Trigger => ({
       ...cur, conditions: cur.conditions.map(c => (c.kind as string) === RETIRED_KIND ? { ...c, kind: 'ephemeral' as const } : c),
     });
-    const r = await this.store.cas(t.id, t.version, { ...next(t), version: crypto.randomUUID() });
-    console.warn(`[triggers] Trigger "${t.id}" has a condition of kind "${RETIRED_KIND}", the name "ephemeral" had before 0.5.0; ` +
-                 (r.ok ? 'it is now stored as "ephemeral".' : 'it is read as "ephemeral", and will be stored so when it next can be.'));
-    return r.ok ? r.doc : next(t);
+    const said = `[triggers] Trigger "${t.id}" has a condition of kind "${RETIRED_KIND}", the name "ephemeral" had before 0.5.0; `;
+    const later = 'it is read as "ephemeral", and will be stored so when it next can be';
+    try {
+      const r = await this.store.cas(t.id, t.version, { ...next(t), version: crypto.randomUUID() });
+      console.warn(said + (r.ok ? 'it is now stored as "ephemeral".' : `${later}.`));
+      return r.ok ? r.doc : next(t);
+    } catch (e) {
+      console.warn(`${said}${later}: ${e instanceof Error ? e.message : String(e)}`);
+      return next(t);
+    }
   }
 
   /** Triggers whose invocation matches the filter: `tool` (if given) must equal `invoke.tool`, and

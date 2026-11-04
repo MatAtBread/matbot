@@ -51,19 +51,52 @@ is given with `gate_action deny`, which asks you to confirm it.
 - **Sync calls** (`readFileSync`, `createReadStream`, …) **can't ask**: they block the thread a prompt
   needs. They consult the answers in force when the body imported the module, plus any given since, and
   throw `EACCES` when those don't allow the call. The error tells the body to use the async form so it can
-  be asked.
+  be asked. A stream's later open is asynchronous, so a stream that has been repointed does ask, and a refusal
+  reaches it as an `error` event.
 
 ## What it is, and is not
 
-A **guardrail** against an over-reaching body. It is **not a sandbox**:
+A **guardrail** against an over-reaching body. It is **not a sandbox**.
+
+**It holds against a body using the module**, which is what an over-eager model does. What is opened is what
+was asked about, whatever the body then changes of its own:
+
+- **A path is read once.** The string asked about is the one node gets, so a `Buffer` rewritten or a `URL`
+  reassigned after the call, even while a human is deciding, changes nothing. The same goes for a glob's
+  patterns and `cwd`, and for an options getter. A path that is not valid UTF-8 is refused, since no string
+  can name it.
+- **A stream asks again when it opens**, about the path and flags as they stand then. Assigning `s.path` or
+  `s.flags`, or calling `Utf8Stream.reopen`, is asked about like any other call.
+- **A flag is asked about as what it does.** `readFile(p, { flag: 'w' })` needs the write gate, because it
+  truncates. `open(p, 'r+')` needs both.
+- **A link is followed.** A link changed while a question is open is asked about again at its new target, and a
+  dangling one is asked about at the file a write through it would create.
+- **The module can't be read around or written through.** A property descriptor gives the guarded function, and
+  an assignment is refused. A stream's `constructor` is the guarded class, on a stream from a handle too.
+
+**It does not hold against code written to get past it.** Nothing here stops any of these, and a body shares
+matbot's process, so no in-process wrapper can stop them all:
+
+- **rewriting a built-in** the gate itself reads (`Map.prototype.get`, say), which is the tampering
+  `docs/SECURITY.md` describes;
+- **walking prototypes by hand**: `Object.getPrototypeOf(Object.getPrototypeOf(stream)).constructor` is node's
+  own class, which asks nobody. What a call returns is node's own object, and closing this would need a wrapper
+  around everything handed out;
+- **a descriptor number the body did not open.** `read`, `write` and the other fd-based calls are not asked
+  about, so `fs.readSync(n, …)` reads whatever else this process has open at `n`. A handle opened for reading
+  can also `chmod` and `chown`;
+- **a race**: a link repointed in the instant between the last look at a path and the kernel's own walk of it.
+
+It also leaves these alone, by design:
 
 - a **granted package** gets the raw `node:fs` (it is trusted as itself), so IO it does goes unasked;
 - a body can reach another IO module (`node:child_process`), which this plugin doesn't touch;
 - an operation that recurses (`rm`/`cp`/`readdir` with `recursive`, a `**` glob) on a directory granted
   by its exact path, rather than "anything in" it, acts below what was granted.
 
-Bounding what the **process** may touch is the deployment's job: the OS user matbot runs as, a container,
-or node's `--permission` model (`--allow-fs-read` / `--allow-fs-write`). See `docs/SECURITY.md`.
+Bounding what the **process** may touch, which is what holds against all of the above, is the deployment's job:
+the OS user matbot runs as, a container, or node's `--permission` model (`--allow-fs-read` / `--allow-fs-write`).
+See `docs/SECURITY.md`.
 
 Needs a `FunctionRunner` that offers `ImportedModuleWrapper`; the node runner,
 `@matatbread/matbot-function-runner-node`, does. Without one it does nothing.

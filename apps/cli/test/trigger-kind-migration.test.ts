@@ -1,5 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { installPrincipalCarrier, isReadOnlyError, runAs } from '@matatbread/matbot-core';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { ProfilesStorageBackend } from '@matatbread/matbot-storage-profiles';
 import type { MatbotMachine, Store } from '@matatbread/matbot-plugin-api';
 import { TriggerManager } from '../../../plugins/triggers/src/index.ts';
 import type { Trigger } from '../../../plugins/triggers/src/index.ts';
@@ -55,4 +61,49 @@ test('when the write-back loses, it is still read as ephemeral, and said again o
   assert.equal(got!.conditions[0]!.kind, 'ephemeral');
   assert.equal(docs.get('t1')!.conditions[0]!.kind as string, 'augment');
   assert.ok(warned.some(m => /will be stored so when it next can be/.test(m)));
+});
+
+test('a write-back that throws costs that write and no read: every other trigger still comes back', async () => {
+  const fine: Trigger = { ...old(), id: 't2', conditions: [{ kind: 'followup', rule: 'x' }] };
+  const docs = new Map<string, Trigger>([['t1', old()], ['t2', fine]]);
+  const store = memoryStore(docs);
+  store.cas = (async () => { throw new Error('disk full'); }) as typeof store.cas;
+  const manager = new TriggerManager(store, {} as MatbotMachine);
+  let all: Trigger[] = [];
+  const warned = await warnings(async () => { all = await manager.all(); });
+  assert.deepEqual(all.map(t => [t.id, t.conditions[0]!.kind]), [['t1', 'ephemeral'], ['t2', 'followup']]);
+  assert.ok(warned.some(m => /"t1".*will be stored so when it next can be.*disk full/.test(m)), warned.join('\n'));
+  assert.equal((await manager.get('t1'))?.conditions[0]!.kind, 'ephemeral');
+  assert.equal((await manager.query({ tool: 'contextual_search' })).length, 2);
+});
+
+test('under a profiles backend, a shared trigger still stored as augment is read, and is not this principal\'s to write', async () => {
+  installPrincipalCarrier(createAlsPrincipalCarrier());
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-trigger-kind-'));
+  const backend = await ProfilesStorageBackend.open(dir);
+  try {
+    await backend.createProfile('owner', ['triggers']);
+    await backend.createProfile('viewer', ['triggers']);
+    const store = backend.createStore('triggers') as unknown as Store<Trigger>;
+    await runAs({ id: 'owner', type: 'user' }, async () => {
+      await store.set('t1', old());
+      await backend.share('triggers', 't1', 'viewer');
+    });
+    await runAs({ id: 'viewer', type: 'user' }, async () => {
+      await store.set('mine', { ...old(), id: 'mine', conditions: [{ kind: 'followup', rule: 'x' }] });
+      // The premise: this really is the refusal a principal gets for someone else's document.
+      await assert.rejects(store.cas('t1', (await store.get('t1'))!.version, { ...old(), version: 'v1' }), isReadOnlyError);
+      const manager = new TriggerManager(store, {} as MatbotMachine);
+      let all: Trigger[] = [];
+      await warnings(async () => { all = await manager.all(); });
+      assert.deepEqual(all.map(t => t.id).sort(), ['mine', 't1'], 'the viewer\'s own triggers are not lost with it');
+      assert.equal(all.find(t => t.id === 't1')!.conditions[0]!.kind, 'ephemeral');
+    });
+    await runAs({ id: 'owner', type: 'user' }, async () => {
+      assert.equal((await store.get('t1'))!.conditions[0]!.kind as string, 'augment', 'left for its owner to migrate');
+      const manager = new TriggerManager(store, {} as MatbotMachine);
+      await warnings(async () => { await manager.all(); });
+      assert.equal((await store.get('t1'))!.conditions[0]!.kind, 'ephemeral', 'which its owner\'s next read does');
+    });
+  } finally { await backend.close(); await rm(dir, { recursive: true, force: true }); }
 });

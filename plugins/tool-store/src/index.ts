@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, StoreQueryError, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
@@ -21,7 +21,7 @@ const META_NAMESPACE = 'store_tools';
 // store out of every plugin's: unprefixed, `create email_accounts` before matbot-email is installed
 // would hand that plugin's store to a model-writable tool, and no check made at create time can see a
 // plugin that is not loaded yet. A def from before 0.5.0 (`id === namespace`, no owner) is moved into one
-// on first use, unless its owner takes it over first (see `migratedOnUse`).
+// on first use, per principal, unless its owner takes it over first (see `migratedOnUse`).
 const OWN_PREFIX = 'store-';
 
 function now(): string { return new Date().toISOString(); }
@@ -63,6 +63,9 @@ function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
 /** A def from before 0.5.0: no owner, and the namespace its own name rather than one of tool-store's. */
 const isLegacy = (def: StoreDef): boolean => def.owner === undefined && def.namespace === def.id;
 
+/** How many times one call reads the def again because another writer keeps replacing it under the move. */
+const MAX_MOVE_ATTEMPTS = 4;
+
 /**
  * A def from before 0.5.0 reads and writes the namespace named after it, and nothing recorded whether that
  * was a store `create` made or an `expose` over a namespace a plugin owns. Either way, moving the store into
@@ -73,23 +76,46 @@ const isLegacy = (def: StoreDef): boolean => def.owner === undefined && def.name
  * over in its own setup (see `defineStore`), and may load after this plugin: by the time the model calls
  * the tool, the owner has had its chance, and a store it took is not this tool's to move. The originals stay
  * where they were.
+ *
+ * Decided per CALL, and nothing about the outcome is remembered: the meta store is read per principal, so one
+ * principal's move says nothing about another's documents; another process may have moved the def or handed it
+ * to its owner since this one booted; and a move that failed is tried again by the next call. Once no legacy
+ * def remains a call costs one read of the meta store, and a restart registers the plain tool.
  */
 function migratedOnUse(services: MatbotMachine, def: StoreDef, tool: Tool): Tool {
-  let moved: Promise<Tool> | undefined;
   return {
     ...tool,
     executor: {
       async *execute(input, ctx) {
-        yield* (await (moved ??= migrate(services, def, tool))).executor.execute(input, ctx);
+        const current = await storeToolNow(services, def);
+        if (typeof current === 'string') { yield { type: 'error', message: current }; return; }
+        yield* current.executor.execute(input, ctx);
       },
     },
   };
 }
 
-async function migrate(services: MatbotMachine, def: StoreDef, tool: Tool): Promise<Tool> {
+/** The tool for `def` as things stand for this caller, or why there is none. */
+async function storeToolNow(services: MatbotMachine, def: StoreDef): Promise<Tool | string> {
   const meta = services.createStore<StoreDef>(META_NAMESPACE);
-  const current = await meta.get(def.id);
-  if (current === null || !isLegacy(current)) return tool;
+  const over = (d: StoreDef): Tool => makeStoreTool(services.self?.name, d, services.createStore<StoreRecord>(d.namespace));
+  for (let attempt = 0; attempt < MAX_MOVE_ATTEMPTS; attempt++) {
+    const current = await meta.get(def.id);
+    // Nothing to move, and the namespace named after the store may be a plugin's: this caller's documents go
+    // where a store it created would keep them.
+    if (current === null) return over({ ...def, namespace: OWN_PREFIX + def.id });
+    if (current.owner !== undefined && current.owner !== services.self?.name) {
+      return `Store "${current.id}" belongs to the plugin "${current.owner}", which exposes it; it is not available here.`;
+    }
+    if (!isLegacy(current)) return over(current);
+    const moved = await moveStore(services, meta, current);
+    if (moved !== undefined) return over(moved);
+  }
+  throw new Error(`Store "${def.id}" keeps being redefined while it is moved out of the namespace "${def.id}"; try again.`);
+}
+
+/** Copy a legacy def's documents to its own namespace, then record that. Undefined if the def lost its CAS. */
+async function moveStore(services: MatbotMachine, meta: Store<StoreDef>, current: StoreDef): Promise<StoreDef | undefined> {
   const from = services.createStore<StoreRecord>(current.namespace);
   const to   = services.createStore<StoreRecord>(OWN_PREFIX + current.id);
   let copied = 0;
@@ -101,14 +127,18 @@ async function migrate(services: MatbotMachine, def: StoreDef, tool: Tool): Prom
     cursor = page.cursor;
   }
   const next: StoreDef = { ...current, namespace: OWN_PREFIX + current.id, version: crypto.randomUUID(), updatedAt: now() };
-  const r = await meta.cas(current.id, current.version, next);
-  if (!r.ok) return tool;   // redefined meanwhile: what replaced it is registered by whoever did
+  try {
+    const r = await meta.cas(current.id, current.version, next);
+    if (!r.ok) return undefined;
+  } catch (e) {
+    // A def shared in from another principal, which only its owner can rewrite. The call still moves off the
+    // old namespace, on this caller's own copy, so a document it deleted returns until the owner has moved it.
+    if (isReadOnlyError(e)) return next;
+    throw e;
+  }
   console.warn(`[tool-store] Store "${current.id}" was defined before 0.5.0 over the namespace "${current.namespace}" itself. ` +
                `It now keeps its documents in "${next.namespace}" (${copied} copied); the originals stay in "${current.namespace}".`);
-  const migrated = makeStoreTool(services.self?.name, next, to);
-  services.tools.remove(actionToolName(next.id));
-  services.tools.register(migrated);
-  return migrated;
+  return next;
 }
 
 async function saveDef(
@@ -141,11 +171,13 @@ export async function defineStore(
   spec: { namespace: string; description: string; shape: string },
 ): Promise<StoreDef> {
   const owner = services.self?.name;
-  // A def from before 0.5.0 has no owner, so this plugin's boot registered its tool, under this plugin's
-  // name; the owner could not remove it, and registering over it was a collision. Handed back here, which
-  // is the migration: the def is rewritten below with its owner, and the owner registers the tool.
-  const legacy = await services.createStore<StoreDef>(META_NAMESPACE).get(spec.namespace);
-  if (legacy !== null && legacy.owner === undefined && legacy.namespace === legacy.id) own?.tools.remove(actionToolName(legacy.id));
+  // A def with no owner has its tool registered by this plugin's boot, under this plugin's name: one from
+  // before 0.5.0, one a model created, one already moved to `store-<name>`. The owner could not remove that
+  // tool, and registering over it was a collision. Handed back here: the def is rewritten below with its owner,
+  // who registers the tool, and a model's documents stay where they are. Another plugin's def is not unowned,
+  // and stays a collision for the host to decide.
+  const held = await services.createStore<StoreDef>(META_NAMESPACE).get(spec.namespace);
+  if (held?.owner === undefined) own?.tools.remove(actionToolName(spec.namespace));
   return saveDef(services, { id: spec.namespace, ...spec, ...(owner !== undefined ? { owner } : {}) });
 }
 

@@ -3,7 +3,7 @@ import { loadPluginsWithDescriptions, nodePluginResolver,
 import type { PromptFn, AssembledMachine } from '@matatbread/matbot-core';
 import { ProviderRegistryImpl,
          unloadPlugin as unloadPluginFn,
-         getPluginNameForSpecifier, getRegisteredPlugins,
+         getFailedPlugins, getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, installUsageCarrier, enterPrincipal,
          assembleMachine, preScanStorage } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
@@ -193,9 +193,17 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   // singleton is survivable by design — which is precisely why nothing else would ever mention it — and
   // it is not repaired here: replacing a package-manager-installed directory with a symlink invites the
   // next `install` to undo it. `plugin list` reports the same thing on demand.
+  //
+  // After the load is early enough, because a plugin's failure does not stop boot and a second copy of the
+  // carrier's module shares its state: what a duplicate can actually break is the plugin holding it, whose
+  // failure was just logged above this. So a plugin that failed is probed as well, by where it resolved to.
+  const failed = new Set(getFailedPlugins().map(f => f.specifier));
   for (const dup of findDuplicateSingletons({
     configDir,
-    plugins:   getRegisteredPlugins(),
+    plugins: [
+      ...getRegisteredPlugins(),
+      ...resolvedPluginMods.filter(r => failed.has(r.spec)).map(r => ({ name: r.spec, resolvedUrl: r.importSpec })),
+    ],
   })) console.warn(`[matbot] ${describeDuplicateSingleton(dup)}`);
 
   // A provider adapter may be loaded via the plugins list (as a path) rather than a
