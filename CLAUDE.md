@@ -1138,7 +1138,9 @@ link is resolved again in the tick of the call. A `Proxy` also needs its reflect
 back the raw function. Rewriting a built-in the gate reads is tampering, and stays open. Walking a prototype by
 hand to node's own class rewrites nothing, but what a call returns is node's object, so closing that is the
 membrane again: names are closed (a stream's `constructor` is the guarded class), the walk is not, and the
-README says so. An fd-based call is unasked, so a descriptor number the body never opened is open too.
+README says so. An fd-based call is unasked, so a descriptor number the body never opened is open too, and that
+one has NOT been ruled on. `docs/SECURITY.md` *Known gaps in a function body's gates* is the list, with what is
+ruled, what is not and what nobody has examined. Add a newly found gap there before deciding whether it is acceptable.
 
 **The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
 and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of

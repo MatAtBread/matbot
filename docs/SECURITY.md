@@ -260,6 +260,33 @@ replace it.
   later, including one written under the influence of injected content, and an edit permitted to keep its
   grants keeps them whatever the edit added. That is what those answers say.
 
+#### Known gaps in a function body's gates
+
+This list exists so the risk can be assessed. It isn't a ruling that each gap is acceptable, and it isn't complete: *Not yet examined* says where nobody has looked. The ruling that applies to the first group is in `CLAUDE.md` (*What this is not*).
+
+**Confirmed by running them against `gate-fs-node` on Node 24.21, and still open:**
+
+| Gap | What it needs | Status |
+|---|---|---|
+| Rewriting a built-in the gate reads | `node:fs` granted, and code written to do it | Ruled out of scope: tampering needs a process of its own |
+| Walking prototypes by hand to node's own stream classes, from a stream or a file handle | `node:fs` granted, and a path it may open | Ruled out of scope: closing it is a membrane. Reaching the same class by name is closed |
+| A descriptor number the body did not open, used with an fd-based call | `node:fs` granted | **Not ruled on.** Reads whatever else the process has open |
+| `chmod` and `chown` through a handle opened only for reading | A read grant on the file | **Not ruled on.** A read grant changes metadata |
+
+**From reading the code, not run:**
+
+| Gap | Status |
+|---|---|
+| A recursive `cp`, `rm` or `readdir` on a granted directory acts on a file denied inside it, because only the directory is asked about | **Not ruled on.** It undercuts a denial carved out of a grant |
+| Renaming a directory moves a denied file to a path the denial no longer names, since subjects are paths | **Not ruled on** |
+| A link swapped between the last check and the kernel's walk of the path. A path check cannot close this | Inherent. Bounding the process is the answer |
+| A watcher's class, reached by name from what `watch` returns, is not guarded. It reveals change events, not contents | **Not ruled on** |
+| Code after a body's first `await` has no time bound, and timers can outlive the call | Documented in the runner. **Risk not assessed** |
+
+**By design, listed for completeness:** a granted package gets the raw module; another granted builtin that does IO or loads modules isn't path-gated; a body can call any registered tool, such as `bash`; a write grant over the stored gate answers lets a body change them.
+
+**Not yet examined:** the runner's code-builder refusals beyond its existing tests, including whether every route keeps the body's span; the objects a body is handed (`tool`, `context`) and the globals it isn't denied; hard links and mounts made outside matbot; Windows path forms. The network gate was read but not tested: `fetch` copies its input into a `Request` before asking, and `WebSocket` copies its URL.
+
 The `function-runner-node` implementation of `FunctionRunner` can **optionally** implement gates on any module imported by code written by the LLM. This is acheived by a plugin that registers a module name and re-implements with gates. The `@matatbread/matbot-gate-fs-node`, also in the repo, does this for the `node:fs` module, and asks the user before a function body reads or writes a file, for specific tool functions. That stops a body that over-reaches, not code written to defeat it (see *A granted module is granted whole*). There are no other implementations of this module wrapping by default, but the included one shows the pattern for doing so.
 
 ### Prompt injection
