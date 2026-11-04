@@ -2,7 +2,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolResultOf, ToolContext, Store, Principal,
   AppendMessage, AppendResult,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 
 // The successor to `@matatbread/matbot-tool-background` (removed in 0.5.0), with one change of meaning: a job's reply is
 // not its output. Nothing a job prints reaches anyone; it reports by appending to a conversation
@@ -38,9 +38,9 @@ declare module '@matatbread/matbot-plugin-api' {
     background_job:
       | ToolContract<{ id: string; interval: Duration; name?: string; session?: string }, { prompt: string; interval: Duration; name?: string; session?: string; provider?: string }>
       | ToolContract<{ id: string; at: IsoInstant; name?: string; session?: string }, { prompt: string; at: Duration | IsoInstant; name?: string; session?: string; provider?: string }>
-      | ToolContract<{ status: 'started'; name?: string; session?: string }, { prompt: string; interval?: 'once' | null; name?: string; session?: string; provider?: string }>;
+      | ToolContract<{ status: 'started'; id: string; name?: string; session?: string }, { prompt: string; interval?: 'once' | null; name?: string; session?: string; provider?: string }>;
     background_job_action:
-      | ToolContract<Job[], { action: 'list' }>
+      | ToolContract<JobListing[], { action: 'list' }>
       | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedJob[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
       | ToolContract<{ suspended: true; count: number; ids: string[]; skipped?: SkippedJob[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
       | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
@@ -113,6 +113,25 @@ export interface EveryJob extends JobBase { intervalMs: number }
 /** Fires once, at `nextRun`, and deletes itself. The ABSENCE of an interval is what makes it one. */
 export interface OnceJob  extends JobBase { intervalMs?: undefined }
 export type Job = EveryJob | OnceJob;
+
+/**
+ * A row of the list action: a stored job, or a run this process holds with no row the caller can see.
+ * `inFlight` marks a run happening in THIS process now. Beside a stored job it means that job is mid-run;
+ * without one it is usually a run-now job, which is stored nowhere and so can be seen only here, and can
+ * also be a stored job whose row went while it ran. Another matbot sharing the store runs its own, and is
+ * not visible here (see the tool description).
+ */
+export type JobListing = (Job & { inFlight?: true }) | RunningJob;
+
+/** A run in flight here with no stored row. Nothing but `inFlight` scopes it, so it is listed only to the principal it runs as. */
+export interface RunningJob {
+  id:        string;
+  inFlight:  true;
+  startedAt: IsoInstant;
+  name?:     string;
+  prompt:    string;
+  session?:  string;
+}
 
 // Where `@matatbread/matbot-tool-background` kept its schedules. Removed in 0.6.0, with the warning that reads it.
 const LEGACY_NAMESPACE = 'schedules';
@@ -271,9 +290,37 @@ const ONESHOT_RETRY_MS = 300_000;
 // its own nextRun. Never a one-shot: its time IS its time.
 const BOOT_STAGGER_MS = 10_000;
 
-// One entry per run in flight here, so a cancel can stop it and a run longer than its own interval is not
-// started twice. Correctly per-realm: it is this process's runs, not the schedule.
-const inFlight = new Map<string, AbortController>();
+// One entry per run in flight here, so a cancel can stop it, a list can show it, and a run longer than
+// its own interval is not started twice. Correctly per-realm: it is this process's runs, not the schedule.
+// It carries what the run was asked to do, because a run-now job has no row to read that back from.
+interface InFlightRun { ac: AbortController; startedAt: IsoInstant; spec: RunSpec }
+const inFlight = new Map<string, InFlightRun>();
+
+/** Enter a run in `inFlight`, stopped by unload as well as by its own cancel. `settle` must be called when it ends. */
+function track(spec: RunSpec): { ac: AbortController; settle: () => void } {
+  const ac     = new AbortController();
+  const parent = pluginAc?.signal;
+  const stop   = (): void => { ac.abort(); };
+  // Detached in `settle`: the plugin's signal outlives every run, so one left behind per run would
+  // accumulate for the process's life (see `sleep`).
+  parent?.addEventListener('abort', stop, { once: true });
+  inFlight.set(spec.id, { ac, startedAt: isoAt(Date.now()), spec });
+  return {
+    ac,
+    settle() {
+      parent?.removeEventListener('abort', stop);
+      if (inFlight.get(spec.id)?.ac === ac) inFlight.delete(spec.id);
+    },
+  };
+}
+
+// The map holds every principal's runs, and a run with no row has no store to scope it the way a query
+// scopes rows, so this is what stands between one principal and another's prompt or cancel.
+function isOwnRun(run: InFlightRun): boolean {
+  const me = tryCurrentPrincipal(), owner = run.spec.principal;
+  return me !== undefined && owner !== undefined && me.id === owner.id && me.type === owner.type;
+}
+
 // Set while the scheduler is sleeping; aborting it brings the next tick forward.
 let tickWake: AbortController | undefined;
 
@@ -337,15 +384,14 @@ async function claim(job: Job, nowMs: number): Promise<Job | undefined> {
 function start(job: Job, staggerMs: number): void {
   if (!pluginAc) return;
 
-  const ac = new AbortController();
-  pluginAc.signal.addEventListener('abort', () => ac.abort(), { once: true });
-  inFlight.set(job.id, ac);
+  const spec = runSpec(job);
+  const { ac, settle } = track(spec);
 
   void (async (): Promise<void> => {
     if (staggerMs > 0) await sleep(staggerMs, ac.signal);
     if (ac.signal.aborted) return;
 
-    const outcome = await runJob(runSpec(job), ac.signal);
+    const outcome = await runJob(spec, ac.signal);
 
     if (job.intervalMs === undefined) {
       // Deleted only once the job has RUN. A run that never started at all (no provider to run as, a
@@ -366,9 +412,7 @@ function start(job: Job, staggerMs: number): void {
     }
   })()
     .catch((err: unknown) => { console.error(`[background-jobs] job ${job.id} failed:`, err); })
-    .finally(() => {
-      if (inFlight.get(job.id) === ac) inFlight.delete(job.id);
-    });
+    .finally(settle);
 }
 
 /** One pass over the rows. Returns how long to sleep before the next one. */
@@ -474,21 +518,32 @@ timing field:
   at                      — run once, at the time given. Persists across restarts.
   interval                — run repeatedly, that far apart. Persists across restarts.
 
-Both timed forms return an id: the handle for the background_job_action tool (list / suspend / resume / cancel).
-A one-shot deletes itself once it has run.
+Every form returns an id: the handle for the background_job_action tool (list / suspend / resume / cancel).
+A one-shot deletes itself once it has run. A run-now job has no row at all: it appears in
+background_job_action's list only while it is running, cancel is the only action that applies to it, and
+nothing about it survives.
 
-HOW THE USER HEARS FROM A JOB. Nothing a job replies is shown to anyone. A job tells the user something by
-appending a message to a session (session_action append). Where it lands is fixed when the job is
-created and stored on the job: by default the conversation the creating call is made from, or the one
-named in \`session\` — never whichever conversation a later reader happens to be in.
+TO RUN A PROMPT IN THE BACKGROUND: pass no timing and no session, and keep the request in its own words as
+the prompt, adding only what the job should tell the user if the request does not already say,
+  background_job { prompt: "Summarise <that page> and tell me what it says" }
+It runs once, starting now; this conversation stays usable meanwhile, and what the job reports arrives in it
+when it is done. \`session\` defaults to the conversation the creating call is made from, so name one
+only to report somewhere else. Do not wait for the result, and do not look for it in the same turn: it
+arrives later, on its own.
+
+HOW THE USER HEARS FROM A JOB. A job's reply is not its output: nothing it replies is shown to anyone.
+It tells the user something by appending a message to a session (session_action append), into the
+conversation fixed when the job was created and stored on the job: by default the conversation the
+creating call is made from, or the one named in \`session\` — never whichever conversation a later reader
+happens to be in. A job created from this conversation therefore knows to report here: its prompt need not say where, only what.
 The user sees it there, with the job's context, and can follow up. It can also use other tools to, for
 example, write workspace files or send emails, if its prompt asks for that. A job with nothing worth
-saying ends silently. If the user does not specify where they want the output, you should ask them for clarification.
+saying ends silently. Name a different \`session\` only when the output belongs somewhere else.
 
 So write the prompt as an instruction to an agent, saying what to tell the user and when:
   "Remind the user to go to the dentist."
   "Check the token balance. If it is over 50M, tell the user what it is; otherwise say nothing."
-A job told only to do something ("check the balance") will do it and tell nobody.
+A job told only to do something ("check the balance") may do it and tell nobody, so say what is worth reporting.
 
 \`at\` is either an ISO-8601 date-time ("2026-08-23T09:00:00Z", or "2026-08-23" for midnight UTC) or a duration
 from now ("90m", "2h", "3d") — prefer the duration form when you are unsure of today's date, since a wrong
@@ -587,10 +642,13 @@ Do not wait for a job's result: tell the user it has started, and which conversa
         }
         const spec: RunSpec = { id: crypto.randomUUID(), prompt, ...common };
         // Not awaited: the call returns at once and the job reports for itself. Watched to its end for the
-        // log only — a run-now job is stored nowhere, so its silence has no row.
-        void runJob(spec, pluginAc?.signal ?? new AbortController().signal)
-          .catch((err: unknown) => { console.error(`[background-jobs] job ${spec.id} failed:`, err); });
-        yield { type: 'result', value: { status: 'started', ...echoed } };
+        // log only — a run-now job is stored nowhere, so its silence has no row. Registered as in flight
+        // for the length of the run, which is the only window in which anything can be said about it.
+        const { ac, settle } = track(spec);
+        void runJob(spec, ac.signal)
+          .catch((err: unknown) => { console.error(`[background-jobs] job ${spec.id} failed:`, err); })
+          .finally(settle);
+        yield { type: 'result', value: { status: 'started', id: spec.id, ...echoed } };
         return;
       }
 
@@ -697,17 +755,25 @@ const jobActionTool: Tool<ToolResultOf<'background_job_action'>> = {
   name: 'background_job_action',
   description: `Manage the jobs the background_job tool scheduled for later — recurring ones (created with an interval) and
 one-shots (created with an at). A one-shot's row has no intervalMs, its fire time is nextRun, and it disappears
-once it has run. A job with a lastRun and a nextRun in the future may be running right now: nextRun is moved
-forward when a run starts, so that no other matbot sharing this store runs the same job at the same time. A recurring job's lastReply is the end of what it last printed — never shown to the user, but
-the place to look when a job that should have reported did not.
+once it has run; a run-now job (created with no timing) has no row at all, so it exists only while it runs.
+
+The results are the stored rows plus \`inFlight\` — a run happening in THIS process right now. On a stored job
+the flag sits beside its row; a run with no row is the whole entry, and is listed only to whoever started it.
+It is one process's runs, not the store's: another matbot sharing the store runs its own and is not visible here, so a stored job whose
+lastRun is set and whose nextRun is in the future may also be running somewhere else — nextRun is moved
+forward when a run starts, so that no two matbots run the same job at once. A recurring job's lastReply is
+the end of what it last printed — never shown to the user, but the place to look when a job that should
+have reported did not.
 
 ACTIONS
-  list    — Show every job with its id, interval, next run time, active state, and the conversation it
-            reports to (its \`session\`). Read that rather than assuming a job's output lands in the
-            conversation you happen to be in: it is fixed when the job is created.
-  suspend — Pause a job (preserved, stops running until resumed).
+  list    — Show every job with its id, interval, next run time, active state, the conversation it
+            reports to (its \`session\`), and whether a run of it is in flight. Read the session rather
+            than assuming a job's output lands in the conversation you happen to be in: it is fixed when
+            the job is created.
+  suspend — Pause a job (preserved, stops running until resumed). Not a run-now job: it has no schedule to pause.
   resume  — Resume a suspended job (runs nearly immediately, then on its interval).
-  cancel  — Permanently delete a job. Prefer suspend for a temporary pause.
+  cancel  — Permanently delete a job, and stop a run of it in flight here. This is how to stop a run-now job.
+            Prefer suspend for a temporary pause.
 
 The id is a job id as reported by the list action, or by the background_job tool. For suspend and resume, pass id "*" to act on ALL
 jobs at once. cancel requires a specific id — "*" is not accepted (no bulk delete).
@@ -738,7 +804,19 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
       switch (act.action) {
         case 'list': {
           const jobs = (await jobStore?.query({}))?.items ?? [];
-          yield { type: 'result', value: jobs };
+          // A row says what is scheduled; only this process knows what is running, so the flag is added
+          // here rather than stored. Rows first, then the runs with no row at all — a run-now job is one.
+          const listed: JobListing[] = jobs.map(job => (inFlight.has(job.id) ? { ...job, inFlight: true as const } : job));
+          const stored = new Set(listed.map(job => job.id));
+          for (const [id, run] of inFlight) {
+            if (stored.has(id) || !isOwnRun(run)) continue;
+            listed.push({
+              id, inFlight: true, startedAt: run.startedAt, prompt: run.spec.prompt,
+              ...(run.spec.name    !== undefined ? { name:    run.spec.name }    : {}),
+              ...(run.spec.session !== undefined ? { session: run.spec.session } : {}),
+            });
+          }
+          yield { type: 'result', value: listed };
           return;
         }
 
@@ -758,6 +836,11 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
               yield { type: 'error', message: `Job ${act.id} is being written concurrently (a run of it is starting or finishing) — ask again.` };
               return;
             }
+            const run = inFlight.get(act.id);
+            if (run !== undefined && isOwnRun(run)) {
+              yield { type: 'error', message: `Job ${act.id} is running with no stored row (a run-now job), so it has no schedule to ${act.action}. Use cancel to stop it.` };
+              return;
+            }
             yield { type: 'error', message: `Job ${act.id} not found.` };
             return;
           }
@@ -770,11 +853,19 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
             yield { type: 'error', message: 'cancel requires a specific job id; "*" (all) is not permitted for cancel. Suspend all with { action: "suspend", id: "*" } instead.' };
             return;
           }
+          const run = inFlight.get(act.id);
+          const row = await jobStore?.get(act.id);
+          // The same answer for an unknown id and another principal's run, so a guess learns nothing. A
+          // row the caller can read is the store's to judge, as it is for suspend.
+          if (!row && !(run !== undefined && isOwnRun(run))) {
+            yield { type: 'error', message: `Job ${act.id} not found.` };
+            return;
+          }
+          // The row first: a delete the store refuses (shared in read-only) must leave the run alone.
+          if (row) await jobStore?.delete(act.id);
           // Stop a run of it in flight HERE; one in flight in another matbot ends when it ends, and
           // finds the row gone when it goes to write what it left behind.
-          const ac = inFlight.get(act.id);
-          if (ac) { ac.abort(); inFlight.delete(act.id); }
-          await jobStore?.delete(act.id);
+          if (run) { run.ac.abort(); inFlight.delete(act.id); }
           nudge();
           yield { type: 'result', value: { cancelled: true, id: act.id } };
           return;

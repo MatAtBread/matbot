@@ -337,6 +337,11 @@ a second host's needs.
   (the `"legacy": true` rows, and `cancel`'s `legacy` field). A warning at startup still counts any that
   are left; re-create each with `background_job` and delete the old row. To list and cancel them with a
   tool, run 0.4.x once.
+- **`background-jobs` / `background-jobs-node`** — `background_job_action list` shows what is running in this
+  process: a stored job carries `inFlight`, and a run-now job, which has no row, is listed while it runs, to the
+  principal who started it. `background_job` returns a run-now job's `id`, and `cancel` stops one. `cancel` of an
+  id the caller cannot see reports "not found" rather than `cancelled: true`, and stops a run only once the store
+  has accepted deleting its row.
 - **CLI** — a duplicated `core` or `plugin-api` is warned about once, after plugins load, rather than on
   the version banner as well; `plugin list` reports copies reachable from the CLI's own dependencies too.
   A package's `exports` is read as Node reads it for `import` — conditions in the order the package lists

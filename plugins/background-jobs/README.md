@@ -27,6 +27,10 @@ the swap runs that job, and the others find a row that is no longer due and leav
 once per occurrence however many tabs are open, and a tab can create, suspend, resume or cancel a job another
 tab runs, because all four are row writes.
 
+A run-now job (no `at`, no `interval`) is the exception, having no row: the matbot that started it is the only
+one that knows about it. It appears in that matbot's `background_job_action` `list` only while it runs and only
+to the principal who started it, and `cancel` from there is the one action that applies to it.
+
 Nothing is held, so a tab closed mid-run owes nothing. For a recurring job that costs one occurrence; a
 one-shot's claim moves its fire time out rather than deleting the row, so an unfinished one is claimed again
 a few minutes later — at-least-once, which is the better failure for a request that was asked for and never
