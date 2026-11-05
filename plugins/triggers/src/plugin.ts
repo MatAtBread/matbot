@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, subTurnDepth } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
 import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
@@ -464,6 +464,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
+      // A trigger judges what a person said, and what was said back to them. A sub-turn has neither: its
+      // prompt is another model's and its answer goes back to that model, whose own reply is judged here.
+      if (subTurnDepth(ctx.session.messages) > 0) return;
       const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
       // Skip our own agent-phase robo resubmissions — they are not real user turns.
       if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
@@ -545,6 +548,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       if (traceId !== undefined) pendingUserPhase.delete(traceId);
 
       if (ctx.resubmitDepth > 0) return;
+      if (subTurnDepth(ctx.session.messages) > 0) return;   // see the screen hook
 
       const userOut: UserPhaseOutcome = rec ? await rec.verdict : NO_USER_PHASE();
       // `claimed` ⇒ the correction was already delivered on the clean path (the runner's in-situ restart

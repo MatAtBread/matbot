@@ -364,6 +364,9 @@ export async function* runFunction(
     // How a body reaches this session's own functions: they are never registered, so `tool.x()` finds
     // them only by carrying the turn's tools down, as the runner handed them to this call.
     ...(ctx.turnTools !== undefined ? { turnTools: ctx.turnTools } : {}),
+    // Without this a body's `tool.session_action({ action: 'append' })` on an ephemeral run reaches the
+    // machine's appender, not the run's: past the run's own idea of where its reports go.
+    ...(ctx.appender  !== undefined ? { appender:  ctx.appender  } : {}),
   }, {
     onEvent: emit,
     // The runner's, read once for this call: its tool calls are host code acting for the body, which a

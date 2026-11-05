@@ -96,15 +96,23 @@ export interface ToolContracts {}
 // generated-code checker closes it deterministically; this closes the same hole in the type itself.
 declare const RESULT: unique symbol;
 declare const ARGS:   unique symbol;
+declare const CALL:   unique symbol;
 
 /**
  * One overload arm of a multi-action tool registered in {@link ToolContracts}: the `Result` it yields
  * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
  * arm that matches any params). Purely type-level — the fields below are phantom and uninstantiable.
+ *
+ * `Call` is for a tool whose result is shaped by the call's own params, which a fixed `Result` cannot say:
+ * the exact, generic call signature {@link ToolProxy} declares instead of `(params: Args) => Promise<Result>`.
+ * `Result` and `Args` remain the whole contract everywhere else (the executor, the wire text, validation),
+ * so they must describe every call the signature admits. Leave it out unless a key or a field of the result
+ * really does depend on the params.
  */
-export interface ToolContract<Result, Args = unknown> {
+export interface ToolContract<Result, Args = unknown, Call = unknown> {
   readonly [RESULT]: Result;
   readonly [ARGS]:   Args;
+  readonly [CALL]:   Call;
 }
 
 /**
@@ -150,8 +158,9 @@ type UnionToIntersection<U> =
 // fallback for a foreign/MCP tool carrying only a JSON-Schema `inputSchema`) keeps a loose, optional-param
 // signature so it stays callable; a typed arm requires its declared params.
 type ArmCallSig<E> =
-  E extends ToolContract<infer R, infer P>
-    ? (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
+  E extends ToolContract<infer R, infer P, infer C>
+    ? C extends (...args: never[]) => unknown ? C
+    : (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
     : never;
 
 // The union of a tool's arm params — the parameter type of the trailing catch-all signature below.

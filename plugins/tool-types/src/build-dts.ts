@@ -800,10 +800,13 @@ export async function buildToolTypesData(
     const params: string[] = [], results: string[] = [], paramNodes: TS.TypeNode[] = [];
     for (const raw of arms) {
       const a = resolveAlias(raw);
-      if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) return undefined;
-      results.push(expandNamed(a.typeArguments[0]!, new Set(), 0));
-      params.push(expandNamed(a.typeArguments[1]!, new Set(), 0));
-      paramNodes.push(a.typeArguments[1]!);
+      // Two arguments, or three with a `Call` signature, which is the proxy's alone: the wire is `Result`/`Args`.
+      if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract') return undefined;
+      const [result, args, ...rest] = a.typeArguments ?? [];
+      if (result === undefined || args === undefined || rest.length > 1) return undefined;
+      results.push(expandNamed(result, new Set(), 0));
+      params.push(expandNamed(args, new Set(), 0));
+      paramNodes.push(args);
     }
     return { result: results.join(' | '), params: params.join(' | '), paramNodes };
   };

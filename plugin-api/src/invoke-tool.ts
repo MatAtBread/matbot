@@ -108,7 +108,7 @@ function reportUnattended(tool: string, gate: string, subject: string): void {
  */
 export type InvokeToolOptions =
   Pick<ToolContext, 'session' | 'signal'>
-  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId' | 'turnTools'>>;
+  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId' | 'turnTools' | 'appender'>>;
 
 /**
  * Programmatically invoke a tool by name, the same way the harness does — resolve it off the
@@ -150,6 +150,7 @@ export function invokeTool<K extends string, const P>(
     ...bindGate(machine.PermissionGate, tool, opts.prompt, { session: opts.session.id }, machine.tools),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
+    ...(opts.appender      !== undefined ? { appender:   opts.appender      } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
     ...(machine.files      !== undefined ? { files:      machine.files      } : {}),
   };
@@ -266,10 +267,11 @@ async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise
  *   - `signal` — combined with the call's own, so it can cancel the callee SOONER (a deadline for one
  *     call) and never later. Replacing it outright would let a call outlive the turn the user stopped.
  * Not `prompt`: it is the channel a callee's gates ask through, so supplying one answered them. Not
+ * `appender`: it says where this run's reports go, so a caller could read them or send them elsewhere. Not
  * `session`: some standing answers are per session (`tool_function.edit`'s "in this session"), so naming
  * another borrowed what the user granted there. Not `turnTools`: they resolve beside the registry, so a
  * caller could hand over an executor of its own and have the host give it a `ToolContext`. An allow-list
- * rather than leaving those three out, so that a field added to `InvokeToolOptions` later is not
+ * rather than leaving those four out, so that a field added to `InvokeToolOptions` later is not
  * overridable until someone decides it should be.
  */
 export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: AbortSignal }) => ToolProxy;

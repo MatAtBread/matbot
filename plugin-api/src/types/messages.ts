@@ -87,6 +87,8 @@ export interface MarkerData {
    *  not — the model's own text is already truncated in the transcript; a block telling it so would
    *  invite it to narrate the cut-off rather than continue past it. */
   'matbot-truncation': { reason: 'max-tokens' | 'stream-end'; raw?: string };
+  /** Opens a sub-turn's private transcript: how many turns below a conversation it is. See `subTurnDepth`. */
+  'matbot-sub-turn': { depth: number };
 }
 
 export type Marker<K extends string = string> = {

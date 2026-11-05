@@ -218,6 +218,36 @@ export async function ingestMedia(
 }
 
 /**
+ * How a model names an attachment: the message holding it and its place among that message's attachments.
+ * A model never sees a `file-ref`, which reaches it as bytes or as a note, so without this it has no way to
+ * point at what a person attached. Being an address within a session, it can only ever find that session's
+ * attachments, which is the question `ingestMedia` has to ask of a store id.
+ */
+export const attachmentId = (messageId: string, index: number): string => `${messageId}#${index}`;
+
+export function findAttachment(messages: readonly Message[], id: string): Extract<MessageContent, { type: 'file-ref' }> | undefined {
+  const at = id.lastIndexOf('#');
+  if (at < 0) return undefined;
+  const index = Number(id.slice(at + 1));
+  const refs  = messages.find(m => m.id === id.slice(0, at))?.content.filter(c => c.type === 'file-ref') ?? [];
+  return Number.isInteger(index) ? refs[index] as Extract<MessageContent, { type: 'file-ref' }> | undefined : undefined;
+}
+
+/**
+ * A message as the model is sent it: each `file-ref` preceded by the id naming it, and replaced by its inline
+ * arm where `refs` has one. Per block rather than per array, because a raced verdict folds durable blocks
+ * onto the user message mid-turn (see {@link resolveSessionMedia}).
+ */
+export function withAttachmentsShown(message: Message, refs: ReadonlyMap<string, MessageContent> | undefined): Message {
+  if (!message.content.some(c => c.type === 'file-ref')) return message;
+  let index = 0;
+  return { ...message, content: message.content.flatMap((c): MessageContent[] => c.type !== 'file-ref' ? [c] : [
+    { type: 'text', text: `[Attachment "${c.name}", id ${attachmentId(message.id, index++)}]` },
+    refs?.get(c.fileId) ?? c,
+  ]) };
+}
+
+/**
  * Turn-side resolution: which `file-ref`s get swapped for inline bytes on the outgoing copy. Returns
  * message-id → (file-id → the inline arm to stand in for that ref); a message with nothing resolvable
  * is absent from it, and so is a ref left outside the budget.
