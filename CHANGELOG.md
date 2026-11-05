@@ -173,8 +173,9 @@ a second host's needs.
   runs several, with tools or without, at the same time, and returns their results in order; one failing
   does not stop the others (`ok: false` beside the rest). At most 4 of a call's turns run at once, and turns
   with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
-  `messages`. A turn with tools has its spend recorded on the calling turn. The one-turn form is unchanged,
-  and its result gains `ok` and `usage`.
+  `messages`. A field beside `turns` (`tools: true`, a shared `context`) applies to every turn. A turn with
+  tools has its spend recorded on the calling turn. The one-turn form is unchanged, and its result gains
+  `ok`.
 - **`subTurnDepth`** and **`SUB_TURN_CREATOR`** — how many turns below a conversation a session's messages
   are, for a hook that has nothing to judge in a turn another turn started.
 - **`ToolContract<Result, Args, Call>`** — an optional third argument, the exact call signature `ToolProxy`

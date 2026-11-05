@@ -84,7 +84,7 @@ const tool = (name: string, execute: (input: unknown, ctx: ToolContext) => Async
 test('one turn without tools is one request, sent its context before its task, with its system prompt', async t => {
   const m = await machine(t, prompt => says(`answer to ${prompt}`));
   const r = await invoke(m, m.session, { prompt: 'the task', context: 'the brief', system: 'be terse' });
-  assert.deepEqual(r, { ok: true, text: 'answer to the task', usage: { inputTokens: 10, outputTokens: 1 } });
+  assert.deepEqual(r, { ok: true, text: 'answer to the task' }, 'spend is on the ledger, not in the result');
   assert.equal(m.seen.length, 1);
   const wire = JSON.stringify(m.seen[0]);
   assert.ok(wire.indexOf('the brief') < wire.indexOf('the task'));
@@ -99,6 +99,18 @@ test('turns come back in the order they were given, with and without tools in on
   assert.ok(r[0]!.ok && !('toolCalls' in r[0]!), JSON.stringify(r[0]));
   assert.equal(r[0]!.ok && r[0]!.text, 'answer to say');
   assert.deepEqual(r[1]!.ok && 'toolCalls' in r[1]! && r[1]!.toolCalls.map(c => c.name), ['noop']);
+});
+
+// How a model writes "all of these act": once, beside the turns. Refused, it read as "tools off" to anyone
+// grading the call, and was the one way models got the flag wrong.
+test('a field beside turns applies to every turn: context adds to each turn\'s own, the rest are defaults', { timeout: 15000 }, async t => {
+  const m = await machine(t, (prompt, messages) => answered(messages) ? says('done') : prompt === 'plain' ? says('said') : calls('noop'),
+    [tool('noop', async function* () { yield { type: 'result', value: 1 }; })]);
+  const r = await invoke(m, m.session, { tools: true, context: 'SHARED', turns: [{ prompt: 'a' }, { prompt: 'b', context: 'OWN' }, { prompt: 'plain', tools: false }] }) as SubTurnResult[];
+  assert.deepEqual(r.map(x => x.ok && 'toolCalls' in x), [true, true, false]);
+  const wire = (p: string): string => JSON.stringify(m.seen.find(messages => promptOf(messages) === p));
+  assert.ok(wire('a').includes('SHARED'));
+  assert.ok(wire('b').indexOf('SHARED') < wire('b').indexOf('OWN'), 'everyone\'s context first, then the turn\'s own');
 });
 
 test('the turns genuinely overlap, which neither could survive if they ran in order', { timeout: 15000 }, async t => {
@@ -142,7 +154,9 @@ test('a bad call is refused before any turn acts', { timeout: 15000 }, async t =
   const m = await machine(t, () => { called++; return says('x'); });
   const refused = async (input: unknown, why: RegExp): Promise<void> => { await assert.rejects(invoke(m, m.session, input), why); };
   await refused({}, /non-empty string "prompt"/);
-  await refused({ prompt: 'x', turns: [{ prompt: 'y' }] }, /not both: move "prompt"/);
+  await refused({ prompt: 'x', turns: [{ prompt: 'y' }] }, /each turn has its own "prompt"/);
+  await refused({ turns: [{ prompt: 'y' }], provder: 'p' }, /"provder" beside "turns" is not a turn field/);
+  await refused({ turns: [{ prompt: 'y', tools: true }], system: 's' }, /Turn 1 has "system", which only a turn without tools takes/);
   await refused({ turns: [] }, /at least one turn/);
   await refused({ turns: [{ prompt: 'a' }, 'b'] }, /Turn 2 is not a turn/);
   await refused({ turns: [{ prompt: 'a' }, { prompt: 'b', provder: 'p' }] }, /Turn 2 has an unknown field "provder"/);

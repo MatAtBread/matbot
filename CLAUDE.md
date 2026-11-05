@@ -1344,7 +1344,18 @@ is what `single_turn` always took, so `tool.single_turn({ prompt }).text` still 
 not keyed by a name the caller chose: against a free-keyed root DeepSeek produced no valid call at all, and a
 provider whose adapter strips `additionalProperties` (Gemini's must) was shown no turn schema. Positions are
 typed through `ToolContract`'s third slot, so `const [review, summary] = await tool.single_turn({ turns })`
-knows which has tool calls and which a transcript.
+knows which has tool calls and which a transcript. **A field beside `turns` applies to every turn** —
+`context` and `attach` add to each turn's own, the rest are defaults — because that is how a model writes
+"all of these act": Gemini put `tools: true` there unprompted, and refusing it was the one way the flag came
+out wrong. Code sets `tools` per turn, since that is what types each position.
+
+**What a model reads is kept small, and that is a design constraint, not polish.** The description and the
+contract text go out with every turn, and every field named in the result is spelt out in them. So the wire
+form is one flat turn type (the `system`/`transcript` exclusions are in the call signatures and the executor,
+not the wire), and a result is `{ ok, text, toolCalls?, messages? }` or `{ ok: false, error }`, without
+`usage`: spend is accounting, already on the calling turn's ledger. The description is the probed one, word
+for word: without its example neither DeepSeek nor Gemini delegated agentic work at all, and an example whose
+prompts read like commands had Gemini write turns as `bash` calls. Change it only with a probe.
 
 **No history is passed, because the caller selects.** The caller has already read the conversation, so what a
 turn needs goes in `context`, once, written by the one party who knows the whole task; replaying history would

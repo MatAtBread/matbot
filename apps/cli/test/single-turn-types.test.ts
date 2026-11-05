@@ -57,6 +57,13 @@ test('one turn is as it always was: its text, with no ok to check', async () => 
   `)), []);
 });
 
+test('a shared context and provider beside turns compile', async () => {
+  assert.deepEqual(await check(call(`
+    const [a] = await tool.single_turn({ context: 'The code is in /work.', provider: 'p', turns: [{ prompt: 'x', tools: true }] });
+    return a.ok ? a.toolCalls.length : 0;
+  `)), []);
+});
+
 test('tool work is not there on a turn without tools', async () => {
   const found = await check(call(`const [s] = await tool.single_turn({ turns: [{ prompt: 'x' }] }); if (s.ok) return s.toolCalls; return [];`));
   assert.match(found.join('\n'), /toolCalls/);
@@ -72,10 +79,9 @@ test('an unknown turn field is a compile error that names the field', async () =
   assert.match(found.join('\n'), /provder/);
 });
 
-test('system on a turn with tools, and transcript on one without, are compile errors', async () => {
-  assert.match((await check(call(`await tool.single_turn({ prompt: 'x', tools: true, system: 's' });`))).join('\n'), /system/);
-  assert.match((await check(call(`await tool.single_turn({ turns: [{ prompt: 'x', transcript: true }] });`))).join('\n'), /transcript/);
-});
+// `system` with tools, and `transcript` without, are NOT compile errors: a call the exact signature refuses
+// falls through to the catch-all, which is the flat wire form, kept flat because every field of it is spelt
+// out in the tool's description on every turn. The executor refuses both (single-turn.test.ts).
 
 test('reading a result in turns before checking ok is a compile error', async () => {
   const found = await check(call(`const [r] = await tool.single_turn({ turns: [{ prompt: 'x' }] }); return r.text;`));

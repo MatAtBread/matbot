@@ -1,8 +1,8 @@
-import type { Message, MatbotMachine, Principal, SessionAppender, ToolContext, Usage, UserContent } from '@matatbread/matbot-plugin-api';
+import type { Message, MatbotMachine, Principal, SessionAppender, ToolContext, UserContent } from '@matatbread/matbot-plugin-api';
 import { createMessage, defaultingPrompt, rejectingPrompt, SUB_TURN_CREATOR } from '@matatbread/matbot-plugin-api';
 import { recordUsage } from '@matatbread/matbot-plugin-api/host';
 import { drainEphemeralTurn } from './ephemeral-turn.js';
-import { addUsage, usageEntries } from './usage.js';
+import { usageEntries } from './usage.js';
 
 /** A conversation's own turn is depth 0, so this allows a sub-turn and a sub-turn that one starts, and no
  *  further. Each level multiplies the fan-out, which is why it is small. */
@@ -12,11 +12,9 @@ export interface SubTurnWork {
   ok:        true;
   text:      string;
   toolCalls: { name: string; input: unknown; isError: boolean }[];
-  thinking?: string;
-  usage:     Usage;
   messages?: Message[];
 }
-export interface SubTurnFailure { ok: false; error: string; usage: Usage }
+export interface SubTurnFailure { ok: false; error: string }
 
 // It reports by returning. An append from a sub-turn could only be a report to a conversation that is about
 // to get the result anyway, and pretending to accept one would tell the model it had been delivered.
@@ -26,43 +24,32 @@ const NOWHERE: SessionAppender = {
   },
 };
 
-function reduce(messages: readonly Message[], transcript: boolean, usage: Usage): SubTurnWork {
+function reduce(messages: readonly Message[], transcript: boolean): SubTurnWork {
   const results = new Map<string, boolean>();
   for (const m of messages) for (const c of m.content) if (c.type === 'tool-result') results.set(c.id, c.isError === true);
 
   const toolCalls: SubTurnWork['toolCalls'] = [];
-  const thought: string[] = [];
   let text = '';
   for (const m of messages) {
     const said: string[] = [];
     for (const c of m.content) {
       if      (c.type === 'tool-call') toolCalls.push({ name: c.name, input: c.input, isError: results.get(c.id) ?? true });
-      else if (c.type === 'thinking')  thought.push(c.thinking);
-      else if (c.type === 'reasoning') thought.push(c.reasoning);
       else if (c.type === 'text' && m.role === 'assistant') said.push(c.text);
     }
     if (said.length > 0) text = said.join('\n').trim();
   }
-  return {
-    ok: true, text, toolCalls, usage,
-    ...(thought.length > 0 ? { thinking: thought.join('\n') } : {}),
-    ...(transcript ? { messages: [...messages] } : {}),
-  };
+  return { ok: true, text, toolCalls, ...(transcript ? { messages: [...messages] } : {}) };
 }
 
 // A completion inside a sub-turn accrues to that turn's own head, which is thrown away with its transcript,
 // and its roll-up into the calling tool's scope names a head the calling session does not have, so the flush
 // drops it. Recording each entry again here is what puts the spend on the calling turn, attributed to the tool
-// call as any tool's completion is. `reported` stays on the entries: the total may span providers, where the
-// same key means different things.
-function chargeToCaller(messages: readonly Message[]): Usage {
-  let total: Usage = { inputTokens: 0, outputTokens: 0 };
+// call as any tool's completion is. It is not in the result: spend is accounting, read from the ledger, and is
+// of no use to a model in the conversation.
+function chargeToCaller(messages: readonly Message[]): void {
   for (const { provider, usage, startedAt, durationMs } of usageEntries(messages)) {
     recordUsage(provider, usage, startedAt !== undefined && durationMs !== undefined ? { startedAt, durationMs } : undefined);
-    const { reported: _reported, ...counters } = usage;
-    total = addUsage(total, counters);
   }
-  return total;
 }
 
 /** What a sub-turn's private transcript starts from: the caller's markers, because what a session's tools are
@@ -96,8 +83,7 @@ export async function runSubTurn(
   ctx:     ToolContext,
   signal:  AbortSignal,
 ): Promise<SubTurnWork | SubTurnFailure> {
-  const nothing: Usage = { inputTokens: 0, outputTokens: 0 };
-  if (signal.aborted) return { ok: false, error: 'Cancelled before it started.', usage: nothing };
+  if (signal.aborted) return { ok: false, error: 'Cancelled before it started.' };
   try {
     const seeded = new Set(seed.map(m => m.id));
     const { session, failure } = await drainEphemeralTurn(machine.ephemeral!({ appender: NOWHERE }), {
@@ -108,13 +94,13 @@ export async function runSubTurn(
       initialMessages: [...seed],
       content: turn.content,
     });
-    const own   = session?.messages.filter(m => !seeded.has(m.id)) ?? [];
-    const usage = chargeToCaller(own);
-    if (failure !== undefined) return { ok: false, error: failure, usage };
-    if (session === undefined) return { ok: false, error: 'The turn left no transcript.', usage };
-    return reduce(own, turn.transcript, usage);
+    const own = session?.messages.filter(m => !seeded.has(m.id)) ?? [];
+    chargeToCaller(own);
+    if (failure !== undefined) return { ok: false, error: failure };
+    if (session === undefined) return { ok: false, error: 'The turn left no transcript.' };
+    return reduce(own, turn.transcript);
   } catch (e) {
     // Refused media, chiefly, which is raised before the turn exists: its message names the file.
-    return { ok: false, error: e instanceof Error ? e.message : String(e), usage: nothing };
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 }

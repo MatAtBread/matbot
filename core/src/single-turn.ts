@@ -1,5 +1,5 @@
 import type {
-  Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MimeType, UserContent, FileStore, Usage,
+  Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
 import { collectBytes, encodeBase64, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 // The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
@@ -13,20 +13,31 @@ export { MAX_SUB_TURN_DEPTH, type SubTurnFailure, type SubTurnWork } from './sub
  *  limits, so a larger call takes longer rather than failing. Per call, not across the machine. */
 export const MAX_CONCURRENT_TURNS = 4;
 
-interface SubTurnBase {
-  prompt:    string;
-  context?:  string;
-  provider?: string;
-  attach?:   string[];
+/** A turn as a model and the validators see it. The typed call signatures below narrow it to
+ *  {@link LanguageTurn} | {@link AgentTurn}; the executor refuses the combinations they rule out. */
+export interface SubTurn {
+  prompt:      string;
+  context?:    string;
+  tools?:      boolean;
+  provider?:   string;
+  system?:     string;
+  attach?:     string[];
+  transcript?: boolean;
 }
 /** One request to a model, with no tools. */
-export interface LanguageTurn extends SubTurnBase { tools?: false; system?: string; transcript?: never }
+export interface LanguageTurn extends Omit<SubTurn, 'tools' | 'transcript'> { tools?: false; transcript?: never }
 /** A full agent turn within the calling session. */
-export interface AgentTurn extends SubTurnBase { tools: true; transcript?: boolean; system?: never }
-export type SubTurn = LanguageTurn | AgentTurn;
+export interface AgentTurn extends Omit<SubTurn, 'tools' | 'system'> { tools: true; system?: never }
 
-export interface SubTurnAnswer { ok: true; text: string; usage: Usage }
-export type SubTurnResult = SubTurnAnswer | SubTurnWork | SubTurnFailure;
+/** Several turns. A field beside `turns` applies to every turn: `context` and `attach` are added to each
+ *  turn's own, and the rest are defaults a turn can override. */
+export interface SubTurns extends Omit<SubTurn, 'prompt'> { turns: SubTurn[] }
+
+/** What a model is told a turn returns. Deliberately loose (`messages` is for code, which the call
+ *  signatures type exactly): every name here is spelt out in every tool description of every turn. */
+export interface SubTurnSucceeded { ok: true; text: string; toolCalls?: { name: string; input: unknown; isError: boolean }[]; messages?: unknown[] }
+export type SubTurnResult = SubTurnSucceeded | SubTurnFailure;
+export interface SubTurnAnswer { ok: true; text: string }
 
 /** What a turn returns when it succeeds, given the turn that asked: a tool turn's work, with `messages`
  *  exactly where it asked for a transcript. A turn whose `tools` is only known at run time may be either. */
@@ -38,16 +49,17 @@ export type SubTurnAnswered<T> =
 /** Without this, a generic `T` accepts a turn carrying a field it does not have, so a misspelt `provder`
  *  compiles and quietly runs on the default provider. (`system` with tools, and `transcript` without, are
  *  the union's own `never`s.) A plain key list, because a conditional on `T` here defeats the inference. */
-export type ExactSubTurn<T> = T & Record<Exclude<keyof T, keyof LanguageTurn | keyof AgentTurn>, never>;
+export type ExactSubTurn<T> = T & Record<Exclude<keyof T, keyof SubTurn>, never>;
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     single_turn:
-      | ToolContract<SubTurnAnswer | SubTurnWork, SubTurn, <const T extends SubTurn>(params: ExactSubTurn<T>) => Promise<SubTurnAnswered<T>>>
+      | ToolContract<SubTurnSucceeded, SubTurn, <const T extends LanguageTurn | AgentTurn>(params: ExactSubTurn<T>) => Promise<SubTurnAnswered<T>>>
       | ToolContract<
-          SubTurnResult[],
-          { turns: SubTurn[] },
-          <const T extends readonly SubTurn[]>(params: { turns: T & { [K in keyof T]: ExactSubTurn<T[K]> } }) =>
+          (SubTurnSucceeded | SubTurnFailure)[],
+          SubTurns,
+          // Code says `tools` on each turn, which is what types each position; a model may also say it once.
+          <const T extends readonly (LanguageTurn | AgentTurn)[]>(params: { turns: T & { [K in keyof T]: ExactSubTurn<T[K]> } } & Pick<SubTurn, 'context' | 'provider' | 'attach'>) =>
             Promise<{ -readonly [K in keyof T]: SubTurnAnswered<T[K]> | SubTurnFailure }>
         >;
   }
@@ -92,6 +104,21 @@ async function resolveAttachments(
 
 const COMMON = new Set(['prompt', 'context', 'provider', 'attach', 'tools']);
 
+// A field beside `turns` is for every turn, which is how a model writes `tools: true` once for all of them.
+// `context` and `attach` are each turn's as well as everyone's, so they add up; the rest are defaults a turn
+// overrides. Whatever the merge produces is validated as the turn, so it can refuse nothing a turn could not.
+function withShared(shared: Record<string, unknown>, turn: unknown): unknown {
+  if (turn === null || typeof turn !== 'object' || Array.isArray(turn) || Object.keys(shared).length === 0) return turn;
+  const own = turn as Record<string, unknown>;
+  const context = [shared['context'], own['context']].filter(c => c !== undefined && c !== '');
+  const attach  = [shared['attach'], own['attach']].filter(a => a !== undefined);
+  return {
+    ...shared, ...own,
+    ...(context.length > 0 ? { context: context.length === 1 ? context[0] : context.join('\n\n') } : {}),
+    ...(attach.length > 0 ? { attach: attach.length === 1 ? attach[0] : attach.flatMap(a => (Array.isArray(a) ? a : [a])) } : {}),
+  };
+}
+
 // Validators are optional and a minimal install has none, so this is the boundary for that install.
 function refusal(where: string, turn: unknown): string | undefined {
   if (turn === null || typeof turn !== 'object' || Array.isArray(turn)) return `${where} is not a turn: { "prompt": "…" }.`;
@@ -135,6 +162,23 @@ interface Prepared { provider: string; tools: boolean; transcript: boolean; syst
  * It lives in core because it is the model-facing surface of core services, and core is the one
  * cross-runtime home both the node app and the browser bundle register it from.
  */
+// Every word here is sent in every turn, so it says what decides the call and leaves the shape to the
+// contract text and the schema. Probed on DeepSeek and Gemini: without the example neither model delegated
+// agentic work at all, and an example whose prompt read like a command ("Run `npm run typecheck`" beside
+// "a task in words, not a tool call") had Gemini write turns as `bash` calls.
+export const DESCRIPTION =
+  'Run a prompt as a separate turn and return what it says. It does not see this conversation: put ' +
+  'everything it needs in `context`.\n' +
+  'Without `tools`: one request to a model, no tools. The cheapest way to summarise, classify, extract, ' +
+  'translate or critique, or to ask another model (`provider`).\n' +
+  'With `tools: true`: a full agent turn with your tools and permissions, which can act over many steps. For ' +
+  'a sub-task that has to act, or whose steps would flood this conversation.\n' +
+  '`turns: [...]` runs several at the same time and returns their results in order, each with `ok`. Use it ' +
+  'for independent pieces whose results you will combine; calls side by side run one after another. ' +
+  '"Review the code and run the typecheck, then report both":\n' +
+  '  { "turns": [ { "prompt": "Review src/ for bugs", "context": "Code in /work/app. Bullet list.", "tools": true },\n' +
+  '               { "prompt": "Run `npm run typecheck`", "context": "In /work/app. Count the errors.", "tools": true } ] }';
+
 export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<'single_turn'>> {
   const executor: ToolExecutor<ToolResultOf<'single_turn'>> = {
     async *execute(input: unknown, ctx: ToolContext) {
@@ -146,10 +190,12 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
       let raw: unknown[];
       const many = 'turns' in args;
       if (many) {
-        const stray = Object.keys(args).find(k => k !== 'turns');
-        if (stray !== undefined) { yield { type: 'error', message: `single_turn takes one turn's fields or "turns", not both: move "${stray}" into a turn.` }; return; }
-        if (!Array.isArray(args['turns']) || args['turns'].length === 0) { yield { type: 'error', message: '"turns" is a list of at least one turn: { "turns": [{ "prompt": "…" }] }.' }; return; }
-        raw = args['turns'];
+        const { turns, ...shared } = args;
+        if ('prompt' in shared) { yield { type: 'error', message: 'With "turns", each turn has its own "prompt": move it into a turn.' }; return; }
+        const stray = Object.keys(shared).find(k => !COMMON.has(k) && k !== 'system' && k !== 'transcript');
+        if (stray !== undefined) { yield { type: 'error', message: `"${stray}" beside "turns" is not a turn field. A field there applies to every turn: context, provider, attach, tools, system or transcript.` }; return; }
+        if (!Array.isArray(turns) || turns.length === 0) { yield { type: 'error', message: '"turns" is a list of at least one turn: { "turns": [{ "prompt": "…" }] }.' }; return; }
+        raw = turns.map(t => withShared(shared, t));
       } else {
         raw = [args];
       }
@@ -161,7 +207,7 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
         const where = many ? `Turn ${i + 1}` : 'The turn';
         const why = refusal(where, r);
         if (why !== undefined) { yield { type: 'error', message: why }; return; }
-        const turn = r as SubTurnBase & { tools?: boolean; system?: string; transcript?: boolean };
+        const turn = r as SubTurn;
         const provider = turn.provider ?? ctx.provider;
         if (!provider) { yield { type: 'error', message: `${where} needs a "provider": none was given and there is no current turn provider to fall back to.` }; return; }
         if (!machine.providers.has(provider)) {
@@ -225,18 +271,17 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
       // Stops every turn however this generator ends, a caller abandoning it included.
       const stop = new AbortController();
       const signal = AbortSignal.any([ctx.signal, stop.signal]);
-      const nothing: Usage = { inputTokens: 0, outputTokens: 0 };
       // A turn without tools records its spend ambiently, as any tool's completion does; a sub-turn's is
       // charged to the caller by `runSubTurn`.
       const runOne = async (p: Prepared): Promise<SubTurnResult> => {
         if (p.tools) return runSubTurn(machine, p, seed, principal!, ctx, signal);
         try {
-          const { text, usage: { reported: _reported, ...usage } } = await machine.singleTurn({
+          const { text } = await machine.singleTurn({
             provider: p.provider, prompt: p.content, signal, ...(p.system !== undefined ? { system: p.system } : {}),
           });
-          return { ok: true, text, usage };
+          return { ok: true, text };
         } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e), usage: nothing };
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
         }
       };
 
@@ -280,49 +325,22 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
 
   const turnProps = {
     prompt:     { type: 'string', description: 'The task.' },
-    context:    { type: 'string', description: 'Everything the task needs that is not in `prompt`: the turn cannot see this conversation. Locations, constraints, decisions and the form of the answer.' },
-    tools:      { type: 'boolean', description: 'true: a full agent turn that can act, with this turn\'s tools and permissions. Optional: off by default, one request to a model with no tools.' },
-    provider:   { type: 'string', description: 'A configured provider to run it on. Optional: defaults to the current turn\'s provider.' },
-    system:     { type: 'string', description: 'A system prompt, for a turn without tools. Optional.' },
-    attach:     { type: 'array', items: { type: 'string' }, description: 'Files to send with it: an attachment of this conversation by the id shown beside it, or (without tools) a stored file by name or id, e.g. ["chart.png"]. Optional.' },
-    transcript: { type: 'boolean', description: 'With tools: also return the turn\'s full `messages`. Optional: leave it off unless code will reduce them.' },
+    context:    { type: 'string', description: 'What it needs to know. It cannot see this conversation.' },
+    tools:      { type: 'boolean', description: 'true: a full agent turn that can act. Default: one request, no tools.' },
+    provider:   { type: 'string', description: 'A configured provider. Default: the current one.' },
+    system:     { type: 'string', description: 'A system prompt, without tools.' },
+    attach:     { type: 'array', items: { type: 'string' }, description: 'Files to send: an attachment id from this conversation, or (without tools) a stored file name.' },
+    transcript: { type: 'boolean', description: 'With tools: also return its messages, for code to reduce.' },
   };
 
   return {
     name: 'single_turn',
-    description:
-      'Run a prompt as a separate turn and get its answer back. The turn starts fresh: it does not see this ' +
-      'conversation, so `context` must say everything it needs (locations, constraints, decisions, the form of ' +
-      'the answer).\n\n' +
-      'Without `tools` it is one request to a model, with no tools and no side effects: the cheapest option, and ' +
-      'it sees only what you send. Use it for language work (summarising, classifying, extracting, translating, ' +
-      'rewriting, critiquing), or for a second opinion from a different model, named by `provider` (omit it for ' +
-      'the current one). `system` sets its system prompt.\n\n' +
-      'With `tools: true` it is a full agent turn within this conversation: it has this turn\'s tools and ' +
-      'permissions and CAN act (read and write files, run commands, call tools) over as many steps as it needs, ' +
-      'carrying the caller\'s risk. Use it for a sub-task that has to act, or whose intermediate steps would flood ' +
-      'this conversation.\n\n' +
-      'To run several turns at the same time, pass them as `turns`; the results come back in the same order. Use ' +
-      'it when a request holds pieces that are independent of each other and whose results are to be combined. ' +
-      'Pieces that depend on one another go in order, in separate calls. Calls sent side by side in one message ' +
-      'run one after another, so independent pieces go in one call.\n' +
-      '  { "prompt": "Summarise this changelog for users", "context": "<the changelog>" }\n' +
-      '  → { "ok": true, "text": "…", "usage": {…} }\n' +
-      '  { "turns": [ { "prompt": "Run the typecheck", "context": "In /work/app, with `npm run typecheck`. Answer with a count of the errors.", "tools": true },\n' +
-      '               { "prompt": "Summarise this changelog for users", "context": "<the changelog>" } ] }\n' +
-      '  → [ { "ok": true, "text": "…", "toolCalls": […], "usage": {…} }, { "ok": false, "error": "…", "usage": {…} } ]\n' +
-      `In \`turns\`, one failing does not stop the others, so check \`ok\`. At most ${MAX_CONCURRENT_TURNS} run at ` +
-      'once and the rest wait. A turn with tools is a whole agent with its own context, so separate those where ' +
-      'the work would otherwise be waiting (shell, HTTP, file scans), not merely for separate thoughts.\n\n' +
-      '`attach` sends files: an attachment of this conversation by the id shown beside it, or (without tools) a ' +
-      'stored file by name or id. An image in a format no endpoint decodes (HEIC, SVG, BMP, TIFF) is refused. ' +
-      '`transcript: true` adds a tool turn\'s full `messages`: ask for it only from code that will reduce it, ' +
-      'since a tool result stays in this conversation.',
+    description: DESCRIPTION,
     inputSchema: {
       type:       'object',
       properties: {
         ...turnProps,
-        turns: { type: 'array', minItems: 1, description: 'Several turns to run at the same time, instead of one. Results come back in this order.', items: { type: 'object', required: ['prompt'], properties: turnProps } },
+        turns: { type: 'array', minItems: 1, description: 'Several turns, run at the same time; results come back in this order. A field beside `turns` applies to every turn.', items: { type: 'object', required: ['prompt'], properties: turnProps } },
       },
     },
     executor,
