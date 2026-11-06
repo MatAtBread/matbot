@@ -1,10 +1,10 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import type { WrapperHandle } from '@matatbread/matbot-function-runner-node';
-import { wrapFsModule } from './wrap.js';
+import { wrapFsModule, type HideFromBody } from './wrap.js';
 import { decisionsFor } from './gate.js';
 
-export { wrapFsModule } from './wrap.js';
+export { wrapFsModule, type HideFromBody } from './wrap.js';
 export { admit, admitSync, decisionsFor, fsRequest, type Decisions } from './gate.js';
 export { caseInsensitiveAt, directoryOf, openAccesses, realResolve, type Access } from './paths.js';
 
@@ -42,9 +42,14 @@ export const plugin: MatbotPluginSpec = {
     // is not a host-tracked surface.
     for (const spec of ['node:fs', 'node:fs/promises'] as const) {
       services.mounted.observe({ key: 'ImportedModuleWrapper', replay: true }, m => {
+        const wrapper = m.ImportedModuleWrapper!;
+        // The runner's, since only it knows what code is a body's. A runner that does not offer it leaves
+        // node's own classes reachable by walking a prototype; everything else here holds without it.
+        const hide: HideFromBody | undefined = wrapper.hideFromBody === undefined
+          ? undefined : (owner, key, standIn) => wrapper.hideFromBody!(owner, key, standIn);
         handles.get(spec)?.remove();
-        handles.set(spec, m.ImportedModuleWrapper!(spec, async (mod, ctx) =>
-          wrapFsModule(mod as object, spec === 'node:fs' ? 'fs' : 'promises', await decisionsFor(ctx.caller), ctx.caller)));
+        handles.set(spec, wrapper.wrapModule(spec, async (mod, ctx) =>
+          wrapFsModule(mod as object, spec === 'node:fs' ? 'fs' : 'promises', await decisionsFor(ctx.caller), ctx.caller, hide)));
       });
     }
   },

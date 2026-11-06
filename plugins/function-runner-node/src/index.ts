@@ -2,6 +2,7 @@ import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
 import { createRunnerConfigTool, readRunnerConfig } from './config.js';
 import { sharedModuleWrapperRegistry } from './module-wrapper.js';
+import { hideFromBody } from './host-only.js';
 import type { ImportedModuleWrapper } from './module-wrapper.js';
 import type { FunctionRunner, ImportCaller, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 
@@ -55,7 +56,7 @@ function createRunner(services: MatbotMachine): { runner: FunctionRunner; wrappe
   );
   const registry = sharedModuleWrapperRegistry(runner.canonicalImport ?? (spec => spec));
   apply = registry.apply;
-  return { runner, wrapper: registry.service };
+  return { runner, wrapper: { wrapModule: registry.service.wrapModule, hideFromBody } };
 }
 
 /**

@@ -37,7 +37,6 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-function-runner-node": "workspace:^",
     "@types/node": "catalog:"
   },
   "peerDependencies": {
@@ -45,6 +44,7 @@
   },
   "devDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-function-runner-node": "workspace:^",
     "typescript": "catalog:"
   }
 }

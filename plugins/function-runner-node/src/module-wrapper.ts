@@ -63,7 +63,7 @@ export interface WrapperHandle {
  * through raw, so an installation pays only for what it mediates.
  *
  * Register through `services.mounted.observe({ key: 'ImportedModuleWrapper', replay: true }, m =>
- * m.ImportedModuleWrapper!(…))`, so the registration is made whichever loads first, replacing your own
+ * m.ImportedModuleWrapper!.wrapModule(…))`, so the registration is made whichever loads first, replacing your own
  * earlier one when the runner remounts (a reloaded runner keeps what was registered — see
  * {@link sharedModuleWrapperRegistry} — so registering again without removing would wrap twice), and
  * withdraw it in the registrant's `teardown()` with the handle's `remove()` — a wrapper is not a host-tracked surface (a tool, a hook), so `unloadPlugin` does not drop
@@ -73,7 +73,16 @@ export interface WrapperHandle {
  * invocations, which are short-lived.
  */
 export interface ImportedModuleWrapper {
-  (moduleName: string, wrap: ModuleWrap): WrapperHandle;
+  /** Wrap every later import of `moduleName` with `wrap`, until the handle is removed. */
+  wrapModule(moduleName: string, wrap: ModuleWrap): WrapperHandle;
+  /**
+   * Make `owner[key]` read as `standIn` to a function body, and as itself to everyone else. For what a wrapped
+   * module hands out that a body could walk to without naming it: a stream prototype's `constructor` is
+   * node's own class, which reaches a file unasked. Only the runner knows what code is a body's, which is why
+   * this is the runner's to offer. Optional: a runner that cannot tell leaves it out, and a wrapper relying on
+   * it says what is then left open.
+   */
+  hideFromBody?(owner: object, key: PropertyKey, standIn: unknown): void;
 }
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -84,17 +93,17 @@ declare module '@matatbread/matbot-plugin-api' {
 }
 
 /**
- * The registry behind {@link ImportedModuleWrapper}: the `service` a host registers under that key, and
- * the `apply` the runner calls at `import` time. `canonicalise` keys both sides the same way, so a wrapper
+ * The registry behind {@link ImportedModuleWrapper}: the `wrapModule` half of the service a runner registers
+ * under that key, and the `apply` the runner calls at `import` time. `canonicalise` keys both sides the same way, so a wrapper
  * registered for `node:os` also meets an `os` import.
  */
 export function createModuleWrapperRegistry(canonicalise: (spec: string) => string): {
-  service: ImportedModuleWrapper;
+  service: Pick<ImportedModuleWrapper, 'wrapModule'>;
   apply(specifier: string, module: unknown, caller: ImportCaller): Promise<unknown>;
 } {
   const wrappers = new Map<string, ModuleWrap[]>();
   return {
-    service(moduleName: string, wrap: ModuleWrap): WrapperHandle {
+    service: { wrapModule(moduleName: string, wrap: ModuleWrap): WrapperHandle {
       const key = canonicalise(moduleName);
       const list = wrappers.get(key) ?? [];
       list.push(wrap);
@@ -107,7 +116,7 @@ export function createModuleWrapperRegistry(canonicalise: (spec: string) => stri
           if (i >= 0) at.splice(i, 1);
         },
       };
-    },
+    } },
     async apply(specifier, module, caller) {
       const key = canonicalise(specifier);
       const list = wrappers.get(key);

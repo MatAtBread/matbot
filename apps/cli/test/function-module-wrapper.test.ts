@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { permitted } from '@matatbread/matbot-core';
 import { createVmFunctionRunner, createModuleWrapperRegistry, plugin as runnerPlugin } from '@matatbread/matbot-function-runner-node';
+import type { ImportedModuleWrapper } from '@matatbread/matbot-function-runner-node';
 import type { MatbotMachine } from '@matatbread/matbot-core';
 import type { ImportCaller } from '@matatbread/matbot-core';
 
@@ -21,9 +22,9 @@ test('the registry composes wrappers in order and canonicalises keys both ways',
 
   const seen: string[] = [];
   const callers: ImportCaller[] = [];
-  reg.service('node:os', (m, ctx) => { seen.push(ctx.specifier); callers.push(ctx.caller); return { ...(m as object), order: ['a'] } as never; });
+  reg.service.wrapModule('node:os', (m, ctx) => { seen.push(ctx.specifier); callers.push(ctx.caller); return { ...(m as object), order: ['a'] } as never; });
   // Registered under the bare spelling; must meet the same module as 'node:os'. Async wrapper is allowed.
-  const handle = reg.service('os', async (m) => { (m as { order: string[] }).order.push('b'); return m; });
+  const handle = reg.service.wrapModule('os', async (m) => { (m as { order: string[] }).order.push('b'); return m; });
 
   const out = await reg.apply('os', {}, caller) as { order: string[] };
   assert.deepEqual(out.order, ['a', 'b'], 'both wrappers applied, in registration order, async awaited');
@@ -41,7 +42,7 @@ test('the runner applies a registered wrapper to a granted module before returni
   const reg = createModuleWrapperRegistry(s => s);
   const runner = createVmFunctionRunner(2000, { wrapModule: reg.apply });
 
-  reg.service('node:os', (os, ctx) => new Proxy(os as object, {
+  reg.service.wrapModule('node:os', (os, ctx) => new Proxy(os as object, {
     get: (target, prop) => prop === 'hostname' ? () => `WRAPPED for ${ctx.caller.fn}` : (target as Record<PropertyKey, unknown>)[prop],
   }) as never);
 
@@ -63,10 +64,11 @@ test('a reloaded runner keeps the wrappers registered with the one it replaced',
       settings: () => ({ get: async () => undefined }),
     } as unknown as MatbotMachine;
     await runnerPlugin.setup!(services);
-    return registered as { FunctionRunner: { import(spec: string, caller: ImportCaller): Promise<unknown> }; ImportedModuleWrapper: (spec: string, wrap: (m: unknown) => unknown) => { remove(): void } };
+    return registered as { FunctionRunner: { import(spec: string, caller: ImportCaller): Promise<unknown> }; ImportedModuleWrapper: ImportedModuleWrapper };
   };
   const first = await setupOnce();
-  const handle = first.ImportedModuleWrapper('node:os', os => ({ ...(os as object), hostname: () => 'WRAPPED' }));
+  assert.equal(typeof first.ImportedModuleWrapper.hideFromBody, 'function', 'the node runner can tell a body, so it offers hiding');
+  const handle = first.ImportedModuleWrapper.wrapModule('node:os', os => ({ ...(os as object), hostname: () => 'WRAPPED' }));
   try {
     const second = await setupOnce();
     const os = await second.FunctionRunner.import('node:os', caller) as typeof import('node:os');

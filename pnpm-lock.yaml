@@ -347,13 +347,13 @@ importers:
 
   plugins/gate-fs-node:
     dependencies:
-      '@matatbread/matbot-function-runner-node':
-        specifier: workspace:^
-        version: link:../function-runner-node
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.19
     devDependencies:
+      '@matatbread/matbot-function-runner-node':
+        specifier: workspace:^
+        version: link:../function-runner-node
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api

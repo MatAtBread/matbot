@@ -1138,9 +1138,11 @@ stream is handed the guarded fs as its `fs` option so each open it ever makes is
 link is resolved again in the tick of the call. A `Proxy` also needs its reflective traps, or a descriptor hands
 back the raw function. Rewriting a built-in the gate reads is tampering, and stays open. Walking a prototype by
 hand to node's own class rewrites nothing, and is closed without a membrane by the same caller rule as the code
-builders: `hideFromBody` (function-runner-node) makes the prototype's `constructor` an accessor that a body reads
+builders: `ImportedModuleWrapper.hideFromBody` makes the prototype's `constructor` an accessor that a body reads
 as a refusing stand-in and host code reads as itself, so `s.constructor === fs.ReadStream` still holds outside a
-body. A descriptor is the body's only if it opened it through the gate, per invocation, because fd-based calls
+body. It is on the service, optional, rather than imported from the node runner, because what code is a body's is
+the runner's knowledge: another runner's bodies would look like host code to the node runner's check, and
+importing it would install the node runner's process-wide replacements into an install that chose another. A descriptor is the body's only if it opened it through the gate, per invocation, because fd-based calls
 name no path and any other number is the process's own. `docs/SECURITY.md` *Known gaps in a function body's gates*
 is the list, with what is ruled, what is not and what nobody has examined. Add a newly found gap there before
 deciding whether it is acceptable.

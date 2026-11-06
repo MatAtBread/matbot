@@ -263,13 +263,15 @@ a second host's needs.
   interposes on a module a body is granted, before the body sees it. The import gate decides *whether* a
   body may import `node:fs`; a wrapper decides *what it can do* with it, asking through the importing
   invocation's own gate (`ModuleWrapContext.caller`), so there is one policy and one store of standing
-  answers, not one per module. Registered per specifier and applied in order at `import`. A wrapper may be
+  answers, not one per module. The service is an object: `wrapModule(specifier, wrap)` registers per specifier,
+  applied in order at `import`. A wrapper may be
   async, and a specifier with no wrapper is handed through raw. The registry is the process's, so a
   reloaded runner keeps the wrappers registered with the one it replaced. A guardrail against an
   over-reaching body, not a sandbox: a granted package still gets the raw module, and bounding the process
-  is the deployment's (`docs/SECURITY.md`). `hideFromBody(owner, key, standIn)` makes a property a body would
-  reach by walking a prototype read as a stand-in to the body and as itself to host code, by the same caller
-  rule that refuses a body the function constructors.
+  is the deployment's (`docs/SECURITY.md`). Its optional `hideFromBody(owner, key, standIn)` makes a property a
+  body would reach by walking a prototype read as a stand-in to the body and as itself to host code, by the
+  same caller rule that refuses a body the function constructors. It is the runner's because only a runner knows
+  what code is a body's, so a wrapper reaches it through the service rather than by importing a runner.
 - **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
   gate: `tool_function.fs-read`, `tool_function.fs-write`, and `tool_function.fs-access` for permissions,
   owner and timestamps (`chmod`, `chown`, `utimes`), three independent questions, keyed `<function> <realpath>`, offering the
@@ -296,7 +298,8 @@ a second host's needs.
   it cannot be written through, and a stream's `constructor` is the guarded class.
 
   Node's own stream and watcher classes, reached by walking a prototype, and a file handle's own `chmod`, `chown`
-  and `utimes`, refuse a body; host code still sees node's own. A body may use only the descriptors it opened
+  and `utimes`, refuse a body, under a runner whose `ImportedModuleWrapper` offers `hideFromBody` (the node runner
+  does); host code still sees node's own. A body may use only the descriptors it opened
   through the gate, until it closes them, so trying numbers reaches none of the process's own files; `fchmod`,
   `fchown` and `futimes` ask `fs-access`, which a handle opened for reading no longer bypasses. A directory that
   holds a path under a standing denial cannot be renamed, and the error names the path and why.

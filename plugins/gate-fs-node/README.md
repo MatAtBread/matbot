@@ -81,7 +81,9 @@ was asked about, whatever the body then changes of its own:
   an assignment is refused. A stream's `constructor` is the guarded class, on a stream from a handle too.
 - **Node's own classes are refused to a body.** A stream's or a watcher's class reached by walking prototypes,
   and a file handle's own `chmod`, `chown` and `utimes`, refuse a body and say why. Host code still sees node's
-  own, so identity checks elsewhere in the process hold. (`util.inspect` names such a stream `Readable` rather
+  own, so identity checks elsewhere in the process hold. This needs a runner whose `ImportedModuleWrapper` offers
+  `hideFromBody`, since only the runner knows which code is a body's. The node runner does; under one that does
+  not, these stay reachable, and everything else here still holds. (`util.inspect` names such a stream `Readable` rather
   than `ReadStream`, being the one reader that looks past the property.)
 - **A descriptor is the body's only if it opened it.** `read`, `write`, `fstat` and the other fd-based calls,
   and a descriptor where a path goes, take only descriptors this invocation opened through the gate, until it
@@ -112,4 +114,5 @@ the OS user matbot runs as, a container, or node's `--permission` model (`--allo
 See `docs/SECURITY.md`.
 
 Needs a `FunctionRunner` that offers `ImportedModuleWrapper`; the node runner,
-`@matatbread/matbot-function-runner-node`, does. Without one it does nothing.
+`@matatbread/matbot-function-runner-node`, does. Without one it does nothing. It takes the service from whichever
+runner registered it, and depends on the node runner for types only.

@@ -2,7 +2,7 @@ import * as nodeFs from 'node:fs';
 import * as path from 'node:path';
 import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { ImportCaller } from '@matatbread/matbot-plugin-api';
-import { hideFromBody } from '@matatbread/matbot-function-runner-node';
+import type { ImportedModuleWrapper } from '@matatbread/matbot-function-runner-node';
 import { FD_CALLS, FLAG_OPTION, fsPathArgs, GLOB, globBases, openAccesses, PATHLESS, realResolve, refusal, toPath, type Access } from './paths.js';
 import { admit, admitSync, DENIED, standingDenial, type Decisions, type OpenedFile } from './gate.js';
 
@@ -55,11 +55,14 @@ function standIn(name: string, prototype: unknown, instead: string): unknown {
   return f;
 }
 
+/** The runner's way to hide a property from a body ({@link ImportedModuleWrapper.hideFromBody}). */
+export type HideFromBody = NonNullable<ImportedModuleWrapper['hideFromBody']>;
+
 /** The class of `obj` (a stream, a watcher), hidden from bodies on its prototype. Host code is unaffected. */
-function hideClassOf(proto: object, instead: string): void {
+function hideClassOf(hide: HideFromBody | undefined, proto: object, instead: string): void {
   const cls = (proto as { constructor?: unknown }).constructor;
-  if (typeof cls !== 'function') return;
-  hideFromBody(proto, 'constructor', standIn(cls.name, proto, instead));
+  if (hide === undefined || typeof cls !== 'function') return;
+  hide(proto, 'constructor', standIn(cls.name, proto, instead));
 }
 
 /** The metadata a handle's methods change, which `fs-access` decides. */
@@ -142,15 +145,15 @@ const gatedStreams = new WeakMap<Decisions, Map<StreamName, GatedStream>>();
  * because a stream's `constructor` is a name like any other: left alone, `new s.constructor(path)` is node's
  * own class, asking nobody.
  */
-function gatedStream(name: StreamName, st: Decisions, caller: ImportCaller): GatedStream {
+function gatedStream(name: StreamName, st: Decisions, caller: ImportCaller, hide: HideFromBody | undefined): GatedStream {
   let classes = gatedStreams.get(st);
   if (classes === undefined) gatedStreams.set(st, classes = new Map());
   const had = classes.get(name);
   if (had !== undefined) return had;
 
   const raw = (nodeFs as unknown as Record<string, new (...a: unknown[]) => unknown>)[name]!;
-  hideClassOf(raw.prototype as object, `Use fs.${name} or the call that makes one, from the module you imported.`);
-  const gatedFs = wrapFsModule(nodeFs, 'fs', st, caller);
+  hideClassOf(hide, raw.prototype as object, `Use fs.${name} or the call that makes one, from the module you imported.`);
+  const gatedFs = wrapFsModule(nodeFs, 'fs', st, caller, hide);
   const checkFd: CheckFd = fd => { if (!st.fds.has(fd)) throw notOpened(fd, name, caller.who); };
   const construct = (op: string, args: unknown[], newTarget: object): unknown => {
     const call = STREAMS[name](args, gatedFs, checkFd);
@@ -183,8 +186,11 @@ function gatedStream(name: StreamName, st: Decisions, caller: ImportCaller): Gat
  *
  * What it holds against is a body USING the module, with nothing shared changed: see "What it is, and is not"
  * in the README for the deliberate interference it does not.
+ *
+ * `hide` is the runner's {@link ImportedModuleWrapper.hideFromBody}. Without it node's own stream and watcher
+ * classes, and a file handle's own metadata methods, stay reachable to a body that walks a prototype.
  */
-export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', st: Decisions, caller: ImportCaller): T {
+export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', st: Decisions, caller: ImportCaller, hide?: HideFromBody): T {
   const withSync = kind === 'fs';
   const pathArgs = fsPathArgs(withSync);
   const globNames = new Set<string>(withSync ? GLOB : GLOB.filter(n => !n.endsWith('Sync')));
@@ -309,11 +315,11 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
     // A FileHandle is an EventEmitter that says when it closes, which its type declarations leave out.
     (h as unknown as NodeJS.EventEmitter).once('close', () => { if (st.fds.get(fd) === entry) st.fds.delete(fd); });
     const made = (name: StreamName, op: string) => (o?: object) =>
-      gatedStream(name, st, caller).make(op, [undefined, { ...o, fd: h }]);
+      gatedStream(name, st, caller, hide).make(op, [undefined, { ...o, fd: h }]);
     const proto = Object.getPrototypeOf(h) as Record<string, (...a: unknown[]) => unknown>;
     const metadata = Object.fromEntries(HANDLE_ACCESS.map(m => {
       const own = proto[m]!;
-      hideFromBody(proto, m, standIn(`FileHandle.${m}`, undefined, `Call handle.${m}(…) on the handle, which asks.`));
+      hide?.(proto, m, standIn(`FileHandle.${m}`, undefined, `Call handle.${m}(…) on the handle, which asks.`));
       return [m, { value: async (...a: unknown[]): Promise<unknown> => {
         await admit(st, caller, 'access', `FileHandle.${m}`, entry.real);
         return Reflect.apply(own, h, a);
@@ -348,7 +354,7 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
       const result = Reflect.apply(fn, mod, call.args);
       if (op === 'openSync') opened(result, call);
       // A watcher's class makes a watcher of anything, asking nobody; the one handed back is already watching.
-      if (op === 'watch' || op === 'watchFile') hideClassOf(Object.getPrototypeOf(result) as object, `Use fs.${op}, which asks.`);
+      if (op === 'watch' || op === 'watchFile') hideClassOf(hide, Object.getPrototypeOf(result) as object, `Use fs.${op}, which asks.`);
       return result;
     };
     if (op.endsWith('Sync') || RETURNS_SYNC.has(op)) return (...args: unknown[]): unknown => callSync(args);
@@ -384,18 +390,18 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
       if (typeof value === 'object' && value !== null) {
         // `node:fs` exposes its promises API here; wrap it with the promises surface, sharing this
         // invocation's answers.
-        if (prop === 'promises') return wrapFsModule(value as object, 'promises', st, caller);
+        if (prop === 'promises') return wrapFsModule(value as object, 'promises', st, caller, hide);
         // A module namespace's CommonJS view: the whole module again, and the spelling
         // `(await import('node:fs')).default` reaches for by habit.
-        if (prop === 'default') return wrapFsModule(value as object, kind, st, caller);
+        if (prop === 'default') return wrapFsModule(value as object, kind, st, caller, hide);
       }
       return value;
     }
     if (withSync) {
       const cls = STREAM_NAMES.get(prop);
-      if (cls !== undefined) return gatedStream(cls, st, caller).cls;
+      if (cls !== undefined) return gatedStream(cls, st, caller, hide).cls;
       const opens = STREAM_CALLS.get(prop);
-      if (opens !== undefined) return (...args: unknown[]) => gatedStream(opens, st, caller).make(prop, args);
+      if (opens !== undefined) return (...args: unknown[]) => gatedStream(opens, st, caller, hide).make(prop, args);
     }
     const prepare = prepareFor(prop);
     if (prepare !== undefined) return guard(value as (...a: unknown[]) => unknown, prop, prepare);

@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS, installSettingsDefaults, makePluginSettings, permitted, refused } from '@matatbread/matbot-core';
 import type { FormField, ImportCaller, PermissionDecision, PermissionRequest, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
 import { caseInsensitiveAt, decisionsFor, fsRequest, openAccesses, realResolve, wrapFsModule } from '@matatbread/matbot-gate-fs-node';
-import { createModuleWrapperRegistry, createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
+import { createModuleWrapperRegistry, createVmFunctionRunner, hideFromBody } from '@matatbread/matbot-function-runner-node';
 
 const NOWHERE = {};
 
@@ -40,8 +40,9 @@ function fakeCaller(decide: (r: PermissionRequest) => PermissionDecision, standi
   return { caller, asked, snapshots: () => snapshots };
 }
 
+// As the node runner's ImportedModuleWrapper hands it to gate-fs-node.
 async function guarded(caller: ImportCaller): Promise<typeof import('node:fs')> {
-  return wrapFsModule(realFs, 'fs', await decisionsFor(caller), caller) as typeof import('node:fs');
+  return wrapFsModule(realFs, 'fs', await decisionsFor(caller), caller, hideFromBody) as typeof import('node:fs');
 }
 
 test('an async read is asked about by realpath, with the file and its directory, each for this function and for any, on offer', async () => {
@@ -355,7 +356,7 @@ test('through the runner, a body\'s `import(\'fs\')` is guarded whichever way it
   const reg = createModuleWrapperRegistry(s => s.startsWith('node:') ? s : `node:${s}`);
   const runner = createVmFunctionRunner(2000, { wrapModule: reg.apply });
   for (const spec of ['node:fs', 'node:fs/promises'] as const) {
-    reg.service(spec, async (mod, ctx) => wrapFsModule(mod as object, spec === 'node:fs' ? 'fs' : 'promises', await decisionsFor(ctx.caller), ctx.caller));
+    reg.service.wrapModule(spec, async (mod, ctx) => wrapFsModule(mod as object, spec === 'node:fs' ? 'fs' : 'promises', await decisionsFor(ctx.caller), ctx.caller));
   }
   const { caller } = fakeCaller(() => refused('user'));
   const env = path.join(dir, '.env');
@@ -449,8 +450,8 @@ const readOnly = (caller: ImportCaller): ImportCaller => ({
 async function bothSurfaces(caller: ImportCaller) {
   const st = await decisionsFor(caller);
   return {
-    fs:  wrapFsModule(realFs, 'fs', st, caller) as typeof import('node:fs'),
-    fsp: wrapFsModule(await import('node:fs/promises'), 'promises', st, caller) as typeof import('node:fs/promises'),
+    fs:  wrapFsModule(realFs, 'fs', st, caller, hideFromBody) as typeof import('node:fs'),
+    fsp: wrapFsModule(await import('node:fs/promises'), 'promises', st, caller, hideFromBody) as typeof import('node:fs/promises'),
   };
 }
 
@@ -856,7 +857,7 @@ test('guarded streams and handles still do their job', async () => {
 test('through the runner, a body cannot repoint a stream', async () => {
   const reg = createModuleWrapperRegistry(s => s.startsWith('node:') ? s : `node:${s}`);
   const runner = createVmFunctionRunner(2000, { wrapModule: reg.apply });
-  reg.service('node:fs', async (mod, ctx) => wrapFsModule(mod as object, 'fs', await decisionsFor(ctx.caller), ctx.caller));
+  reg.service.wrapModule('node:fs', async (mod, ctx) => wrapFsModule(mod as object, 'fs', await decisionsFor(ctx.caller), ctx.caller));
   const { caller } = onlyA();
   const ns = await runner.import!('fs', caller) as typeof import('node:fs');
   const s = ns.createReadStream(path.join(dir, 'src', 'a.ts'));
@@ -925,7 +926,7 @@ test('a body may use only the descriptors it opened through the gate', async () 
     assert.throws(() => fs.fstatSync(own), notOpened, 'and not once it is closed, since the number is reused');
 
     const st = await decisionsFor(caller);
-    const fsp = wrapFsModule(await import('node:fs/promises'), 'promises', st, caller) as typeof import('node:fs/promises');
+    const fsp = wrapFsModule(await import('node:fs/promises'), 'promises', st, caller, hideFromBody) as typeof import('node:fs/promises');
     const h = await fsp.open(a);
     const viaHandle = h.fd;
     assert.equal(fs.fstatSync(viaHandle).isFile(), true, 'a handle\'s');
@@ -1006,4 +1007,18 @@ test('a directory holding a denied path cannot be renamed out from under the den
     realFs.rmSync(box, { recursive: true, force: true });
     realFs.rmSync(path.join(dir, 'moved'), { recursive: true, force: true });
   }
+});
+
+test('a runner that cannot hide anything from a body leaves node\'s classes reachable, and the rest still holds', async () => {
+  const { caller } = onlyA();
+  const st = await decisionsFor(caller);
+  const fs = wrapFsModule(realFs, 'fs', st, caller) as typeof import('node:fs');
+  const hostFd = realFs.openSync(path.join(dir, '.env'), 'r');
+  try {
+    assert.throws(() => fs.readSync(hostFd, Buffer.alloc(8)), /not opened by/, 'the descriptor table does not need the runner');
+    const s = fs.createReadStream(path.join(dir, 'src', 'a.ts'));
+    assert.equal(Object.getPrototypeOf(Object.getPrototypeOf(s)).constructor, realFs.ReadStream,
+      'without hideFromBody, node\'s own class is what a prototype walk finds, as the README says');
+    await drain(s);
+  } finally { realFs.closeSync(hostFd); }
 });

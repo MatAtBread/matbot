@@ -229,7 +229,8 @@ replace it.
   rewritten after the call, a stream's `path` or `flags` assigned, `Utf8Stream.reopen`, a symlink repointed
   while a question is open. Those use the module as handed and rewrite nothing shared, so they count as
   reaching past the gate, and it holds against them. So does walking a prototype to node's own stream or
-  watcher class, which is refused to a body, and a descriptor is usable only if the body opened it through the
+  watcher class, which is refused to a body under a runner that can tell a body's code apart (the node runner
+  can), and a descriptor is usable only if the body opened it through the
   gate. A directory holding a denied path cannot be renamed. What still gets past it is listed below, under
   *Known gaps*. Bounding what the *process* may touch is still the deployment's (the user
   matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/`--allow-fs-write` cap
