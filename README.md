@@ -118,6 +118,7 @@ skills, workspace files, and provider config all persist in browser storage acro
 - Principal carrier: ambient identity threaded through every layer
 - Vault: secret resolution with `${NAME}` placeholders
 - Permission gate: privileged operations ask first, and can remember the answer ([DEFAULT-GATE.md](docs/DEFAULT-GATE.md))
+- `single_turn`: run a prompt apart from the conversation and get back what it said. Without tools it is one request to a model, for classification or summarization. With `tools: true` it is a full agent turn in the same session, with its tools and permissions, returning its text and the tool calls it made. `turns: [...]` runs several of either kind at the same time and returns their results in order
 - Basic implementations for storage (files) and UI (CLI) are created by "apps" like the CLI.
 
 ### Plugins
@@ -293,6 +294,8 @@ that type-checks is a tool whose calls resolve to the shapes the model expected.
 Tools created by `tool_function` and `skill_compiler` are MUCH more efficient in terms of tokens because
 - The cost of generating the code is done once, up-front, and re-used for free. Even if a tool uses a
 `single_turn` tool for LLM classification or summarization, it does so in a low-context, low cost environment.
+The same holds when it hands a step to an agent with tools (`tools: true`), or fans several out at once
+(`turns`): each one starts from just the context the code gives it, not the whole conversation.
 Your compiled skills and functional tools don't have to be dumb!
 - Tools which render large volumes of data and aggregate it for presentation to another tool
 _doesn't require that the LLM tokenises all your data_. This is huge win when your tools are
