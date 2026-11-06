@@ -1,32 +1,15 @@
-import { readFile, writeFile, access } from 'node:fs/promises';
 import { spawn }                        from 'node:child_process';
 import path                             from 'node:path';
 import process                          from 'node:process';
 import type { MatbotPlugin }            from '@matatbread/matbot-core';
-import { backfillPluginDescription }    from './plugin-description.js';
-import { declaredDependencies, isPackageName, writeInstallRecord } from '@matatbread/matbot-tool-plugin';
+import { backfillPluginDescription }    from '@matatbread/matbot-host-node';
+import { declaredDependencies, isPackageName, writeInstallRecord } from './plugins/install-record.js';
+import { addFlags, detectPackageManager } from './plugins/package-manager.js';
+import { addPluginEntry }  from './plugins/config-entries.js';
+import { findUp }          from './config.js';
+import { yellow }          from './terminal.js';
 
-// ── Package manager detection ───────────────────────��─────────────────────────
-
-async function detectPackageManager(dir: string): Promise<string> {
-  for (const [pm, lockfile] of [['pnpm', 'pnpm-lock.yaml'], ['yarn', 'yarn.lock'], ['bun', 'bun.lockb']] as const) {
-    try { await access(path.join(dir, lockfile)); return pm; } catch { /* not present */ }
-  }
-  return 'npm';
-}
-
-/** Extra `add` flags needed to install into `dir` itself.
- *
- *  `pnpm add` refuses at a workspace root (ERR_PNPM_ADDING_TO_ROOT) unless the root is named
- *  explicitly, on the assumption that a member package was meant. Here it never was: `dir` is where
- *  matbot.yaml lives, and a plugin is that project's dependency — there is no member package it could
- *  belong to instead. */
-async function addFlags(pm: string, dir: string): Promise<string[]> {
-  if (pm !== 'pnpm') return [];
-  try { await access(path.join(dir, 'pnpm-workspace.yaml')); return ['-w']; } catch { return []; }
-}
-
-// ── Shell runner ───────────────────────��───────────────────────────────���──────
+// ── Shell runner ─────────────────────────────────────────────────────────────
 
 function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -38,37 +21,7 @@ function runCommand(cmd: string, args: string[], cwd: string): Promise<void> {
   });
 }
 
-// ── matbot.yaml updater ──────────────────────────��────────────────────────────
-
-async function addToPluginsList(configPath: string, specifier: string): Promise<void> {
-  const text = await readFile(configPath, 'utf8');
-
-  // Check if this specifier is already listed
-  if (text.includes(`- ${specifier}`)) {
-    process.stderr.write(`"${specifier}" is already in plugins list.\n`);
-    return;
-  }
-
-  let updated: string;
-  const pluginsBlockMatch = text.match(/^(plugins:\s*\n(?:[ \t]+-[^\n]*\n)*)/m);
-
-  if (pluginsBlockMatch) {
-    const insertAt = pluginsBlockMatch.index! + pluginsBlockMatch[0].length;
-    updated = text.slice(0, insertAt) + `  - ${specifier}\n` + text.slice(insertAt);
-  } else {
-    // Insert a new plugins: section before providers: (or at the top)
-    const providersIdx = text.indexOf('\nproviders:');
-    if (providersIdx !== -1) {
-      updated = text.slice(0, providersIdx) + `\nplugins:\n  - ${specifier}\n` + text.slice(providersIdx);
-    } else {
-      updated = `plugins:\n  - ${specifier}\n\n` + text;
-    }
-  }
-
-  await writeFile(configPath, updated, 'utf8');
-}
-
-// ── Main install flow ─────────────────────���─────────────────────────────────��─
+// ── Main install flow ────────────────────────────────────────────────────────
 
 export async function installPlugin(specifier: string, configPath: string): Promise<void> {
   const projectDir = path.dirname(configPath);
@@ -108,12 +61,30 @@ export async function installPlugin(specifier: string, configPath: string): Prom
   }
 
   // 3. Update matbot.yaml
-  await addToPluginsList(configPath, specifier);
-  process.stderr.write(`Added "${specifier}" to plugins in ${path.basename(configPath)}\n`);
+  if (await addPluginEntry(configPath, specifier)) {
+    process.stderr.write(`Added "${specifier}" to plugins in ${path.basename(configPath)}\n`);
+  } else {
+    process.stderr.write(`"${specifier}" is already in plugins list.\n`);
+  }
   // The same record `plugin add` writes, so `plugin remove` can offer to take back what this installed.
   if (dependency !== undefined) await writeInstallRecord(path.join(projectDir, '.plugins'), { entry: specifier, dependency });
 
   // Secrets a plugin needs are gathered lazily on first use: the plugin raises
   // MissingSecretError naming the key, and the model supplies it via `plugin store-key`.
   process.stderr.write(`\nPlugin installed.\n`);
+}
+
+/** `matbot install <package> [--config <path>]`. */
+export async function installCommand(args: readonly string[]): Promise<void> {
+  const specifier = args.find(a => !a.startsWith('-'));
+  if (!specifier) {
+    process.stderr.write(yellow('Usage: matbot install <package>\n'));
+    process.exit(1);
+  }
+  const configFlag = args.indexOf('--config');
+  const configArg  = configFlag !== -1 ? args[configFlag + 1] : undefined;
+  const configPath = configArg !== undefined
+    ? path.resolve(configArg)
+    : (await findUp('matbot.yaml')) ?? path.resolve('matbot.yaml');
+  await installPlugin(specifier, configPath);
 }

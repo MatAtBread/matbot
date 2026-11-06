@@ -168,13 +168,13 @@ another tenant's tools exist), that is the line at which you move to **process-p
 `register()`-swappable — `unifyServices` throws on `services.loadPlugin = …`, and `register` won't
 accept them ([plugin-api/src/plugin.ts](../plugin-api/src/plugin.ts)). A plugin cannot
 override them. Their *implementation* lives in the app entry, not core
-([apps/cli/src/index.ts](../apps/cli/src/index.ts);
+([apps/cli/src/boot.ts](../apps/cli/src/boot.ts);
 [apps/web-bundle/src/bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)).
 
 But that openness is not a hole, because **`services.loadPlugin` is not reachable by the model** — it
 is plugin-code-facing. The model reaches it only *through a registered tool*
 ([runner.ts](../core/src/runner.ts) wraps it onto `ToolContext`; the built-in `plugin`
-tool calls `ctx.loadPlugin` in [tool-plugin/src/tools/plugin.ts](../plugins/tool-plugin/src/tools/plugin.ts)).
+tool calls `ctx.loadPlugin` in [apps/cli/src/plugins/tools/plugin.ts](../apps/cli/src/plugins/tools/plugin.ts)).
 So the real question is not "is the seam open?" but **"which registered tools reach it?"** In a stock
 config that is the always-present built-in `plugin` tool — which is exactly why Step 1 shadows it. The
 closure rests on one auditable assumption you now control: no manifest-listed plugin re-exposes
@@ -211,8 +211,8 @@ plugin-visibility ceiling is structural.
   nested load from inside `setup()` goes through `loadPlugins → registerPlugin → setupPlugin`
   sequentially; `registerPlugin` throws on duplicate names and the global `state` mutations don't
   interleave.
-- **Shadow, not omit.** The built-in `plugin` tool is hardcoded into `createBuiltinTools()`
-  ([tool-plugin/src/index.ts](../plugins/tool-plugin/src/index.ts)) and seeded before any config
+- **Shadow, not omit.** The built-in `plugin` tool is hardcoded into the CLI's `builtinTools`
+  ([apps/cli/src/boot.ts](../apps/cli/src/boot.ts)) and seeded before any config
   plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
   `resolveToolCollision` ([registry.ts](../core/src/registry.ts)), which declares the
   `tools.overwrite` gate with `fallback: true`: **non-interactive** (boot / HTTP installs, no
@@ -220,7 +220,7 @@ plugin-visibility ceiling is structural.
   (the default one: Deny / Allow / Always-this-subject / Always-every). The registry `Map` is keyed by
   name, so the later `register()` replaces the earlier entry. An install can skip the prompt for
   exactly the names it means to shadow by listing them under the policy plugin's own settings —
-  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'` (see
+  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'.'*'` (see
   [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your tool
   wins, without blanket-overwriting collisions you would rather hear about.
 - **Shadow, not stack.** Because the `Map` overwrites, the built-in is *gone*, not suspended — if your

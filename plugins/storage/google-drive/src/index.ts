@@ -68,8 +68,8 @@ let syncedProviders: { services: MatbotMachine; set: DriveProviderSet } | undefi
  * default) was active. It then re-points the vault at Drive and restores the Drive-synced plugin set.
  *
  * It deliberately does NOT declare `storageBackend.open`: that boot pre-scan hook gets no config and
- * cannot show UI, so activation always runs through `setup()` (i.e. `plugin add`, which the browser
- * plugin then replays on every boot). On node there is no `document`, so it throws and the host keeps
+ * cannot show UI, so activation always runs through `setup()` (i.e. `plugin add`, which the web bundle
+ * then loads again on every boot). On node there is no `document`, so it throws and the host keeps
  * its filesystem backend.
  */
 export const plugin: MatbotPluginSpec = {

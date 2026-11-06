@@ -235,12 +235,12 @@ export function createSkillCompilerPlugin(): MatbotPluginSpec {
           };
           const action = inp.action ?? 'compile';
 
-          if (!services.configPath) {
-            yield { type: 'error', message: 'No configPath available; cannot locate the project root on disk.' };
+          if (services.projectDir === undefined) {
+            yield { type: 'error', message: 'The host resolves plugins from no directory, so there is nowhere to write a compiled plugin it could load.' };
             return;
           }
-          const { dirname, join } = await import('node:path');
-          const projectRoot = dirname(services.configPath);
+          const { join } = await import('node:path');
+          const projectRoot = services.projectDir;
           const compiledDir = await compiledPluginsDir(services);
 
           // ── inspect: read back the current compiled version (source + file listing), no mutation ──

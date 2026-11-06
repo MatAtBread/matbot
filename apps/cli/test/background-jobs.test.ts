@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { runAs, installPrincipalCarrier, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { AppendMessage, MatbotMachine, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs-node/src/channel.ts';
 import { plugin as jobsPlugin, superviseChild } from '../../../plugins/background-jobs-node/src/index.ts';
 
@@ -82,7 +82,7 @@ function memStore<T extends { id: string; version: string }>(seed: T[] = []): { 
   return { store, docs };
 }
 
-test('it reports to the conversation it was made from, and lists the old plugin\'s schedules to be moved', { timeout: 20000 }, async () => {
+test('it reports to the conversation it was made from, and warns of the old plugin\'s schedules', { timeout: 20000 }, async () => {
   const hourFromNow = new Date(Date.now() + 3_600_000).toISOString();
   const jobs    = memStore<{ id: string; version: string; session?: string }>();
   const legacy  = memStore([{ id: 'old1', version: 'v1', prompt: 'Summarise the news', nextRun: hourFromNow, intervalMs: 86_400_000, output: 'news.md' }]);
@@ -91,7 +91,6 @@ test('it reports to the conversation it was made from, and lists the old plugin\
 
   const tools = new Map<string, Tool>();
   const services = {
-    configPath:  '/nowhere/matbot.yaml',
     isSubAgent:  () => false,
     sessions:    sessions.store,
     createStore: (ns: string) => (ns === 'schedules' ? legacy.store : jobs.store),
@@ -102,7 +101,13 @@ test('it reports to the conversation it was made from, and lists the old plugin\
   const warnings: string[] = [];
   const warn = console.warn;
   console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
-  try { await jobsPlugin.setup!(services); } finally { console.warn = warn; }
+  // The CLI publishes the config it booted with; the plugin starts jobs as copies of it, so it needs one.
+  const config = process.env['MATBOT_CONFIG'];
+  process.env['MATBOT_CONFIG'] = '/nowhere/matbot.yaml';
+  try { await jobsPlugin.setup!(services); } finally {
+    console.warn = warn;
+    if (config === undefined) delete process.env['MATBOT_CONFIG']; else process.env['MATBOT_CONFIG'] = config;
+  }
   for (const t of jobsPlugin.tools ?? []) tools.set(t.name, t as Tool);
 
   try {
@@ -132,16 +137,10 @@ test('it reports to the conversation it was made from, and lists the old plugin\
     const named = await call('background_job', { prompt: 'p', at: '2h', session: 'nope' });
     assert.match(named.find(e => e.type === 'error')?.message ?? '', /Session "nope" not found/);
 
-    // The old plugin's schedule is listed, marked, never run — and can be moved: create, then cancel.
+    // The old plugin's schedule is not one of this plugin's jobs, and is left where it is.
     const listed = value(await call('background_job_action', { action: 'list' })) as unknown as Array<Record<string, unknown>>;
-    assert.deepEqual(listed.find(r => r['id'] === 'old1'),
-      { id: 'old1', version: 'v1', prompt: 'Summarise the news', nextRun: hourFromNow, intervalMs: 86_400_000, output: 'news.md', legacy: true });
-
-    const suspend = await call('background_job_action', { action: 'suspend', id: 'old1' });
-    assert.match(suspend.find(e => e.type === 'error')?.message ?? '', /legacy schedule/);
-
-    assert.deepEqual(value(await call('background_job_action', { action: 'cancel', id: 'old1' })), { cancelled: true, id: 'old1', legacy: true });
-    assert.equal(legacy.docs.has('old1'), false);
+    assert.equal(listed.find(r => r['id'] === 'old1'), undefined);
+    assert.equal(legacy.docs.has('old1'), true);
   } finally {
     await jobsPlugin.teardown?.();
   }

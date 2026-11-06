@@ -1,12 +1,19 @@
 import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
-import { dirname } from 'node:path';
 import { FUNCTION_SYNC_LIMIT_MS, createVmFunctionRunner } from './runner.js';
 import { createRunnerConfigTool, readRunnerConfig } from './config.js';
-import type { FunctionRunner, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import { sharedModuleWrapperRegistry } from './module-wrapper.js';
+import { hideFromBody } from './host-only.js';
+import type { ImportedModuleWrapper } from './module-wrapper.js';
+import type { FunctionRunner, ImportCaller, MatbotMachine, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 
 export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS, type ReadRunnerSettings, type VmRunSettings } from './runner.js';
 export { transformBody, ROUTE } from './body-transform.js';
-export { createRunnerConfigTool, IMPORTS_KEY, TIMEOUT_KEY, type RunnerConfig } from './config.js';
+export { hideFromBody } from './host-only.js';
+export { createRunnerConfigTool, TIMEOUT_KEY, type RunnerConfig } from './config.js';
+export {
+  createModuleWrapperRegistry, sharedModuleWrapperRegistry,
+  type ImportedModuleWrapper, type ModuleWrap, type ModuleWrapContext, type WrapperHandle,
+} from './module-wrapper.js';
 
 /**
  * The runner this plugin registers: one object for the process, whose settings are READ per invocation
@@ -20,7 +27,7 @@ export { createRunnerConfigTool, IMPORTS_KEY, TIMEOUT_KEY, type RunnerConfig } f
  * disagree about what a value means — and a change, from the tool, another process or a hand-edited
  * document, applies from the next invocation with nothing rebuilt.
  */
-function createRunner(services: MatbotMachine): FunctionRunner {
+function createRunner(services: MatbotMachine): { runner: FunctionRunner; wrapper: ImportedModuleWrapper } {
   // Read per invocation, so a bad value would otherwise be reported on every call.
   const warned = new Set<string>();
   const warnOnce = (m: string): void => {
@@ -28,17 +35,28 @@ function createRunner(services: MatbotMachine): FunctionRunner {
     warned.add(m);
     console.warn(`[matbot] function-runner-node: ${m}`);
   };
-  // The directory holding matbot.yaml, named when a package a body asks for is not installed: it is where
-  // the user would install it. Absent in a host that has no config file.
-  const projectDir = services.configPath !== undefined ? dirname(services.configPath) : undefined;
-  return createVmFunctionRunner(FUNCTION_SYNC_LIMIT_MS, projectDir !== undefined ? { projectDir } : {}, async () => {
-    const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
-    for (const p of problems) warnOnce(p);
-    if (timeoutMs === 0) {
-      warnOnce('timeout_ms is 0 — tool_function bodies run unbounded, and one that loops without awaiting will freeze this process. The withheld globals and the import gate are unaffected.');
-    }
-    return { timeoutMs, permit };
-  });
+  // Named when a package a body asks for is not installed: it is where the user would install it. Absent
+  // in a host that resolves packages from no directory of its own.
+  const projectDir = services.projectDir;
+  // The ImportedModuleWrapper registry and the runner reference each other — the runner wraps through
+  // `apply`, the registry keys on the runner's `canonicalImport` — so `apply` is a closure the registry
+  // fills once both exist. Empty until then, which is only during construction.
+  let apply: (spec: string, module: unknown, caller: ImportCaller) => unknown = (_spec, module) => module;
+  const runner = createVmFunctionRunner(
+    FUNCTION_SYNC_LIMIT_MS,
+    { ...(projectDir !== undefined ? { projectDir } : {}), wrapModule: (spec, module, caller) => apply(spec, module, caller) },
+    async () => {
+      const { timeoutMs, problems } = await readRunnerConfig(services.settings(), FUNCTION_SYNC_LIMIT_MS);
+      for (const p of problems) warnOnce(p);
+      if (timeoutMs === 0) {
+        warnOnce('timeout_ms is 0 — tool_function bodies run unbounded, and one that loops without awaiting will freeze this process. The withheld globals and the import gate are unaffected.');
+      }
+      return { timeoutMs };
+    },
+  );
+  const registry = sharedModuleWrapperRegistry(runner.canonicalImport ?? (spec => spec));
+  apply = registry.apply;
+  return { runner, wrapper: { wrapModule: registry.service.wrapModule, hideFromBody } };
 }
 
 /**
@@ -52,17 +70,18 @@ function createRunner(services: MatbotMachine): FunctionRunner {
  * seam alone, so an installation that wants different behaviour — a worker, a subprocess, another
  * language — replaces this package and touches nothing else.
  *
- * Its two settings are its own, authored under `default_settings:` keyed by this package name, and
- * readable and writable at run time through `function_runner_config`. They are read at the start of
- * each invocation, so narrowing what a body may import no longer waits for a restart. They were `function_timeout_ms` and
- * `function_imports` in the host's config, which could not work: the default runner has no way to
- * implement either, so the host was parsing a question only a plugin could answer.
+ * Its setting is its own, authored under `default_settings:` keyed by this package name, and readable
+ * and writable at run time through `function_runner_config`. It is read at the start of each
+ * invocation, so a change applies with no restart. What a body may IMPORT is not a setting here: it is
+ * the permission gate's (`tool_function.import`), where a standing denial refuses a module outright.
  */
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
 
   async setup(services) {
-    await services.register('FunctionRunner', createRunner(services));
+    const { runner, wrapper } = createRunner(services);
+    await services.register('FunctionRunner', runner);
+    await services.register('ImportedModuleWrapper', wrapper);
     services.tools.register(createRunnerConfigTool(services, FUNCTION_SYNC_LIMIT_MS));
   },
 };

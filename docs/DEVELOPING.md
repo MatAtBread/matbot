@@ -100,8 +100,8 @@ standalone during development.
 **`dependencies` — real runtime libraries you import.** Third-party npm packages whose *values* you
 import and call at runtime (a parser, a client library), plus any first-party matbot package you
 depend on **by construction** — the *specialization* relationship from CLAUDE.md, where your plugin
-imports another plugin's runtime code and constructs it (e.g. `skills-node` → `skills`, `tool-mcp` →
-`mcp-http`). These are installed into your tree and shipped.
+imports another plugin's runtime code and constructs it (e.g. `background-jobs-node` →
+`background-jobs`, `tool-mcp` → `mcp-http`). These are installed into your tree and shipped.
 
 **`devDependencies` — build/dev/type-only, erased at runtime.** `typescript` and `@types/node`; the
 peer mirrors above; and — the subtle one — **any matbot package you import only as a type.** Under
@@ -123,18 +123,21 @@ if it isn't published — for a package your code never imports.
 | You don't reference it at all? | remove it |
 
 The first-party packages in this repo follow exactly this: `plugin-api`/`core` are peers everywhere;
-`skills-node` keeps `skills` in `dependencies`; `frontend-web`, `cognition`, and `web-principal-user`
+`background-jobs-node` keeps `background-jobs` in `dependencies`; `frontend-web`, `cognition`, and `web-principal-user`
 keep their type-only `@matatbread/*` imports in `devDependencies`.
 
 ### Declaring supported runtimes (`matbotRuntime`)
 
 `matbotRuntime` in `package.json` declares which environments a plugin runs in — `["node"]`,
-`["browser"]`, or `["node","browser"]`. The loader reads it **before importing**: a plugin whose
-declared runtimes exclude the host is skipped without ever evaluating its top-level code — the only
-safe path for, e.g., a Node-only plugin reached from the browser. An **absent** field means "don't
-know": the loader imports it and falls back to a try-load/rollback path. Declare it honestly — a
-plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package and its
-cross-runtime base differ only by this field plus their imports.)
+`["browser"]`, or `["node","browser"]` — and it is **what makes a package a plugin**. The loader reads it
+**before importing**: a plugin whose declared runtimes exclude the host is skipped without ever
+evaluating its top-level code — the only safe path for, e.g., a Node-only plugin reached from the
+browser — and a package that declares none is refused the same way, as not a plugin (since 0.5.0; it was
+imported on trust before). `discover_local` passes over such a package without importing it, and `plugin
+add` refuses one on every route. So a package of shared helpers that sits beside the plugins simply
+omits the field. Declare it
+honestly — a plugin that touches `node:*` must not claim `browser`. (This is also why a `*-node` package
+and its cross-runtime base differ only by this field plus their imports.)
 
 ---
 
@@ -146,7 +149,7 @@ cross-runtime base differ only by this field plus their imports.)
 ### Via the LLM
 
 ```
-Add the local plugin called background
+Add the local plugin called background-jobs
 Add the plugin from npm called @somecooldude/superbot
 Add the plugin from the github repo SomeCoolDude/MyLatestMatbotPlugin
 ```
@@ -402,9 +405,9 @@ surviving one is whichever the compiler happened to see first. `buildMatbotTools
 clash it finds rather than silently picking a winner.
 
 The generated dts declares the **live tool registry**, not the source tree it scanned. The scan roots
-at each loaded plugin and then unions a glob of the monorepo `plugins/` tree onto it — the only way to
-reach host-constructed builtins like `plugin` and `provider`, which have no `resolvedUrl` — so its
-roots are a *superset* of what is actually loaded. A scanned root may supply a tool's **contract**;
+at `plugin-api`, at `core` (whose own tools no plugin owns) and at each loaded plugin, and then unions a
+glob of the monorepo `plugins/` tree onto it — the only view a static caller with no loaded set has,
+such as the web bundle's build — so its roots are a *superset* of what is actually loaded. A scanned root may supply a tool's **contract**;
 only the registry says the tool **exists**. Without that filter a generator composes
 `await tool.telegram_send({ text })` against a telegram frontend nobody loaded, typechecks clean, and
 throws `Tool "telegram_send" is not registered` at runtime — which no repair pass can fix, because the
@@ -449,7 +452,8 @@ interface MatbotRuntime {
   readonly tools:           ToolRegistry;
   readonly systemContext:   SystemContextRegistry;
   readonly workdir?:        string;
-  readonly configPath?:     string;
+  readonly projectDir?:     string;   // where the host resolves packages and relative plugin specifiers from
+  readonly dataDir?:        string;   // where plugins keep state on disk
 }
 
 // MatbotServices — the registry bucket (registerable / swappable keys):
@@ -593,6 +597,15 @@ profile would differ from its sibling in exactly one field for one caller, it wa
 prompt, without the `Message` fields (`id`/`traceId`/`createdAt`) an out-of-band call has no use for;
 it forwards `parameters` verbatim.
 
+The `single_turn` *tool*, which core registers, does more than this function does. Without `tools` it is
+the same single request. With `tools: true` it is a sub-turn: a full agent turn within the calling
+session, which has that session's id, principal, tools and gate answers, writes nothing to the session,
+and returns `{ ok, text, toolCalls }`. `turns: [...]` runs several turns of either kind at once and
+returns their results in order, with a failed turn as an `ok: false` entry. A field beside `turns`
+applies to every turn. Each position is typed by the call, so `const [a, b] = await
+tool.single_turn({ turns })` knows which results carry tool calls. Use the function when a plugin needs
+a model's answer, and the tool when the work has to act or its pieces can run at once.
+
 ---
 
 ## Writing a tool
@@ -717,7 +730,7 @@ resolves to `unknown`. This is purely type-level — no runtime validation. A ge
 **Per-action narrowing.** A multi-action tool is a weird overloaded function — its result depends on its
 params. Register it as a union of `ToolContract<Result, Args>` *arms*, each pairing a result with the
 discriminating params *pattern* that selects it; `invokeTool` matches the call's params and narrows to
-the matching arm. The discriminant is any field(s), not just `action` (`background` keys on `interval`'s
+the matching arm. The discriminant is any field(s), not just `action` (`background_job` keys on `interval`'s
 presence). Key on the discriminant only, not the full input, so a call carrying just that field matches;
 when no arm matches (a non-literal or absence discriminant), the result soundly falls back to the union of
 all arms. `ToolResultOf<'name'>` unwraps the arms to that union, so the executor binding is unchanged.
@@ -734,6 +747,20 @@ declare module '@matatbread/matbot-plugin-api' {
 // invokeTool(machine, 'mcp_action', { action: 'list' }) → result is { servers: string[] }
 ```
 
+A result whose keys or fields depend on the call's own params can say so with a third argument, the exact
+signature `await tool.your_tool(params)` should have. The first two still describe every call, for the
+executor, the wire and validation:
+
+```ts
+interface ToolContracts {
+  fetch_all: ToolContract<
+    Record<string, Page>,
+    Record<string, { url: string }>,
+    <P extends Record<string, { url: string }>>(params: P) => Promise<{ [K in keyof P]: Page }>
+  >;
+}
+```
+
 ### `ToolContext`
 
 ```ts
@@ -744,7 +771,6 @@ interface ToolContext {
   vault:       Vault;
   provider?:   string;       // the provider key driving the current turn
   workdir?:    string;
-  configPath?: string;
   files?:      FileStore;
   prompt:      PromptFn;     // (question, default?) | (field: FormField) => Promise<string>
   gate(req: PermissionRequest): Promise<boolean>;   // ask permission — see Declaring a gate
@@ -949,18 +975,17 @@ class MyBackend implements StorageBackend {
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T> { /* … */ }
   get fileStore(): FileStore { /* … */ }
   async close(): Promise<void> { /* … */ }
-  static async open(dotData: string): Promise<MyBackend> { return new MyBackend(); }
+  static async open(dataDir: string): Promise<MyBackend> { return new MyBackend(); }
 }
 
 export const plugin: MatbotPluginSpec = {
   apiVersion:     PLUGIN_API_VERSION,
-  storageBackend: { open: (dotData) => MyBackend.open(dotData) },
+  storageBackend: { open: (dataDir) => MyBackend.open(dataDir) },
   async setup(services) {
     if (services.StorageBackend instanceof MyBackend) return;
-    if (!services.configPath) return;
-    const { join, dirname } = await import('node:path');
-    const dotData = join(dirname(services.configPath), '.data');
-    await services.register('StorageBackend', await MyBackend.open(dotData));
+    // The host's data directory — the one the boot pre-scan passes `open()` too. Never derive one.
+    if (services.dataDir === undefined) return;
+    await services.register('StorageBackend', await MyBackend.open(services.dataDir));
   },
 };
 ```
@@ -1087,9 +1112,9 @@ type Hook =
 | `followup` | After the turn commits | `resubmit` a robo turn (head-enqueued, runs next), `retractAndRerun` the turn just committed, and/or append durable `markers` |
 | `validate` | Before each tool runs, through **every** door (the model's path, `POST /tools/:name`, `invokeTool`) and on `tools.validate` | Return errors to refuse the call, `[]` to say it is valid, nothing for no opinion. Every `validate` hook is asked and any refusal refuses, so validators co-exist without referring to each other |
 
-**`validate` replaces the `ToolCallValidator` service**, which is `@deprecated`, still consulted beside
-the hooks, and removed in 0.5.0. A service key holds one value, so a second validator had to capture the
-first and delegate to it — depending on load order, and on the other plugin. Register a hook instead.
+**`validate` replaced the `ToolCallValidator` service**, removed in 0.5.0. A service key holds one value,
+so a second validator had to capture the first and delegate to it — depending on load order, and on the
+other plugin.
 
 **`screen`'s `deferred` verdict** lets a hook race expensive work — a classifier — against
 generation instead of gating on it: return immediately, hand back a `DeferredScreen`, and the runner
@@ -1333,8 +1358,8 @@ Four rules follow from how the bus is built:
 - **Always `default` a `switch` over `kind`.** A foreign plugin or a bridged remote can publish one
   this build has never seen (see *Open-registry augmentation*).
 
-`namespace` is an **address space, not a plugin** — `files` is emitted by workspace, by background,
-and by the profiles backend; `sessions` has no plugin at all. `principal` is **ownership** (whose
+`namespace` is an **address space, not a plugin** — `files` is emitted by workspace and by the
+profiles backend; `sessions` has no plugin at all. `principal` is **ownership** (whose
 data changed), not attribution — never conflate it with `plugin`/`source`.
 
 ---
@@ -1368,11 +1393,11 @@ Store-backed index with optional Cloudflare BGE reranker.
 
 ## First-party plugins reference
 
-Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-store-test` (a test/reference plugin) and `hook-logger` (diagnostic). `tool-background` is deprecated. The README's plugin table carries the same classification.
+Each plugin is **Functional** (intended for real use as shipped) or an **Example** (a demonstration of how a feature *might* be implemented, typically with an obvious security hole or incomplete functionality — a template, not a drop-in). The Examples are `storage-profiles` (partitions a `Store` by `Principal` but has no login or auth, so any user can impersonate any other), `web-principal-user` (a template `WebPrincipalResolver`), `provider-chatjimmy` (non-streaming, text-only), `provider-customer-services` (a mock LLM), `provider-webllm` (a browser-only prototype), `provider-store-test` (a test/reference plugin, in the repo only and not published) and `hook-logger` (diagnostic). The README's plugin table carries the same classification.
 
 | Package | Tools / Kind | Description |
 |---|---|---|
-| `@matatbread/matbot-tool-plugin` | `plugin`, `provider` · always loaded | Built-in: manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles |
+| `@matatbread/matbot-cli` (built in) | `plugin`, `provider` · always loaded | Manage plugins (list/add/remove/reload/discover_local/store-key) and LLM provider profiles, persisted in `matbot.yaml`. The browser's are built by the web bundle from `@matatbread/matbot-browser`'s exports |
 | `@matatbread/matbot-tool-bash` | `bash` | Run bash scripts; stream stdout/stderr |
 | `@matatbread/matbot-tool-docker-bash` | `bash` (sandboxed), `bash_config` | Drop-in for bash, runs inside Docker; `bash_config` tunes the container at runtime |
 | `@matatbread/matbot-tool-http` | `http` | Make HTTP requests |
@@ -1380,16 +1405,13 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-tool-ask-user` | `ask_user` | Ask the user a question mid-turn (one-shot prompt) |
 | `@matatbread/matbot-background-jobs` | `background_job`, `background_job_action` | Jobs that report by appending to a conversation — now, at a stated time, or on a recurring schedule. Each job runs in-process on an ephemeral run (Node + browser) |
 | `@matatbread/matbot-background-jobs-node` | `background_job`, `background_job_action` | Node specialization of `background-jobs`: each job gets its own process, which can be killed and shares no heap with the server. Load this **or** `background-jobs`, not both |
-| `@matatbread/matbot-tool-background` | `background`, `every_action` · superseded | The former background plugin. Superseded by `background-jobs`, which changes what a job's reply means: a job reports by appending to a conversation rather than returning output. Its schedules are listed as `"legacy": true` and never run |
 | `@matatbread/matbot-tool-mcp` | `mcp_action` | Connect to MCP servers — stdio (local) and remote (delegates to mcp-http); Node only |
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
-| `@matatbread/matbot-default-gate` | `PermissionGate` + `gate_action` · always seeded | Built-in: the default permission policy — asks about a privileged operation, offers to remember the answer, honours what was remembered. Register your own `PermissionGate` to supply different rules |
 | `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
-| `@matatbread/matbot-skills-node` | `skill_action` + file watch | Node specialization of `skills`: adds local `.md` import/watch |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |
 | `@matatbread/matbot-function-tools` | `tool_function` | Author/run TypeScript functions that compose registered tools in one pass (define persists a named tool; execute runs a bare body once) |
 | `@matatbread/matbot-function-runner-node` | `FunctionRunner` service, `function_runner_config` · Node only · optional | Bounds a `tool_function` body's run time, withholds host globals and routes its `import(...)` through the permission gate; without it a body runs unbounded and ungated |
@@ -1404,9 +1426,8 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-caching-tool-types` | `ToolTypeIndex` service · Node only | `tool-types` with its build kept in plugin settings across restarts; load it instead of `tool-types` |
 | `@matatbread/matbot-tool-ts-validation` | `validate` hook · Node only | Validates a tool call against its `ToolContract` params type (via `tool-types`). Sits beside `json-validation` with no reference to it: a call either refuses is refused, in any load order |
 | `@matatbread/matbot-hook-logger` | diagnostic hooks | Logs each hook channel firing |
-| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload |
+| `@matatbread/matbot-provider-store-test` | provider contribution · Example | Test/reference: contributes provider profiles from its own store and reverts them on unload. In the repo only; not published |
 | `@matatbread/matbot-frontend-web` | frontend | Web UI with session management (HTTP+SSE on Node, in-process in the browser) |
-| `@matatbread/matbot-frontend-dom` | frontend | Minimal in-process browser chat (the `matbot-demo.html` demonstrator) |
 | `@matatbread/matbot-frontend-telegram` | frontend + tools | Telegram bot (`telegram_send`, `telegram_provider`, `telegram_open_door`) |
 | `@matatbread/matbot-web-principal-user` | `WebPrincipalResolver` | Override the web frontend's request principal with the host OS user (`$USER`) |
 | `@matatbread/matbot-provider-anthropic` | provider | Anthropic Messages API (+ DeepSeek `/anthropic` compat) |
@@ -1414,12 +1435,105 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-provider-google` | provider | Google Gemini (native `generateContent`; OpenAI-compat fallback by endpoint path) |
 | `@matatbread/matbot-provider-customer-services` | provider | Free built-in demo LLM — no API key needed |
 | `@matatbread/matbot-provider-chatjimmy` | provider | Hosted llama endpoint — non-streaming, text-only, keyless; a very low-latency comparison point |
+| `@matatbread/matbot-provider-webllm` | provider, `webllm_models` · Example | Open-weight models (Qwen3 by default) on the GPU in the page via WebLLM, loaded from a CDN on first use — browser only, keyless, a prototype |
 | `@matatbread/matbot-storage-filesystem` | storage backend | Filesystem-backed Store + FileStore (Node; content-addressed, CAS-safe; the CLI's default) |
 | `@matatbread/matbot-storage-sqlite` | storage backend | SQLite-backed Store + FileStore (Node) |
 | `@matatbread/matbot-storage-google-drive` | storage backend | Google Drive-backed Store + FileStore (browser; Google Identity Services auth) |
 | `@matatbread/matbot-storage-profiles` | storage backend + `profile_action`, `share` | Partitions selected namespaces per web principal over the filesystem backend, so each profile gets its own slice (Node; list it first in `matbot.yaml`) |
-| `@matatbread/matbot-browser` | storage + `plugin`/`provider` tools | Browser-native backends: IndexedDB Store, OPFS FileStore, WebCrypto vault, and browser plugin/provider management tools |
-| `@matatbread/matbot-files-node` | `FileStore` | Node filesystem-backed FileStore for MIME-typed blobs, served by the frontend |
+| `@matatbread/matbot-browser` | storage | The IndexedDB + OPFS backend as a plugin. Its exports — IndexedDB Store, OPFS FileStore, WebCrypto and localStorage vaults, the browser `plugin`/`provider` tools — are what the web bundle boots on |
+
+---
+
+## Embedding matbot in a Node application
+
+The CLI is one host, not the only one. An application that wants an extensible interface to an LLM —
+with its own authentication, its own request handling, and perhaps a fixed set of plugins and no
+`plugin` tool at all — builds a machine itself from `@matatbread/matbot-core`, with
+`@matatbread/matbot-host-node` for what only Node can provide and a storage plugin's backend to boot on:
+
+```ts
+import { assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, installUsageCarrier, runAs,
+         invokeTool, toolResult, createSession } from '@matatbread/matbot-core';
+import { createAlsPrincipalCarrier, createAlsUsageCarrier, EnvFileVault, nodePluginMembers } from '@matatbread/matbot-host-node';
+import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
+
+// Carriers first: nothing in assembleMachine reads an identity, but the runner and every plugin will.
+installPrincipalCarrier(createAlsPrincipalCarrier());
+installUsageCarrier(createAlsUsageCarrier());
+
+const { services, loaded } = assembleMachine({
+  bootBackend: new FilesystemStorageBackend('/var/lib/myapp/data'),
+  vault:       await EnvFileVault.open('/var/lib/myapp/secrets.env', process.env),
+  providers:   new ProviderRegistryImpl([['claude', { name: 'claude', module: '@matatbread/matbot-provider-anthropic',
+                 model: 'claude-sonnet-4-6', credentials: { apiKey: '${ANTHROPIC_API_KEY}' } }]]),
+  version:     '1.0.0',
+  // Loads a path or an installed package; nothing is fetched or installed.
+  host: machine => ({ ...nodePluginMembers(machine, process.cwd()), isSubAgent: () => false }),
+});
+await services.loadPlugin('@matatbread/matbot-tool-whoami');
+loaded();
+
+// In a request handler, after your own authentication:
+app.post('/whoami', (req, res) => runAs({ id: req.user.id, type: 'user' }, async () =>
+  res.json(await toolResult(invokeTool(services, 'whoami', {}, { session: createSession(), signal: AbortSignal.timeout(30_000) })))));
+```
+
+Nothing here is a matbot convention: each piece takes the path it works on, and none assumes a
+`matbot.yaml`, a `.data` directory or a way of acquiring plugins — those are the CLI's. Two directories
+are the host's to give, as members alongside `nodePluginMembers` (which supplies the first as its own
+base): `projectDir`, where packages and relative plugin specifiers resolve from, and `dataDir`, where
+plugins keep state on disk — a storage plugin hot-loaded at run time, `docker-bash`'s mount. Give
+`dataDir: '/var/lib/myapp/data'` and those plugins work; leave it out and they do nothing rather than
+guess. `gate` defaults
+to core's permission policy, which asks through whatever prompt channel a call has and, with none,
+answers each gate's own non-interactive default (see [DEFAULT-GATE.md](DEFAULT-GATE.md)); pass your own to
+decide differently. A turn is `services.run.open({ sessionId, provider, principal, content, signal })`
+under `runAs` of the same principal; its events are an `AsyncIterable`. Adding plugins at run time is
+the host's to build against its own persistence, as the CLI's `plugin` tool does against `matbot.yaml`
+and the browser's against a list in its storage. `apps/cli/test/embedder.test.ts` is a working example.
+
+**The floor is core alone.** `host-node` supplies a per-request principal and plugin resolution, and a
+storage plugin a medium; an embedder that wants none of those writes the rest in a few lines.
+`createConstantPrincipalCarrier` is one principal for the process, `VaultImpl` holds secrets from a map,
+and `MemoryStorageBackend` (`@matatbread/matbot-core/storage-base`) persists nothing. `loadPlugins`
+imports what it is given, so **resolve a specifier in your own module** — `import.meta.resolve(spec)` —
+and pass core the result: a bare name core resolved itself would be looked up beside core, where your
+dependencies are not (under pnpm it is simply not found). `import.meta.resolve` exists in browsers too,
+where it resolves through the page's import map. A provider's `module` reaches `loadPlugin` the same
+way, so a package name works and a path must name the entry file, not the directory.
+`apps/cli/test/core-alone.test.ts` is that host, and [examples/minimal-matbot](../examples/minimal-matbot)
+is the same as a program: stdin to a provider, the reply to stdout.
+
+**Start it with `node --import @matatbread/matbot-host-node/register`.** matbot's packages are TypeScript
+source importing `./x.js` for `./x.ts`, and Node strips types natively but neither tries `.ts` for `.js`
+nor strips anything under `node_modules`. `apps/cli/test/embedder-subprocess.test.ts` runs a machine with
+those hooks and nothing else.
+
+**One machine per process.** Core's plugin registry (which plugins are loaded, the providers they supply,
+what each registered) and the installation's settings defaults are held by the module, not by a machine,
+and a plugin is one module instance whatever machine loads it, holding what it captured from the machine
+that set it up. A second machine would share the first's plugins and replace its defaults, so a second
+`assembleMachine` while one stands throws; `dispose()` unloads the first's plugins and frees the slot (a
+test file building a machine per test is the use). Several tenants are one machine with a principal each
+(`runAs`), which is what the principal carrier and the storage partitioning are for; a machine configured
+differently is a process of its own, as `background-jobs-node` runs each job.
+
+**The carriers.** The principal carrier is required — a turn with no identity throws, since every store,
+vault and gate decision is made for someone. The usage carrier is not: it is the ambient sink that
+attributes each provider call's tokens to the turn, tool or hook that made it (*Accounting* in
+CLAUDE.md), and with none installed a turn runs and records no activity on its messages. Install
+`createAlsUsageCarrier()` (host-node) or core's `createSerialUsageCarrier()` beside the principal carrier
+unless you mean to account for nothing.
+
+**Running it needs two module hooks.** matbot's packages are published as TypeScript source that imports
+`./x.js` where the file is `./x.ts`. Node strips types itself, but it does not try `.ts` for a `.js` import,
+and it refuses to strip anything under `node_modules`. Run the application with
+`node --import @matatbread/matbot-host-node/register app.ts`; a host with hooks of its own registers the
+pair from `@matatbread/matbot-host-node/typescript-hooks` beneath them, as the CLI does (its own add hot
+reload and plugins fetched over http). The core-alone example writes the twenty lines out
+([register.js](../examples/minimal-matbot/register.js)) so as to need nothing but core. Every other test
+here runs under the CLI's stack, so only `host-node-register.test.ts` would catch an application that
+forgets this.
 
 ---
 
@@ -1450,16 +1564,9 @@ behind `window.matbotTransport`:
 Node resolves to `index.ts` (the HTTP server); the assembler prefers `browser.js` (the
 in-process mount). One package, two runtimes, no duplicated UI.
 
-### Two bundles
+### Building
 
-| Output | Frontend | Purpose |
-|---|---|---|
-| `dist/matbot.html` | `frontend/web` (browser entry) | Full-featured UI — sessions, files, plugin manager |
-| `dist/matbot-demo.html` | `frontend/dom` | Minimal ~450-line demonstrator |
-
-```sh
-pnpm web-build    # builds both
-```
+`pnpm web-build` writes `dist/matbot.html`: `frontend/web`'s browser entry — sessions, files, plugin manager.
 
 ### The plugin model
 

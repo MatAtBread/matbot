@@ -1,3 +1,4 @@
+import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, ProviderConfig } from '@matatbread/matbot-plugin-api';
 import { OpenAICompatAdapter } from '@matatbread/matbot-provider-openai-compat';
 import { GoogleAdapter } from './adapter.js';
@@ -35,7 +36,7 @@ function isOpenAICompatPath(endpoint: string | undefined): boolean {
 }
 
 export const plugin: MatbotPluginSpec = {
-  apiVersion: '0.1',
+  apiVersion: PLUGIN_API_VERSION,
   provider: (config: ProviderConfig) =>
     isOpenAICompatPath(config.endpoint)
       ? new OpenAICompatAdapter('google-gemini', { gemini: true })

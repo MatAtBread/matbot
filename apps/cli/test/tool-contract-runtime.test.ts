@@ -16,7 +16,6 @@ test('a node derivation leaves out browser-only plugins', async () => {
   assert.ok(built);
   assert.equal(built.contracts['webllm_models'], undefined, 'webllm is matbotRuntime ["browser"]');
   assert.doesNotMatch(built.dts, /managedBy/, "google-drive's LoadedPluginSummary augmentation is browser-only");
-  // Declared by both `frontend/dom` (browser) and `frontend/web` (node+browser): served on node by the latter.
   assert.ok(built.contracts['url_for_resource']);
   assert.ok(built.contracts['tool_router_config'], 'a ["node", "browser"] plugin is still scanned');
   assert.ok(built.contracts['plugin'] && built.contracts['provider']);

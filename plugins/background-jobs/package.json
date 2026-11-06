@@ -4,14 +4,14 @@
     "node",
     "browser"
   ],
-  "version": "0.4.20",
+  "version": "0.5.0",
   "engines": {
     "node": ">=24.0.0"
   },
   "files": [
     "src"
   ],
-  "description": "Run prompts as background jobs — now, at a time, or on an interval — that report into a conversation by appending to it, and stay silent when there is nothing to say. Jobs run in this process; @matatbread/matbot-background-jobs-node runs each in its own. Supersedes @matatbread/matbot-tool-background.",
+  "description": "Run prompts as background jobs — now, at a time, or on an interval — that report into a conversation by appending to it, and stay silent when there is nothing to say. Jobs run in this process; @matatbread/matbot-background-jobs-node runs each in its own. Supersedes @matatbread/matbot-tool-background, removed in 0.5.0.",
   "keywords": [
     "matbot",
     "matbot-plugin",

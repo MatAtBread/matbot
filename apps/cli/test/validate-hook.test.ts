@@ -8,8 +8,8 @@ import {
   loadPlugins, unloadPlugin, TOOL_INPUT_INVALID,
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, Tool, ToolEvent, ToolInputError } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
 // Validators are `validate` hooks: several co-exist with no reference to one another, every one is asked,
@@ -25,7 +25,7 @@ let seq = 0;
 async function machine(t: { after(fn: () => Promise<void>): void }) {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-validate-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const { services } = assembleMachine({
+  const { services, dispose } = assembleMachine({
     bootBackend: new FilesystemStorageBackend(dir),
     vault:       { resolve: async (r: string) => r } as unknown as Vault,
     providers:   new ProviderRegistryImpl(new Map()),
@@ -38,6 +38,7 @@ async function machine(t: { after(fn: () => Promise<void>): void }) {
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(dispose);
   const calls: unknown[] = [];
   services.tools.register({
     name: 'thing', description: '', inputSchema: { type: 'object' },
@@ -114,11 +115,4 @@ test('a validator that throws is no opinion, not a refusal', async t => {
   const { services } = await machine(t);
   await validators(services, { broken: () => { throw new Error('boom'); }, typed: () => [] });
   assert.deepEqual(await services.tools.validate!('thing', {}), []);
-});
-
-test('the deprecated ToolCallValidator service is still consulted, beside the hooks', async t => {
-  const { services } = await machine(t);
-  await validators(services, { typed: () => [] });
-  await services.register('ToolCallValidator', { validateToolCall: async () => SCHEMA_SAYS });
-  assert.deepEqual(await services.tools.validate!('thing', {}), SCHEMA_SAYS);
 });

@@ -123,9 +123,8 @@ const DEFAULT_ISOLATED = ['sessions'];
 const FILES_NS = 'files';
 
 // The slice of a file's sidecar meta that locates its data file on disk (mirrors the filesystem file
-// store's own layout resolution). `dataFile` = new anonymous entry; `id` present = legacy anonymous
-// (data at `<id>.data`); neither = named entry (data path === the id).
-interface FileMeta { dataFile?: string; id?: string }
+// store's own layout resolution). `dataFile` = anonymous entry; absent = named entry (data path === the id).
+interface FileMeta { dataFile?: string }
 
 /**
  * A StorageBackend that partitions selected namespaces per web principal. It does not wrap the active
@@ -468,8 +467,8 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
 
   // A file is a PAIR on disk — a data file plus its `<id>.meta.json` sidecar — so sharing one links both
   // (documents are a single `<id>.json`). The data path is derived from the sidecar exactly as the
-  // filesystem file store does: `dataFile` for new anonymous entries, `<id>.data` for legacy anonymous,
-  // else the id itself for named files (whose id mirrors the on-disk name and may be nested → `/`).
+  // filesystem file store does: `dataFile` for anonymous entries, else the id itself for named files
+  // (whose id mirrors the on-disk name and may be nested → `/`).
   private async shareFile(id: string, sourcePart: string, targetPart: string, glob = false): Promise<void> {
     const fid     = this.safeFileId(id);
     const srcArea = this.nsDir(sourcePart, FILES_NS);
@@ -506,7 +505,7 @@ export class ProfilesStorageBackend implements StorageBackend, ProfileDirectory 
 
   // The data file's path relative to a file area, from its sidecar meta (see shareFile).
   private dataRelOf(fid: string, meta: FileMeta): string {
-    return meta.dataFile ?? (meta.id !== undefined ? `${fid}.data` : fid);
+    return meta.dataFile ?? fid;
   }
 
   // ── Copy (independent duplicate-with-ownership; the `copy` action) ────────────────

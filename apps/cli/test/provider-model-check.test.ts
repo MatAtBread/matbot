@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ProviderRegistryImpl, bindGate, checkProviderModel, closestIds, modelListed, CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-core';
-import { createProviderTool } from '@matatbread/matbot-tool-plugin';
+import { createProviderTool } from '../src/plugins/tools/provider.js';
 import { AnthropicAdapter } from '@matatbread/matbot-provider-anthropic';
 import { OpenAICompatAdapter } from '@matatbread/matbot-provider-openai-compat';
 import { GoogleAdapter } from '@matatbread/matbot-provider-google';
@@ -116,18 +116,17 @@ async function runAdd(model: string, answers: string[], models: (c: ProviderConf
   const prompts: string[] = [];
   const ask = (async (q: unknown) => { prompts.push(typeof q === 'string' ? q : (q as FormField).label); return answers.shift() ?? CONFIRM_YES; }) as PromptFn;
   const ctx = {
-    configPath: file,
     session:    { id: 's1', messages: [] },
     signal:     new AbortController().signal,
     prompt:     ask,
     vault:      { hasKey: () => true, resolve: async (s: string) => s.replace('${OPENAI_KEY}', 'sk-real') },
     loadPlugin: async (spec: string) => ({ name: spec, provider: () => adapter }),
-    ...bindGate(undefined, 'provider', ask),
+    ...bindGate(undefined, 'provider', ask, {}),
   } as unknown as ToolContext;
   const providers = new ProviderRegistryImpl([]);
   const events: ToolEvent<unknown>[] = [];
   const input = { action: 'add', name: 'oai', module: '@test/fake-adapter', model, credentialEnvVar: 'OPENAI_KEY' };
-  for await (const e of createProviderTool(providers).executor.execute(input, ctx)) events.push(e);
+  for await (const e of createProviderTool(file, providers).executor.execute(input, ctx)) events.push(e);
   const result = events.find(e => e.type === 'result' || e.type === 'error') as { value?: { message: string } };
   return { prompts, providers, listedWith, message: result.value?.message ?? '', yaml: await readFile(file, 'utf8'), events };
 }

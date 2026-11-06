@@ -205,10 +205,11 @@ async function main() {
     const spec = SYN(id);
     bundledSpecs.push(spec);
     specNames[spec] = name;
-    if (runtimes !== undefined) specRuntimes[spec] = runtimes;
-    // Bundled plugins load by package name (availablePlugins[].specifier = name), so key the version
-    // by name too — that's the specifier the resolver.version() will be asked about.
-    if (version  !== undefined) { specVersions[spec] = version; specVersions[name] = version; }
+    // Bundled plugins load by package name (availablePlugins[].specifier = name), so key the runtimes and
+    // version by name too — that's the specifier the resolver will be asked about, and a plugin whose
+    // runtimes the resolver cannot find is refused as undeclared.
+    if (runtimes !== undefined) { specRuntimes[spec] = runtimes; specRuntimes[name] = runtimes; }
+    if (version  !== undefined) { specVersions[spec] = version;  specVersions[name] = version;  }
     availablePlugins.push({
       name,
       specifier: name,                 // load by package name → import map → baked blob → persists

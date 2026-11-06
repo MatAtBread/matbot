@@ -10,7 +10,7 @@ big-picture overview see [README.md](../README.md); for writing plugins see
 
 - Node 24.12+ (matbot ships raw TypeScript and relies on Node's native type stripping)
 - An LLM API key (Anthropic, OpenAI-compatible, DeepSeek, Ollama, …)
-- pnpm 9+ — only needed to run from source
+- pnpm 10+ — only needed to run from source
 
 ---
 
@@ -85,8 +85,7 @@ Awaited work — tool calls, HTTP requests — never counts towards it. A loop t
 unbounded and matbot warns at startup. Use it only for testing.
 
 It removes the *time* limit and nothing else. The rest still applies with it set to `0`:
-the same globals are withheld, an import is still gated, and `permit_imports` still
-restricts what may be asked for.
+the same globals are withheld, and an import is still gated.
 
 ### When a function wants a module
 
@@ -121,29 +120,32 @@ installing a plugin than to granting a capability. And a standing answer follows
 With nobody to ask — a tool call over HTTP, a trigger, a background job — an import is
 denied unless you had already stood an answer up for it.
 
-If you want a module forbidden outright, so that nobody is even asked, narrow what may be
-requested:
+If you want a module forbidden outright, so that nobody is even asked, give the permission
+gate a standing denial:
 
 ```yaml
 default_settings:
-  '@matatbread/matbot-function-runner-node':
-    permit_imports:
-      - 'node:'      # builtins may be asked for; packages may not
+  '@matatbread/matbot-default-gate':
+    'deny:tool_function.import':
+      '*':                         # everywhere — every session, every door
+        - '* node:child_process'   # no function may import it, and nobody is asked
+        - '* node:module'
 ```
 
-Leave `permit_imports` out and anything may be *asked* for. `[]` is the other end: imports
-are switched off and no prompt appears. This is the only way to say "never" at the prompt,
-because a standing answer is always a yes — there is no remembered no.
+The `'*'` key is where the answer holds: everywhere. (A session's id instead holds it in that session
+only — what *for this session* at a prompt stores.) In a subject, `*` means any function, and an
+entry ending in `:` or `/` covers everything under it (`'* node:'` is every builtin). Where answers
+disagree the most specific wins, so an allow of `'* node:fs'` beside a denial of `'* node:'` admits
+`node:fs` and no other builtin. A body that names a denied module in a literal `import(…)`
+fails its type-check, saying why, rather than failing at its first call. "Always deny" at the
+prompt stores the same kind of answer, for that one function and module.
 
-Both settings are also readable and writable at run time, with `function_runner_config`:
-`get` reports what is in effect, `set` takes `permitImports` and/or `timeoutMs`, and `clear`
-puts both back to what the yaml above says. A change applies at once — the runner is rebuilt
-— and you are asked before each setting is written. Two things follow from it being an
-ordinary setting override rather than a second config file. It **wins over the yaml**, so
-`permit_imports` above is a starting point and not a ceiling; and it applies to the whole
-process, so a change made in one conversation is what every conversation then gets. If you
-need a restriction that nothing running can lift, the runner is a plugin — write your own
-with the list compiled in, and matbot will use it instead.
+The time limit is also readable and writable at run time, with `function_runner_config`:
+`get` reports what is in effect, `set` takes `timeoutMs`, and `clear` puts it back to what the
+yaml above says. A change applies from the next run, and you are asked before it is written.
+It is an ordinary setting override, so it **wins over the yaml** and applies to the whole
+process. If you need a bound that nothing running can lift, the runner is a plugin — write your
+own with it compiled in, and matbot will use it instead.
 
 A body imports **by name only** — a node builtin or a package already installed where
 matbot runs. A path (`./lib.js`) or a URL is refused before you are asked: downloading or
@@ -376,24 +378,27 @@ connecting an MCP server are the others.
 
 A gate says *what* is being asked and what happens when nobody can be asked; the installation's
 **permission policy** decides how the acceptance is obtained. The one matbot ships
-(`@matatbread/matbot-default-gate`) asks, offers to remember the answer, and honours what it
+(core's default gate — see [DEFAULT-GATE.md](DEFAULT-GATE.md)) asks, offers to remember the answer, and honours what it
 remembered. It is built in — like the `plugin` and `provider` tools, it is there on every install,
-including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is *Deny* / *Allow* / *Always allow "<subject>"* / *Always allow
-every `<gate>`*; non-interactively — a boot, an HTTP install — each call site's own stated answer
+including a minimal one with an empty `plugins:` list, and needs no config line. Interactively that is
+allow or deny, *this time*, *for this session* or *always*, for the act or a broader subject the call site
+offers — dropdowns ending in Allow and Deny buttons in the web UI, and *Deny* / *Allow* / *Allow … for this session* / *Always
+allow "<subject>"* / *Always allow every `<gate>`* as buttons elsewhere; non-interactively — a boot, an HTTP install — each call site's own stated answer
 applies, which for a tool collision is "overwrite" (what lets a deliberate override win with nobody
 there to answer) and for everything else is "no".
 
-Standing answers live in that plugin's own settings namespace, one key per gate id, so an
-installation can author them up front — the same thing the two *Always* options write:
+Standing answers live in its own settings namespace, `@matatbread/matbot-default-gate`, one key per gate id, so an
+installation can author them up front — the same thing the *Always* options write:
 
 ```yaml
 default_settings:
   '@matatbread/matbot-default-gate':
-    'tools.overwrite': [bash, plugin]   # or: true
-    'plugin.add': ['@acme/our-tools']
+    'tools.overwrite': { '*': [bash, plugin] }   # or: { '*': true }
+    'plugin.add':      { '*': ['@acme/our-tools'] }
 ```
 
-A **list of subjects** allows exactly those and asks about everything else — the form to reach for
+`'*'` is the scope — everywhere; a session's id, or `#http` for the HTTP tool door, holds an answer
+only there. A **list of subjects** allows exactly those and asks about everything else — the form to reach for
 when one particular override is intended and any *other* collision is a surprise you want to hear
 about. `true` allows every subject of that gate. Anything else asks. As everywhere in
 `default_settings:`, a stored answer then wins over this one;
@@ -567,5 +572,6 @@ internal job — the triggers classifier, skills' content analysis, cognition's 
 **current turn's provider** by default. Those roles are *aliases* for an already-configured provider,
 not new profiles to stand up: to point one at a cheaper/faster (or, for the inner voice, a
 different-lineage) model, pin it to an existing provider with the relevant config tool —
-`triggers_config`, `skills_config`, or `cognition_config` (action `set`). Installs that historically
-defined a provider literally named `skills-classifier` keep working — it stays the classifier default.
+`triggers_config`, `skills_config`, or `cognition_config` (action `set`). A provider named
+`skills-classifier` is no longer picked up by name (since 0.5.0); pin it with `triggers_config` or
+`default_settings: { '@matatbread/matbot-triggers': { classifierProvider: skills-classifier } }`.

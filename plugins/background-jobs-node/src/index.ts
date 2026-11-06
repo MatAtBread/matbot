@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { execArgv, argv, execPath } from 'node:process';
+import { execArgv, argv, execPath, env } from 'node:process';
 import { resolve, dirname } from 'node:path';
 import { existsSync }       from 'node:fs';
 import { pathToFileURL }    from 'node:url';
@@ -16,6 +16,11 @@ import { connectToParent, relayable, serveJob, type Endpoint, type ParentLink } 
 // that hangs or leaks can be killed outright, and nothing it does touches this process's heap — at the
 // cost of a whole boot per run. The child never writes a session itself; it asks over an IPC channel,
 // and what it changes elsewhere is announced back over the same channel.
+//
+// So its host is the matbot CLI, as docker-bash's is a machine with docker: a job is the CLI's own command
+// line — the script this process was started as, `--config -`, a config extending the one this process
+// booted with (which the CLI publishes as MATBOT_CONFIG), and the CLI's IS_SUB_AGENT/MATBOT_PRINCIPAL. Under
+// any other host it disables itself; `matbot-background-jobs` runs jobs in-process anywhere.
 
 // When true, jobs run in a new process group and survive the parent exiting.
 const DETACH_JOBS = false;
@@ -78,10 +83,10 @@ export function superviseChild(child: ChildProcess, input: string): Promise<Erro
 }
 
 function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
-  const configPath = machine.configPath;
+  const configPath = env['MATBOT_CONFIG'];
   const script     = argv[1];
   if (configPath === undefined || script === undefined) {
-    console.warn('[background-jobs] no config path or entry script to spawn a job from, so no job can run here.');
+    console.warn('[background-jobs] this process is not the matbot CLI (no MATBOT_CONFIG, or no entry script), so it cannot start a job as one. Use matbot-background-jobs to run jobs in-process.');
     return undefined;
   }
 

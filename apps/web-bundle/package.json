@@ -1,10 +1,6 @@
 {
   "name": "@matatbread/matbot-web-bundle",
-  "matbotRuntime": [
-    "node",
-    "browser"
-  ],
-  "version": "0.4.25",
+  "version": "0.5.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -25,13 +21,11 @@
     "assemble.mjs",
     "serve.mjs",
     "index.template.html",
-    "matbot.web.json",
-    "matbot.web-demo.json"
+    "matbot.web.json"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "assemble": "npm run check:ui && node assemble.mjs",
-    "assemble:demo": "npm run check:ui && node assemble.mjs matbot.web-demo.json",
     "serve": "node serve.mjs",
     "check:ui": "node ../../plugins/frontend/web/scripts/check-ui.mjs",
     "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
@@ -48,8 +42,7 @@
     "@matatbread/matbot-core": "workspace:^",
     "@matatbread/matbot-plugin-api": "workspace:^",
     "@matatbread/matbot-browser": "workspace:^",
-    "@matatbread/matbot-frontend-web": "workspace:^",
-    "@matatbread/matbot-default-gate": "workspace:^"
+    "@matatbread/matbot-frontend-web": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",

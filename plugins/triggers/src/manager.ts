@@ -4,10 +4,10 @@ import { surfaceOfKind } from './types.js';
 
 const MAX_MSG_CHARS = 4000;
 
-// Back-compat default: installs that configured a provider literally named "skills-classifier" (the
-// former hard-coded classifier name) keep working with no migration. A `classifierProvider` setting
-// overrides it; absent both, the classifier falls back to the turn's own provider.
-const LEGACY_CLASSIFIER = 'skills-classifier';
+// The provider name the classifier used to pick up implicitly. It no longer does; setup warns when an
+// install still has one and has not pinned it. Removed in 0.6.0, with that warning.
+export const RETIRED_CLASSIFIER = 'skills-classifier';
+const RETIRED_KIND = 'augment';
 
 function clip(text: string): string {
   if (text.length <= MAX_MSG_CHARS) return text;
@@ -55,13 +55,12 @@ export class TriggerManager implements Triggers {
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The classifier provider, resolved live per evaluation (so a triggers_config change takes effect on
-  // the next turn): the `classifierProvider` setting if set and valid, else the legacy "skills-classifier"
-  // provider if present, else the current turn's own provider. There is always a turn provider to fall
-  // back to, so the classifier always has a model — triggers work with zero config.
+  // the next turn): the `classifierProvider` setting if set and valid, else the current turn's own
+  // provider. There is always a turn provider to fall back to, so the classifier always has a model —
+  // triggers work with zero config.
   async resolveClassifierProvider(turnProvider: string): Promise<string> {
     const pinned = await this.services.settings().get<string>('classifierProvider');
     if (pinned !== undefined && this.services.providers.has(pinned)) return pinned;
-    if (this.services.providers.has(LEGACY_CLASSIFIER)) return LEGACY_CLASSIFIER;
     return turnProvider;
   }
 
@@ -72,11 +71,38 @@ export class TriggerManager implements Triggers {
    *  belongs in the StorageBackend, not in this consumer. */
   async all(): Promise<Trigger[]> {
     const { items } = await this.store.query({});
-    return items;
+    return Promise.all(items.map(t => this.migrated(t)));
   }
 
   async get(id: string): Promise<Trigger | undefined> {
-    return (await this.store.get(id)) ?? undefined;
+    const t = await this.store.get(id);
+    return t === null ? undefined : this.migrated(t);
+  }
+
+  /**
+   * `augment` is what `ephemeral` was called before the user-surface kinds became a pair. Unrecognised, a
+   * condition of that kind was judged on no surface, so its trigger silently never fired. Read as
+   * `ephemeral` and written back on read — not once at setup, because the store is read per principal and
+   * a setup pass would migrate only the boot principal's. Said every time one is migrated. The write is a
+   * courtesy to the next read, so it never costs this one: a lost CAS, or a refusal (a trigger shared in
+   * read-only, which only its owner's next read can store), reads as `ephemeral` all the same. A throw here
+   * would reject the whole listing, so none of the principal's triggers would fire. Removed in 0.6.0.
+   */
+  private async migrated(t: Trigger): Promise<Trigger> {
+    if (!t.conditions.some(c => (c.kind as string) === RETIRED_KIND)) return t;
+    const next = (cur: Trigger): Trigger => ({
+      ...cur, conditions: cur.conditions.map(c => (c.kind as string) === RETIRED_KIND ? { ...c, kind: 'ephemeral' as const } : c),
+    });
+    const said = `[triggers] Trigger "${t.id}" has a condition of kind "${RETIRED_KIND}", the name "ephemeral" had before 0.5.0; `;
+    const later = 'it is read as "ephemeral", and will be stored so when it next can be';
+    try {
+      const r = await this.store.cas(t.id, t.version, { ...next(t), version: crypto.randomUUID() });
+      console.warn(said + (r.ok ? 'it is now stored as "ephemeral".' : `${later}.`));
+      return r.ok ? r.doc : next(t);
+    } catch (e) {
+      console.warn(`${said}${later}: ${e instanceof Error ? e.message : String(e)}`);
+      return next(t);
+    }
   }
 
   /** Triggers whose invocation matches the filter: `tool` (if given) must equal `invoke.tool`, and

@@ -295,7 +295,7 @@ export const plugin: MatbotPluginSpec = {
           },
           provider: {
             type:        'string',
-            description: 'Provider name as defined in matbot.yaml (set only).',
+            description: 'Provider profile name, as configured (set only).',
           },
         },
       },
@@ -340,7 +340,7 @@ export const plugin: MatbotPluginSpec = {
           const permit = await ctx.gate({
             gate: 'open', subject: 'join', fallback: false,
             label: 'Open the Telegram door for 30 seconds? The first new chat to message the bot in that time joins it, with the same access to this matbot as yours.',
-            standing: [{ subject: 'join', label: 'Always allow opening the door to new Telegram chats' }],
+            standing: [{ subject: 'join', label: 'opening the door to new Telegram chats' }],
           });
           if (!permit.allowed) { yield { type: 'error' as const, message: refusalMessage(permit, 'Opening the door') }; return; }
           openDoor = Date.now();

@@ -6,8 +6,8 @@ import type {
 } from '@matatbread/matbot-core';
 import { MemoryStore } from '@matatbread/matbot-core/storage-base';
 import { demonstrate } from '@matatbread/matbot-tool-skill-compiler';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

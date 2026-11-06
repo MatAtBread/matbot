@@ -6,8 +6,8 @@ import {
 import type {
   MatbotMachine, ProviderConfig, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
 } from '@matatbread/matbot-plugin-api';
-import { defaultGate } from '@matatbread/matbot-default-gate';
-import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
+import { BrowserStorageBackend, LocalStorageVault, createBrowserPluginTool } from '@matatbread/matbot-browser';
+import { localExtraPlugins } from './extra-plugins.js';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
 import type { BrowserToolTypeIndexHandle } from '@matatbread/matbot-browser';
@@ -253,17 +253,23 @@ export async function boot(env: BootEnv): Promise<void> {
     TypeScriptStripper: { strip: stripTypeScript },
   });
 
+  // IndexedDB + OPFS: the boot base, and the revert target when a swapped-in backend's plugin unloads.
+  const bootBackend = new BrowserStorageBackend();
+  // The browser has no matbot.yaml, so the plugins a user adds are listed in the boot backend instead —
+  // pinned to it, so a backend a plugin swaps in (Google Drive) cannot take the list somewhere the next
+  // boot does not look.
+  const extras = localExtraPlugins(bootBackend);
+
   const { services, loaded } = assembleMachine({
-    // IndexedDB + OPFS: the boot base, and the revert target when a swapped-in backend's plugin unloads.
-    bootBackend:     new BrowserStorageBackend(),
+    bootBackend,
     preScanned,
     vault:           bootVault,
     providers,
-    gate:            defaultGate,
     defaultSettings: config.defaultSettings !== undefined ? new Map(Object.entries(config.defaultSettings)) : undefined,
     // A missing secret is asked for, once, and persisted — the browser has no .env to edit.
     resolveSecret:   resolveInteractive,
     version:         env.harnessVersion ?? '?',
+    builtinTools:    [createBrowserPluginTool(extras)],
     host,
   });
 
@@ -335,6 +341,15 @@ export async function boot(env: BootEnv): Promise<void> {
 
   // Then the rest — frontends, tools, storage, knowledge, hooks. The frontend plugin mounts the UI.
   await loadPlugins(config.plugins, services);
+  // Then what the user added in earlier sessions, as the CLI loads matbot.yaml's `plugins:`. A stale
+  // specifier (a URL that 404s now) is warned about and skipped; it must not abort boot.
+  for (const specifier of await extras.list()) {
+    try {
+      await services.loadPlugin(specifier);
+    } catch (e) {
+      console.warn(`[matbot] Could not load the added plugin "${specifier}":`, e);
+    }
+  }
   loaded();
 
   console.warn('[matbot] web runtime ready —', services.tools.list().length, 'tools,', providers.size, 'providers.');

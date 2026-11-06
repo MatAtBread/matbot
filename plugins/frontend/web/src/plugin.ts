@@ -111,7 +111,6 @@ export const plugin: MatbotPluginSpec = {
       mediaStore:      () => services.MediaStore,
       permissionGate:  () => services.PermissionGate,
       notifier:        services.Notifier,
-      ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
 
     await new Promise<void>((resolve, reject) => {

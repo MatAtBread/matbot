@@ -135,14 +135,23 @@ export async function collectToolTypeRoots(
   // — which compiled clean and only happened to resemble the real `Principal`. A wrong guess compiles too,
   // and the cast gate cannot see it: nothing was cast, a contract was asserted. Same failure the scaffold's
   // dangling plugin-api link used to cause, and the same fix.
-  const monorepoApi = join(projectRoot, 'plugin-api', 'src', 'index.ts');
-  let pluginApiIndex: string | undefined = existsSync(monorepoApi) ? monorepoApi : undefined;
-  for (const from of pluginApiIndex === undefined ? [join(projectRoot, '_'), fileURLToPath(import.meta.url)] : []) {
-    try { pluginApiIndex = createRequire(from).resolve('@matatbread/matbot-plugin-api'); break; } catch { /* try the next anchor */ }
-  }
+  const anchor = (dir: string, name: string): string | undefined => {
+    const monorepo = join(projectRoot, dir, 'src', 'index.ts');
+    if (existsSync(monorepo)) return monorepo;
+    for (const from of [join(projectRoot, '_'), fileURLToPath(import.meta.url)]) {
+      try { return createRequire(from).resolve(name); } catch { /* try the next anchor */ }
+    }
+    return undefined;
+  };
+  const pluginApiIndex = anchor('plugin-api', '@matatbread/matbot-plugin-api');
   if (!pluginApiIndex) return null;
 
-  const roots = new Set<string>([pluginApiIndex]);
+  // Core is a root too, for the tools `assembleMachine` registers itself (`about_matbot`, `single_turn`,
+  // `gate_action`). Nothing else reliably reaches them: no plugin owns them, so no `resolvedUrl` does, and
+  // the `plugins/` glob below finds core only through some plugin's import of it — which made those three
+  // typed or not by whichever plugins an installation happened to load.
+  const coreIndex = anchor('core', '@matatbread/matbot-core');
+  const roots = new Set<string>([pluginApiIndex, ...(coreIndex !== undefined ? [coreIndex] : [])]);
 
   // A loaded plugin's `resolvedUrl` → an on-disk type-bearing source file. `.ts`/`.d.ts` used directly;
   // an npm `.js` entry maps to its sibling `.d.ts`; anything else (blob:, bare specifier, missing) skipped.
@@ -156,10 +165,10 @@ export async function collectToolTypeRoots(
   for (const u of pluginEntryUrls ?? []) { const p = toSource(u); if (p) roots.add(p); }
 
   // UNION with a glob of the monorepo `plugins/` tree (not a fallback): the resolvedUrl roots above cover
-  // every *loaded* plugin (builtin, compiled, installed), but miss monorepo source that isn't loaded as a
-  // plugin with a resolvedUrl — notably the app-embedded `plugin`/`provider` builtins in `plugins/tool-plugin/`,
-  // which the host constructs directly. The glob catches those. In a real deployment there is no `plugins/`
-  // tree, so this no-ops and the scan is purely resolvedUrl-driven. Dedup is by path (a Set of roots).
+  // every *loaded* plugin (builtin, compiled, installed), but a static caller has no loaded set at all —
+  // the web bundle's build describes every plugin it bakes, none of which is loaded where it runs. The
+  // glob is how that caller sees them. In a real deployment there is no `plugins/` tree, so this no-ops
+  // and the scan is purely resolvedUrl-driven. Dedup is by path (a Set of roots).
   //
   // So the roots deliberately over-reach: wherever that tree exists — this repo, or an embedder that vendors
   // it — plugins for OTHER runtimes and plugins nobody loaded are scanned too. Two consequences, and they
@@ -479,9 +488,8 @@ export async function buildToolTypesData(
   const bundledDecls = new Map<string, string>();
 
   // Bundling flattens every referenced workspace type into ONE scope, but a type's name is only unique
-  // within its own file: two plugins each declaring a file-local `SkipKind` is legal TypeScript and here
-  // a deliberate one (`plugins/background/src/index.ts` says why it isn't shared), so the generator has
-  // to represent it rather than ask the sources not to do it. Emitted side by side they were a TS2300
+  // within its own file: two plugins each declaring a file-local type of one name is legal TypeScript, so
+  // the generator has to represent it rather than ask the sources not to do it. Emitted side by side they were a TS2300
   // that nothing compiled the dts to catch, and both references then resolved to an error type — the
   // narrowing the contract exists to give, silently gone. So the first symbol to claim a name keeps it
   // and later ones are alpha-renamed (`SkipKind$1`), with every reference rewritten to match.
@@ -792,10 +800,13 @@ export async function buildToolTypesData(
     const params: string[] = [], results: string[] = [], paramNodes: TS.TypeNode[] = [];
     for (const raw of arms) {
       const a = resolveAlias(raw);
-      if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract' || a.typeArguments?.length !== 2) return undefined;
-      results.push(expandNamed(a.typeArguments[0]!, new Set(), 0));
-      params.push(expandNamed(a.typeArguments[1]!, new Set(), 0));
-      paramNodes.push(a.typeArguments[1]!);
+      // Two arguments, or three with a `Call` signature, which is the proxy's alone: the wire is `Result`/`Args`.
+      if (!ts.isTypeReferenceNode(a) || a.typeName.getText() !== 'ToolContract') return undefined;
+      const [result, args, ...rest] = a.typeArguments ?? [];
+      if (result === undefined || args === undefined || rest.length > 1) return undefined;
+      results.push(expandNamed(result, new Set(), 0));
+      params.push(expandNamed(args, new Set(), 0));
+      paramNodes.push(args);
     }
     return { result: results.join(' | '), params: params.join(' | '), paramNodes };
   };

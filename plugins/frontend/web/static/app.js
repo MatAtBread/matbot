@@ -4063,7 +4063,7 @@ async function renderTurn(sid, traceId) {
             const block = document.createElement('div');
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
-            const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            const done = () => block.querySelectorAll('button, input, select').forEach(el => { el.disabled = true; });
             // Settled with no choice made (cancelled, or answered elsewhere): the default wasn't picked either.
             const unmark = () => block.querySelectorAll('.prompt-choice-btn.primary').forEach(b => b.classList.remove('primary'));
             // Retire the dialog without answering — someone else got there first. Resolving with
@@ -4092,7 +4092,79 @@ async function renderTurn(sid, traceId) {
             q.className = 'prompt-question';
             q.innerHTML = md(questionText);
             block.appendChild(q);
-            if (choices) {
+            // A select that is the product of independent choices (a permission's subject, lifetime and
+            // effect) gets one control per axis. The answer is the chosen values joined by '|' in axis order —
+            // the encoding every flat option's value already uses — and the initial choices are the default
+            // split the same way. An axis marked `submit` (allow / deny) is drawn as the buttons that send the
+            // answer, so the row reads as a phrase ending in its verb; with none, an OK button sends it. A
+            // frontend that ignores `axes` answers from the flat options instead.
+            const axes = field && field.type === 'select' && Array.isArray(field.axes) && field.axes.length > 0 ? field.axes : null;
+            if (axes) {
+              const row = document.createElement('div');
+              row.className = 'prompt-row prompt-axes';
+              const initial = (defaultValue ?? '').split('|');
+              const submitAt = axes.findIndex(a => a.submit === true);
+              const selects = axes.map((axis, i) => {
+                if (i === submitAt) return null;
+                const wrap = document.createElement('label');
+                wrap.className = 'prompt-axis';
+                if (axis.label) {
+                  const cap = document.createElement('span');
+                  cap.className = 'prompt-axis-label';
+                  cap.textContent = axis.label;
+                  wrap.appendChild(cap);
+                }
+                const sel = document.createElement('select');
+                sel.className = 'prompt-axis-select';
+                const opts = (axis.options ?? []).map(asChoice);
+                for (const o of opts) {
+                  const opt = document.createElement('option');
+                  opt.value = o.value;
+                  opt.textContent = o.label;
+                  sel.appendChild(opt);
+                }
+                if (opts.some(o => o.value === initial[i])) sel.value = initial[i];
+                wrap.appendChild(sel);
+                row.appendChild(wrap);
+                return sel;
+              });
+              const answerWith = (value, btn) => {
+                if (btn) row.querySelectorAll('.prompt-choice-btn').forEach(b => b.classList.toggle('primary', b === btn));
+                done();
+                resolve({ answer: axes.map((_, i) => i === submitAt ? value : selects[i].value).join('|') });
+              };
+              const buttons = document.createElement('div');
+              buttons.className = 'prompt-axis-buttons';
+              let first = null;
+              if (submitAt >= 0) {
+                for (const o of (axes[submitAt].options ?? []).map(asChoice)) {
+                  const btn = document.createElement('button');
+                  btn.type = 'button';
+                  btn.className = 'prompt-choice-btn' + (o.value === initial[submitAt] ? ' primary' : '');
+                  btn.textContent = o.label;
+                  btn.onclick = () => answerWith(o.value, btn);
+                  buttons.appendChild(btn);
+                  if (first === null || o.value === initial[submitAt]) first = btn;   // the default, else the first
+                }
+              } else {
+                const ok = document.createElement('button');
+                ok.type = 'button';
+                ok.className = 'prompt-submit';
+                ok.textContent = 'OK';
+                ok.onclick = () => answerWith();
+                buttons.appendChild(ok);
+                first = ok;
+              }
+              row.appendChild(buttons);
+              block.appendChild(row);
+              turnWrap.appendChild(block);
+              if (!isScrollSuppressed()) {
+                programmaticScrollTo(() => {
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                });
+              }
+              first?.focus();
+            } else if (choices) {
               const row = document.createElement('div');
               row.className = 'prompt-choices';
               let defaultBtn = null;

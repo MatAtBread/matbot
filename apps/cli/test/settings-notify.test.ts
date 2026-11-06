@@ -4,7 +4,7 @@ import { makePluginSettings, installSettingsNotifier, installSettingsDefaults, c
          slugSettingsNamespace, ItemChangeKind, runAs, installPrincipalCarrier,
          SETTINGS_NAMESPACE } from '@matatbread/matbot-core';
 import type { CASResult, Notification, Notifier, Store, SettingsDoc } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 

@@ -19,8 +19,7 @@
 // in `ToolContracts` here. This list is load-bearing: a tool whose package is missing is not *unknown*
 // but *unregistered*, and `ToolResultFor` degrades an unregistered key to `unknown` — which type-checks
 // and catches nothing. A panel calling a new tool needs its package added here to be covered.
-import '@matatbread/matbot-core';                     // about_matbot
-import '@matatbread/matbot-tool-plugin';              // plugin, provider
+import '@matatbread/matbot-core';                     // about_matbot, gate_action (plugin, provider: plugin-api)
 import '@matatbread/matbot-sessions';                 // session_action
 import '@matatbread/matbot-edit-session';             // session_edit
 import '@matatbread/matbot-skills';                   // skill_action

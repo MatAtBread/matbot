@@ -17,7 +17,7 @@ const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization'];
 
 export async function originGatedFetch(
   admit: (url: URL) => Promise<void>,
-  input: RequestInfo | URL,
+  input: Request | string | URL,
   init?: RequestInit,
   fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {

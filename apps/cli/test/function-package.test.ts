@@ -255,7 +255,7 @@ test('define, call, redefine, collide, remove and reload a package through tool_
 test('a package is type-checked as a whole, so a private helper is checked against its callers', async () => {
   let index: ToolTypeIndex | undefined;
   const machine = {
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     Notifier: { consume: () => {}, notify: () => {}, subscribe: () => (async function* () {})() },
     tools: { list: () => [], resolve: () => null, register() {}, remove() {}, removeByPlugin() {} },
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },

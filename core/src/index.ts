@@ -22,8 +22,8 @@ export { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey,
 // The `provider update` patch policy, alongside the vault's: written once in plugin-api so the hosts
 // that apply one cannot differ on what a patch MEANS, and re-exported here so an app needs no direct
 // plugin-api dependency to get it.
-export { applyProviderPatch, movedCredentialKeys, patchedFields, checkProviderModel, modelListed, closestIds } from '@matatbread/matbot-plugin-api';
-export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT, permitted, refused, refusalMessage } from '@matatbread/matbot-plugin-api';
+export { applyProviderPatch, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, checkProviderModel, confirmUnlistedModel, modelListed, closestIds } from '@matatbread/matbot-plugin-api';
+export { isTruncatedToolResult, notifyingStore, ItemChangeKind, RegistryChangeKind, SessionAppendKind, FUNCTION_TIMEOUT, permitted, refused, refusalMessage, HTTP_TOOL_SESSION, FORM_AXIS_SEPARATOR } from '@matatbread/matbot-plugin-api';
 // The canonical `type: 'confirm'` answers. Same reason as the patch policy above: an app implementing a
 // PromptFn (or a test standing one in) has to speak them, and must not hard-code the rendered label.
 export { CONFIRM_YES, CONFIRM_NO } from '@matatbread/matbot-plugin-api';
@@ -33,6 +33,9 @@ export { optionValue, optionLabel } from '@matatbread/matbot-plugin-api';
 // Binds `ctx.gate` for a hand-assembled ToolContext — anything standing a tool-invocation door up
 // outside the runner (frontend-web's `POST /tools/:name`) needs it, and gets it through core.
 export { bindGate, bindPluginOps } from '@matatbread/matbot-plugin-api';
+// Calling a tool from outside any turn — an embedding application's own request handler, as a frontend's
+// `POST /tools/:name` does — through every door's validation and gate, with no plugin-api dependency.
+export { invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
 export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';
 // Host boot assembly, from plugin-api's `/host` subpath. An embedding app gets these through core and
@@ -61,6 +64,7 @@ export * from './session-append.js';
 export * from './ephemeral-turn.js';
 export * from './plugin.js';
 export * from './registry.js';
+export * from './plugin-report.js';
 export * from './settings.js';
 export * from './loader.js';
 export * from './tool-registry.js';
@@ -69,7 +73,10 @@ export * from './system-context.js';
 export * from './single-turn.js';
 export * from './media.js';
 export * from './about.js';
-export * from './config/index.js';
 export * from './security/index.js';
 export * from './knowledge/index.js';
 export * from './assemble.js';
+// The default permission policy: what `assembleMachine` seeds when a host passes no `gate`, exported for a
+// policy that composes over it (`createDefaultGate(settings, previous)`) and for tests.
+export { defaultGate, createDefaultGate, createGateTools, makeGateActionTool, denyKey, toStandingAnswer, toScopedAnswers, DEFAULT_GATE_SETTINGS_NS, EVERYWHERE, SESSION_STORE_KEY } from './default-gate/index.js';
+export type { StandingAnswer, ScopedAnswers, GateAnswer, GateEntry, SessionStore, SessionStoreReport } from './default-gate/index.js';

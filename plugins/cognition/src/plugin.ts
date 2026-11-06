@@ -21,32 +21,26 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
   for (const skill of COGNITION_SKILLS) {
     await skills.importIfAbsent(skill.name, skill.content);
     if (triggers && skill.triggers.length > 0) {
-      const seeded = await triggers.importIfAbsent({
+      await triggers.importIfAbsent({
         conditions: skill.triggers.map(t => ({ kind: t.kind, rule: t.trigger })),
         // `use`, not `load`: a fired trigger should make the skill take effect (its content as a
         // directive), not just surface the raw text.
         invoke:     { tool: 'skill_action', params: { action: 'use', name: skill.name } },
         ...(skill.cooldown !== undefined ? { cooldown: skill.cooldown } : {}),
       });
-      // Backfill the cool-down onto an install seeded before it existed — those triggers are the ones
-      // observed looping. Only when the field is entirely absent, so a user who tuned or cleared it
-      // (`cooldown: {}`) keeps their choice.
-      if (skill.cooldown !== undefined && seeded.cooldown === undefined) {
-        await triggers.update(seeded.id, { cooldown: skill.cooldown });
-      }
     }
   }
 
-  // "Remember this" is compiled into the `remember_fact` direct tool. Ensure exactly one trigger
-  // invokes it with the canonical conditions — repointing any legacy trigger that still loads the
-  // retired "Remember this" skill (so an install seeded under the old model converts in place rather
-  // than ending up with both a skill-load trigger and a remember_fact trigger firing in parallel).
+  // "Remember this" is compiled into the `remember_fact` direct tool, which one trigger invokes with the
+  // canonical conditions. A trigger seeded before 0.2.4 still loads the retired skill instead; it is no
+  // longer converted in place, so say so rather than leave two triggers firing for one fact. The
+  // warning is removed in 0.6.0.
   if (triggers) {
-    const legacy = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
-    if (legacy.length > 0) {
-      for (const t of legacy) await triggers.update(t.id, { invoke: { tool: 'remember_fact' }, conditions: REMEMBER_CONDITIONS });
-    } else {
-      await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    const retired = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
+    if (retired.length > 0) {
+      console.warn(`[cognition] trigger(s) ${retired.map(t => t.id).join(', ')} still load the retired "Remember this" skill, `
+        + 'which remember_fact replaced. Delete them with trigger_action.');
     }
   }
 }

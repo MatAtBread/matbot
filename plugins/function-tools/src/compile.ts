@@ -1,7 +1,7 @@
-import { FUNCTION_TIMEOUT, importPermitted, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
-import { stripLeadingTrivia } from './signature.js';
+import { FUNCTION_TIMEOUT, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { DefinitionError, stripLeadingTrivia } from './signature.js';
 import { gatedNetwork, type Asker } from './network.js';
-import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
+import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ImportCaller, PermissionRequest, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 /** The invocation's own part first — the gated loader and the settings read for it, which are the
  *  runner's to wire, not bindings the body names — then the ambient values a body has in scope, then its
@@ -82,7 +82,7 @@ export function onFirstCall<A extends unknown[]>(build: () => Promise<(...args: 
 export async function buildBodyFn(host: CompileHost, definition: string): Promise<CompiledFn> {
   const src = stripLeadingTrivia(definition);
   if (!src.startsWith('{')) {
-    throw new Error(
+    throw new DefinitionError(
       'execute takes a bare BODY, not a function: write the statements between braces, e.g. ' +
       "`{ const xs = await tool.x({}); return xs.length; }`" +
       '. There is no function head, no parameter list and no `=>` — an arrow form would compile and then return nothing at all.',
@@ -103,7 +103,7 @@ export interface Definition { ts: string; js: string }
 
 export async function erase(host: CompileHost, ts: string): Promise<Definition> {
   try { return { ts, js: await host.TypeScriptStripper.strip(ts) }; }
-  catch (e) { throw new Error(`not valid TypeScript (${msg(e)})`); }
+  catch (e) { throw new DefinitionError(`not valid TypeScript (${msg(e)})`); }
 }
 
 export function compileUnder(
@@ -172,34 +172,43 @@ export function compileUnder(
  *
  * Only a builtin or an installed package is ever asked about ({@link importableByName}): a path or a URL
  * is refused without a prompt, because downloading or placing code is a plugin install's job, not a
- * body's. A configured `permittedImports` RESTRICTION is checked next, so a specifier an installation
- * forbids outright is refused without a prompt too — there is nothing to ask about there. With none configured, which
- * is the default, every specifier reaches the gate: a restriction that defaulted to empty would refuse
- * before anyone could be asked, which is the behaviour a permission prompt exists to replace.
+ * body's. Everything else reaches the gate, and a module an installation forbids outright is a standing
+ * denial there (`* node:child_process`), refused with nobody asked.
  */
-function gatedImport(machine: MatbotMachine, ctx: ToolContext, asker: Asker, settings: FunctionRunSettings | undefined): ImportFn {
+function gatedImport(machine: MatbotMachine, ctx: ToolContext, asker: Asker): ImportFn {
   // One decision per specifier per invocation. A body that imports inside a loop would otherwise ask —
   // and read the policy's settings document — once per iteration, and a DENIED one would re-prompt a
   // human on every pass. Scoped to this closure, which `runFunction` builds per call, so a standing
   // answer given or withdrawn between calls is still seen. Only the DECISION is kept: the load itself
   // takes this call's options, and the module cache already makes a repeat import cheap.
   const decided = new Map<string, Promise<void>>();
+  // ONE caller per invocation, so whatever mediates a granted module (a per-path `node:fs` gate) shares
+  // its answers across every import this invocation makes.
+  const caller: ImportCaller = {
+    fn:  asker.fn,
+    who: asker.who,
+    gate: req => ctx.gate({ ...req, namespace: asker.namespace }),
+    snapshot: async () => {
+      const snapshot = await ctx.gateSnapshot();
+      return req => snapshot({ ...req, namespace: asker.namespace });
+    },
+  };
   return async (written: string, options?: ImportCallOptions): Promise<unknown> => {
     if (typeof written !== 'string' || written === '') throw new Error('import needs a module specifier.');
     // Canonical before anything decides, so `os` and `node:os` are one question, one grant and one label.
     const spec = machine.FunctionRunner?.canonicalImport?.(written) ?? written;
     let decision = decided.get(spec);
     if (decision === undefined) {
-      decision = decide(ctx, asker, spec, settings?.permittedImports);
+      decision = decide(ctx, asker, spec);
       decided.set(spec, decision);
     }
     await decision;
     const runner = machine.FunctionRunner;
-    return runner?.import !== undefined ? runner.import(spec, options) : import(spec, options);
+    return runner?.import !== undefined ? runner.import(spec, caller, options) : import(spec, options);
   };
 }
 
-async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: string, permits: readonly string[] | undefined): Promise<void> {
+async function decide(ctx: ToolContext, asker: Asker, spec: string): Promise<void> {
   if (!importableByName(spec)) {
     throw new Error(
       `Cannot import '${spec}': a function body imports only node builtins ('node:fs') and packages already ` +
@@ -207,32 +216,68 @@ async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: str
       'package, or as a matbot plugin with the `plugin` tool.',
     );
   }
-  if (permits !== undefined && !importPermitted(permits, spec)) {
-    throw new Error(
-      `Import of '${spec}' is not permitted on this installation` +
-      (permits.length === 0
-        ? ' — module imports are switched off on this installation.'
-        : `, which allows only: ${permits.join(', ')}.`),
-    );
-  }
-  // Every grant is a broad one, builtins included: `node:child_process` runs programs, `node:module` hands
-  // back `require`, and `node:process` is the very global the runner withholds. A package is broader again,
-  // being loaded as host code: the runner does not compile it, so none of a body's withheld globals apply
-  // to it, and its own imports are never gated, so one answer covers the whole closure. The label says so.
-  const builtin = spec.startsWith('node:');
-  const label = builtin
-    ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
-    : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
-  // Asked under `tool_function`, not the function's own name: that name is the MODEL's, so a gate qualified
-  // by it would mint a fresh id per definition, and a standing answer for "any function" filed under one
-  // would never be read by another. Which function asked lives in the subject instead.
-  const permit = await ctx.gate({ namespace, gate: 'import', subject: `${fn} ${spec}`, label, fallback: false,
-                                  standing: standingAnswers(fn, who, spec) });
+  const permit = await ctx.gate(importRequest(asker, spec));
   if (!permit.allowed) {
     // The source rides in the message because this one surfaces as a thrown error inside a body the
     // model wrote, where "not permitted" alone reads as something to be debugged or routed around.
     throw new Error(refusalMessage(permit, `Import of '${spec}'`));
   }
+}
+
+/**
+ * The question an import of `spec` puts to the gate — one builder for the call and for the check
+ * ({@link importRefusal}), so what the type-check treats as refused is exactly what the call would be.
+ *
+ * Every grant is a broad one, builtins included: `node:child_process` runs programs, `node:module` hands
+ * back `require`, and `node:process` is the very global the runner withholds. A package is broader again,
+ * being loaded as host code: the runner does not compile it, so none of a body's withheld globals apply
+ * to it, and its own imports are never gated, so one answer covers the whole closure. The label says so.
+ *
+ * Asked under `tool_function`, not the function's own name: that name is the MODEL's, so a gate qualified
+ * by it would mint a fresh id per definition, and a standing answer for "any function" filed under one
+ * would never be read by another. Which function asked lives in the subject instead. Specifiers nest at
+ * `:` (`node:` holds every builtin) and `/` (`node:fs/` holds its submodules), so a standing answer
+ * ending at either covers what lies beneath it, configured ones included (`* node:`).
+ */
+function importRequest({ namespace, fn, who }: Asker, spec: string): PermissionRequest & { namespace: string } {
+  const label = spec.startsWith('node:')
+    ? `Allow ${who} to import **${spec}**? It gets whatever that module can do, with matbot's full access.`
+    : `Allow ${who} to import **${spec}** and everything it imports? Imported code runs with matbot's full access, not the function's.`;
+  return { namespace, gate: 'import', subject: `${fn} ${spec}`, label, fallback: false,
+           standing: standingAnswers(fn, who, spec), separators: [':', '/'] };
+}
+
+/** Who a check is for: a defined function, or an `execute` body (`undefined`). */
+export type CheckSubject = { tool: string; compiled: string; resolve?: (versioned: string) => Promise<string> } | undefined;
+
+/**
+ * For {@link ToolCheckOptions.importRefused}: whether the gate in force REFUSES an import outright for
+ * each of `subjects` — read from one snapshot, with the same question the call would ask. Refused means
+ * a standing denial; "nobody decided" is asked at the call and may be allowed, so it is typed.
+ *
+ * Several subjects are a package, whose exports are asked about separately at the call: a module is
+ * refused for the package only if it is refused for every export, since an import any export may make is
+ * one the module's source legitimately names.
+ *
+ * `undefined` where no runner routes a body's imports: then nothing reaches the gate, and a refusal the
+ * check reported would be one nothing enforces.
+ *
+ * A redefinition is asked about under its NEW version, which the lineage links only once the edit is
+ * permitted, after the check — so at define time a grant or denial for that function's earlier versions
+ * is not consulted, only the ones for every function. The call, which is authoritative, sees both.
+ */
+export async function importRefusal(machine: MatbotMachine, ctx: ToolContext, subjects: readonly CheckSubject[]): Promise<((spec: string) => boolean) | undefined> {
+  const runner = machine.FunctionRunner;
+  if (runner === undefined) return undefined;
+  const askers = await Promise.all(subjects.map(askerFor));
+  const snapshot = await ctx.gateSnapshot();
+  return spec => {
+    const canonical = runner.canonicalImport?.(spec) ?? spec;
+    return askers.length > 0 && askers.every(asker => {
+      const decision = snapshot(importRequest(asker, canonical));
+      return !decision.allowed && decision.source !== 'fallback';
+    });
+  };
 }
 
 /**
@@ -246,7 +291,7 @@ async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, spec: str
  * keeps its fixed `#execute`: it has no identity to version, and its label already says a standing answer
  * covers every one-off body.
  */
-async function askerFor(label: { tool: string; compiled: string; resolve?: (versioned: string) => Promise<string> } | undefined): Promise<Asker> {
+async function askerFor(label: CheckSubject): Promise<Asker> {
   if (label === undefined) return { namespace: TOOL_NAME, fn: EXECUTE_SUBJECT, who: 'a one-off function body' };
   const versioned = await versionedSubject(label.tool, label.compiled);
   return { namespace: TOOL_NAME, fn: label.resolve !== undefined ? await label.resolve(versioned) : versioned, who: `function "${label.tool}"` };
@@ -288,14 +333,14 @@ function standingAnswers(fnName: string, who: string, spec: string): { subject: 
   // `@aws-sdk/client-s3` there offered every package in the `@aws-sdk` scope as "anything under".
   const root = spec.split('/', spec.startsWith('@') ? 2 : 1).join('/');
   const dir = spec !== root ? spec.slice(0, spec.lastIndexOf('/') + 1) : undefined;
-  const out = [{ subject: `${fnName} ${spec}`, label: `Always allow ${who} to import ${spec}` }];
+  const out = [{ subject: `${fnName} ${spec}`, label: `${who} to import ${spec}` }];
   if (dir !== undefined) {
-    out.push({ subject: `${fnName} ${dir}`, label: `Always allow ${who} to import anything under ${dir}` });
+    out.push({ subject: `${fnName} ${dir}`, label: `${who} to import anything under ${dir}` });
   }
   if (spec.startsWith('node:')) {
-    out.push({ subject: `${fnName} node:`, label: `Always allow ${who} to import any node builtin` });
+    out.push({ subject: `${fnName} node:`, label: `${who} to import any node builtin` });
   }
-  out.push({ subject: `* ${spec}`, label: `Always allow ANY function to import ${spec}` });
+  out.push({ subject: `* ${spec}`, label: `ANY function to import ${spec}` });
   return out;
 }
 
@@ -311,14 +356,23 @@ export async function* runFunction(
   const emit = (ev: ToolEvent): void => { queue.push(ev); const w = wake; wake = null; w?.(); };
 
   const runner = machine.FunctionRunner;
-  const { tool, toolInContext } = makeToolBox(machine, {
+  // The body's own lifetime, inside the turn's: aborted when the body settles, so a call it started and
+  // did not wait for — a `Promise.race` loser, a sibling of a rejection in `Promise.all`, a call left
+  // behind by an early return — stops with it rather than running on, possibly as a whole agent turn, for
+  // a result nothing will read. Work meant to outlive the call is a `background_job`.
+  const lifetime = new AbortController();
+  const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
+  const { tool, toolInContext, inFlight } = makeToolBox(machine, {
     session: ctx.session,
-    signal:  ctx.signal,
+    signal,
     prompt:  ctx.prompt,
     ...(ctx.provider  !== undefined ? { provider:  ctx.provider  } : {}),
     // How a body reaches this session's own functions: they are never registered, so `tool.x()` finds
     // them only by carrying the turn's tools down, as the runner handed them to this call.
     ...(ctx.turnTools !== undefined ? { turnTools: ctx.turnTools } : {}),
+    // Without this a body's `tool.session_action({ action: 'append' })` on an ephemeral run reaches the
+    // machine's appender, not the run's: past the run's own idea of where its reports go.
+    ...(ctx.appender  !== undefined ? { appender:  ctx.appender  } : {}),
   }, {
     onEvent: emit,
     // The runner's, read once for this call: its tool calls are host code acting for the body, which a
@@ -329,7 +383,7 @@ export async function* runFunction(
   const context: ComposedCallContext = {
     callId:    ctx.callId,
     sessionId: ctx.session.id,
-    signal:    ctx.signal,
+    signal,
     // Normalised here rather than in each renderer: this is the boundary where a model-authored body
     // hands over a number, and `i / n * 100` is the obvious way to compute one. The CLI prints it raw.
     progress:  (pct, message) => emit({
@@ -343,8 +397,8 @@ export async function* runFunction(
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),
   };
 
-  // The runner's settings, read ONCE for this whole invocation and held here: the gate and the runner's
-  // own bound then answer from the same reading, under the one principal an invocation has throughout.
+  // The runner's settings, read ONCE for this whole invocation and held here, for the runner's own bound,
+  // under the one principal an invocation has throughout.
   // Not cached beyond it, because whose settings they are is the settings store's business — partitioned
   // by principal or not at all — and the next invocation may be someone else's. Read ahead of the abort
   // check and the listener, so an abort during the read still stops the body starting, and a read that
@@ -366,12 +420,22 @@ export async function* runFunction(
   // is not interruptible — but its tool calls now refuse to start, and nothing waits on it any longer.
   const onAbort = (): void => { cancelled = true; settle(); };
   ctx.signal.addEventListener('abort', onAbort, { once: true });
-  const importModule = gatedImport(machine, ctx, asker, settings);
+  const importModule = gatedImport(machine, ctx, asker);
   const network = gatedNetwork(ctx, asker);
   void fn({ importModule, ...network, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
-    .finally(() => { done = true; settle(); });
+    .finally(() => {
+      done = true;
+      // Counted only when this is what stops them: after the turn's abort, or the caller abandoning the
+      // call, they were stopped already.
+      const left = signal.aborted ? 0 : inFlight();
+      lifetime.abort();
+      // Said in the log because the caller cannot be told: its result is already settled. A body that
+      // meant the work to finish would otherwise lose it with no trace.
+      if (left > 0) console.warn(`[function-tools] ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}) settled with ${left} tool call${left === 1 ? '' : 's'} still running; ${left === 1 ? 'it was' : 'they were'} stopped.`);
+      settle();
+    });
 
   try {
     for (;;) {
@@ -381,6 +445,9 @@ export async function* runFunction(
     }
   } finally {
     ctx.signal.removeEventListener('abort', onAbort);
+    // However this generator ends — a caller that stops reading included — nothing is waiting on the
+    // body's calls any more.
+    if (!done) lifetime.abort();
   }
   if (!done) { yield { type: 'error', message: CANCELLED }; return; }
   if (errored) {

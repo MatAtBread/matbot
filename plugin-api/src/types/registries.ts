@@ -30,6 +30,9 @@ export interface ToolRegistry {
    *  case can reject into the caller. Registration order across plugins is not a contract; resolve by
    *  name at call time. */
   register(tool: Tool): void;
+  /** Through a plugin's machine, removes only a tool that plugin registered; another's is left in
+   *  place (with a warning), since remove-then-register would replace it without the collision being
+   *  decided. */
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];

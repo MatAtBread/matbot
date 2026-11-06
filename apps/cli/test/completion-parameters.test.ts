@@ -27,9 +27,9 @@ test('an absent parameters stays absent rather than becoming undefined', () => {
   assert.equal('parameters' in completion, false);
 });
 
-// The merge both hosts perform (apps/cli/src/index.ts, apps/web-bundle/src/bootstrap.ts) before handing the
-// config to an adapter. Spelled out here rather than imported because it lives inline in each host's
-// complete(); if that ever becomes a shared helper, point this at it instead.
+// The merge `assembleMachine`'s complete() performs (core/src/assemble.ts) before handing the config to an
+// adapter. Spelled out here rather than imported because it lives inline there; if that ever becomes an
+// exported helper, point this at it instead.
 function hostMerge(profile: ProviderConfig, req: Pick<CompletionRequest, 'parameters'>): ProviderConfig {
   return {
     ...profile,

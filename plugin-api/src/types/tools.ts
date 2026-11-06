@@ -96,15 +96,23 @@ export interface ToolContracts {}
 // generated-code checker closes it deterministically; this closes the same hole in the type itself.
 declare const RESULT: unique symbol;
 declare const ARGS:   unique symbol;
+declare const CALL:   unique symbol;
 
 /**
  * One overload arm of a multi-action tool registered in {@link ToolContracts}: the `Result` it yields
  * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
  * arm that matches any params). Purely type-level — the fields below are phantom and uninstantiable.
+ *
+ * `Call` is for a tool whose result is shaped by the call's own params, which a fixed `Result` cannot say:
+ * the exact, generic call signature {@link ToolProxy} declares instead of `(params: Args) => Promise<Result>`.
+ * `Result` and `Args` remain the whole contract everywhere else (the executor, the wire text, validation),
+ * so they must describe every call the signature admits. Leave it out unless a key or a field of the result
+ * really does depend on the params.
  */
-export interface ToolContract<Result, Args = unknown> {
+export interface ToolContract<Result, Args = unknown, Call = unknown> {
   readonly [RESULT]: Result;
   readonly [ARGS]:   Args;
+  readonly [CALL]:   Call;
 }
 
 /**
@@ -150,8 +158,9 @@ type UnionToIntersection<U> =
 // fallback for a foreign/MCP tool carrying only a JSON-Schema `inputSchema`) keeps a loose, optional-param
 // signature so it stays callable; a typed arm requires its declared params.
 type ArmCallSig<E> =
-  E extends ToolContract<infer R, infer P>
-    ? (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
+  E extends ToolContract<infer R, infer P, infer C>
+    ? C extends (...args: never[]) => unknown ? C
+    : (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
     : never;
 
 // The union of a tool's arm params — the parameter type of the trailing catch-all signature below.
@@ -211,7 +220,6 @@ export interface ToolContext {
    *  work should default to this so the child inherits the same model rather than the config default. */
   provider?:   string;
   workdir?:    string;
-  configPath?: string;
   files?:      FileStore;
   /**
    * The appender belonging to the runner this turn is on, when it is not the machine's — an ephemeral
@@ -249,6 +257,13 @@ export interface ToolContext {
    * `if (!await ctx.gate(…))` is always false. Test `.allowed`.
    */
   gate(req: PermissionRequest & { namespace?: string }): Promise<PermissionDecision>;
+  /**
+   * {@link gate}'s answer with nobody to ask, read now and queried SYNCHRONOUSLY — for a call site that
+   * interposes on a synchronous API and so can neither prompt nor await (see
+   * {@link PermissionGate.snapshot}). Qualified and namespace-checked exactly as {@link gate} is. Take one
+   * per invocation; take a fresh one after {@link gate} has obtained an answer it should reflect.
+   */
+  gateSnapshot(): Promise<(req: PermissionRequest & { namespace?: string }) => PermissionDecision>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */

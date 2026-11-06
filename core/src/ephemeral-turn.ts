@@ -1,4 +1,4 @@
-import type { EphemeralRun, PipelineEvent, Principal, PromptFn, Session, UserContent } from '@matatbread/matbot-plugin-api';
+import type { EphemeralRun, Message, PipelineEvent, Principal, PromptFn, Session, UserContent } from '@matatbread/matbot-plugin-api';
 
 /**
  * One turn on an ephemeral run, from a fresh session to its committed transcript: what a background job
@@ -17,7 +17,9 @@ import type { EphemeralRun, PipelineEvent, Principal, PromptFn, Session, UserCon
  *   transcript its caller was handed and past a cancel that no longer reached it. One turn means one.
  * - An `error` terminal carries no session, so the transcript is then recovered from the run's store.
  *
- * `sessionId` is for a caller that names the session before the turn starts, to log or check it.
+ * `sessionId` is for a caller that names the session before the turn starts, to log or check it. It is only
+ * ever a key into this run's own store, so it may be a session the machine also holds: the run still reads
+ * and writes nothing but its private copy. `initialMessages` is what that copy starts from.
  */
 export async function* runEphemeralTurn(
   ephemeral: EphemeralRun,
@@ -28,11 +30,12 @@ export async function* runEphemeralTurn(
     signal:     AbortSignal;
     prompt?:    PromptFn;
     sessionId?: string;
+    initialMessages?: Message[];
   },
 ): AsyncGenerator<PipelineEvent, Session | undefined> {
   const now = new Date().toISOString();
   const id  = opts.sessionId ?? crypto.randomUUID();
-  await ephemeral.sessions.set(id, { id, version: crypto.randomUUID(), status: 'active', messages: [], createdAt: now, updatedAt: now });
+  await ephemeral.sessions.set(id, { id, version: crypto.randomUUID(), status: 'active', messages: opts.initialMessages ?? [], createdAt: now, updatedAt: now });
 
   const view = await ephemeral.run.open({
     sessionId: id, signal: opts.signal, provider: opts.provider, principal: opts.principal, content: opts.content,
@@ -64,4 +67,30 @@ export async function* runEphemeralTurn(
   // The store, not the terminal's session: a followup turn commits after it, and the transcript is meant to
   // be everything the run did. `final` covers a store that has gone from under it.
   return (await ephemeral.sessions.get(id)) ?? final;
+}
+
+/**
+ * {@link runEphemeralTurn} for a caller with no use for its events: runs it to the end, and reports how it
+ * ended. `failure` is why the turn stopped short (an `error` or `aborted` terminal, or a cancel), because a transcript alone
+ * cannot say: a provider that refused the call leaves a session with no reply in it, which reads the same
+ * as a turn with nothing to say.
+ */
+export async function drainEphemeralTurn(
+  ephemeral: EphemeralRun,
+  opts: Parameters<typeof runEphemeralTurn>[1],
+): Promise<{ session: Session | undefined; failure?: string }> {
+  const turn = runEphemeralTurn(ephemeral, opts);
+  let failure: string | undefined;
+  let finished = false;
+  let next = await turn.next();
+  while (!next.done) {
+    const ev = next.value;
+    if      (ev.type === 'error')   failure = ev.error;
+    else if (ev.type === 'aborted') failure = ev.reason;
+    else if (ev.type === 'done')    finished = true;
+    next = await turn.next();
+  }
+  // A cancel ends this view of the run, so a cancelled turn can stop here with no terminal seen at all.
+  if (failure === undefined && !finished && opts.signal.aborted) failure = 'The turn was cancelled.';
+  return { session: next.value, ...(failure !== undefined ? { failure } : {}) };
 }

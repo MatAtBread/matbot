@@ -1,6 +1,6 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, subTurnDepth } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
-import { TriggerManager } from './manager.js';
+import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
 import type { Trigger, Triggers, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
@@ -464,6 +464,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
+      // A trigger judges what a person said, and what was said back to them. A sub-turn has neither: its
+      // prompt is another model's and its answer goes back to that model, whose own reply is judged here.
+      if (subTurnDepth(ctx.session.messages) > 0) return;
       const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
       // Skip our own agent-phase robo resubmissions — they are not real user turns.
       if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
@@ -545,6 +548,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       if (traceId !== undefined) pendingUserPhase.delete(traceId);
 
       if (ctx.resubmitDepth > 0) return;
+      if (subTurnDepth(ctx.session.messages) > 0) return;   // see the screen hook
 
       const userOut: UserPhaseOutcome = rec ? await rec.verdict : NO_USER_PHASE();
       // `claimed` ⇒ the correction was already delivered on the clean path (the runner's in-situ restart
@@ -685,13 +689,10 @@ export function createTriggersPlugin(): MatbotPluginSpec {
       if (!captured) return base;
       const pinned    = await captured.settings().get<string>('classifierProvider');
       const available = [...captured.providers.keys()];
-      const legacy    = captured.providers.has('skills-classifier');
       if (pinned === undefined) {
         return base +
-          (legacy
-            ? '\n\nThe classifier uses the provider "skills-classifier" (the legacy default present in this install).'
-            : '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
-              'runs on — triggers work out of the box.') +
+          '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
+          'runs on — triggers work out of the box.' +
           ' To pin a small/fast model instead, use the triggers_config tool (action "set"). ' +
           `Available providers: ${available.join(', ') || '(none)'}.`;
       }
@@ -706,6 +707,11 @@ export function createTriggersPlugin(): MatbotPluginSpec {
     async setup(services) {
       captured = services;
       manager  = await setupTriggers(services);
+      if (services.providers.has(RETIRED_CLASSIFIER) && await services.settings().get('classifierProvider') === undefined) {
+        console.warn(`[triggers] a provider named "${RETIRED_CLASSIFIER}" is configured, but since 0.5.0 the classifier `
+          + 'no longer uses it by name — it uses the turn\'s provider. To keep it, set this plugin\'s classifierProvider '
+          + `setting (in the CLI's matbot.yaml: default_settings: { '@matatbread/matbot-triggers': { classifierProvider: ${RETIRED_CLASSIFIER} } })`);
+      }
     },
 
     async teardown() {

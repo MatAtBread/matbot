@@ -19,7 +19,7 @@ import type { Notifications, Notifier } from './notify.js';
  * It matters at 1.0.0, where a plugin still declaring `'0.x'` fails the major check loudly instead of
  * loading against a contract it was never built for.
  */
-export const PLUGIN_API_VERSION = '0.4';
+export const PLUGIN_API_VERSION = '0.5';
 
 // ── Sub-runner types ──────────────────────────────────────────────────────────
 
@@ -115,10 +115,11 @@ export interface PluginResolver {
   /**
    * The runtimes a plugin declares support for via its package.json `matbotRuntime`
    * (e.g. `["node"]`, `["browser"]`, `["node","browser"]`), or `undefined` when the field is
-   * absent — meaning "don't know". The loader skips a plugin *before* importing it when this
-   * returns a non-empty list that excludes the current runtime; `undefined` falls back to the
-   * try-load / catch / rollback path. Reading the declaration is host-specific (walk package.json
-   * on node; consult the baked manifest in the browser), so it lives here, not in the core loader.
+   * absent. The loader refuses a package *before* importing it when this returns a list that
+   * excludes the current runtime, and when it returns none at all: the field is what makes a
+   * package a plugin. Reading the declaration is host-specific (walk package.json on node; consult
+   * the baked manifest in the browser), so it lives here, not in the core loader — and a host that
+   * supplies no `runtimes` has nothing to check, so its loads are imported as before.
    */
   runtimes?(specifier: string): Promise<readonly Runtime[] | undefined>;
 }
@@ -322,8 +323,18 @@ export interface MatbotRuntime {
   readonly systemContext:   SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
   readonly workdir?:        string;
-  /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
-  readonly configPath?:     string;
+  /**
+   * Where the host resolves packages and relative plugin specifiers from: a plugin that writes code for
+   * the host to load (a compiled skill), types against what is installed, or tells a user where to install
+   * a package uses this. Absent ⇒ the host has no such directory (a browser), and the plugin degrades.
+   */
+  readonly projectDir?:     string;
+  /**
+   * Where plugins keep state on disk of their own — a storage backend's files, a sandbox's mount. The host
+   * chooses it; a plugin never derives one from anything else. Absent ⇒ no disk (a browser, an embedder
+   * that gives none), and the plugin degrades.
+   */
+  readonly dataDir?:        string;
 
   /**
    * Whether this process is a background sub-agent (spawned by another matbot, not a top-level

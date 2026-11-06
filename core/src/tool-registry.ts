@@ -1,18 +1,7 @@
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { Tool, ToolRegistry, Notifier, ToolContext, ToolEvent, ToolInputError } from './types.js';
 
-/**
- * The shape of the `ToolCallValidator` service — the single-valued predecessor of the `validate` hook,
- * still consulted as one more opinion beside the hooks so a validator written against it keeps working.
- * `undefined` means NO OPINION and is never read as "valid".
- *
- * @deprecated Register a `validate` hook instead. Removed in 0.5.0, with `ToolCallValidator`.
- */
-export interface ToolInputValidator {
-  validateToolCall(tool: string, parameters: unknown): Promise<ToolInputError[] | undefined>;
-}
-
-/** Judges one call: every `validate` hook, and the `ToolCallValidator` service if one is registered. */
+/** Judges one call: every `validate` hook. */
 export type ToolCallJudge = (tool: string, parameters: unknown, signal: AbortSignal) => Promise<ToolInputError[] | undefined>;
 
 /** Cap on the rendered value. Long enough to identify what was sent, short enough that a base64
@@ -40,23 +29,6 @@ function formatError(e: ToolInputError): string {
   }
   if (shown.length > VALUE_CHARS) shown = `${shown.slice(0, VALUE_CHARS)}…`;
   return `${e.path}: ${e.message}, actual value \`${shown}\``;
-}
-
-/**
- * Declared HERE, by the consumer, rather than by a plugin that implements it: two plugins declaring one
- * key must declare it identically or the merge is a TS2717 in a file neither owns. Core reads it, so core
- * names it.
- *
- * Superseded by the `validate` hook, which matbot's own validators now use. A service key holds one value,
- * so a second validator had to capture the first and delegate to it, which made the pair depend on load
- * order and on each other. Still consulted, as one more opinion, so a validator registered here works.
- */
-declare module '@matatbread/matbot-plugin-api' {
-  interface MatbotServices {
-    /** @deprecated Register a `validate` hook instead: several co-exist, where this key holds one. Still
-     *  consulted, as one more opinion beside the hooks; removed in 0.5.0. */
-    ToolCallValidator?: ToolInputValidator;
-  }
 }
 
 /**

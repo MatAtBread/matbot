@@ -1,9 +1,6 @@
 {
   "name": "@matatbread/matbot-cli",
-  "matbotRuntime": [
-    "node"
-  ],
-  "version": "0.4.25",
+  "version": "0.5.0",
   "engines": {
     "node": ">=24.12.0"
   },
@@ -45,22 +42,21 @@
   },
   "dependencies": {
     "@matatbread/matbot-core": "workspace:^",
-    "@matatbread/matbot-default-gate": "workspace:^",
-    "@matatbread/matbot-files-node": "workspace:^",
+    "@matatbread/matbot-host-node": "workspace:^",
     "@matatbread/matbot-storage-filesystem": "workspace:^",
-    "@matatbread/matbot-tool-plugin": "workspace:^",
     "@matatbread/matbot-provider-anthropic": "workspace:^",
     "@matatbread/matbot-provider-openai-compat": "workspace:^",
     "@matatbread/matbot-provider-google": "workspace:^",
     "@matatbread/matbot-provider-customer-services": "workspace:^",
-    "@matatbread/matbot-provider-chatjimmy": "workspace:^",
-    "@matatbread/matbot-provenance": "workspace:^"
+    "@matatbread/matbot-provider-chatjimmy": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "catalog:",
     "@matatbread/matbot-caching-tool-types": "workspace:^",
     "@matatbread/matbot-function-runner-node": "workspace:^",
+    "@matatbread/matbot-gate-fs-node": "workspace:^",
     "@matatbread/matbot-function-tools": "workspace:^",
+    "@matatbread/matbot-provenance": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-tool-skill-compiler": "workspace:^",

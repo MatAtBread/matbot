@@ -1,5 +1,5 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
-import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionGate } from './types.js';
+import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionContext, PermissionGate, PermissionRequest } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
@@ -29,7 +29,7 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
  * Bind {@link ToolContext.gate} for a tool call, qualifying the suffix the tool supplies with the name
  * it is registered under: `ctx.gate({ gate: 'add', … })` from the `plugin` tool asks `plugin.add`.
  * Qualifying by TOOL name rather than package is what makes one policy cover both runtimes' versions
- * of a tool (node's `tool-plugin` and the browser's `plugin-tool` both register `plugin`), and what
+ * of a tool (the CLI's and the browser's `plugin-tool` both register `plugin`), and what
  * stops a plugin addressing a gate it does not own — tool-name collision on `register` is already
  * resolved, so the name is not something a second plugin can quietly claim.
  *
@@ -43,25 +43,40 @@ export function bindPluginOps(host: PluginOps, prompt: PromptFn): Pick<ToolConte
  * is how "no human is reachable" reaches the policy, and a substitute would make that undecidable.
  * `gate` is the registered `PermissionGate`; it is a non-optional service, but a hand-assembled
  * machine (a test, a minimal embedder) may still have none, so the asking default stands in.
+ *
+ * `context` is where the call is made — its session, which a `session` answer is held against — and is
+ * the binder's to state, never the tool's: the request a tool writes cannot carry it, so no tool can claim
+ * another session's answers. Required, because a door that omitted it would silently never be offered a
+ * session lifetime.
  */
 export function bindGate(
-  gate:   PermissionGate | undefined,
-  tool:   string | Pick<Tool, 'name' | 'pluginName'>,
-  ask:    PromptFn | undefined,
-  tools?: { resolve(name: string): Pick<Tool, 'pluginName'> | null },
-): Pick<ToolContext, 'gate'> {
+  gate:    PermissionGate | undefined,
+  tool:    string | Pick<Tool, 'name' | 'pluginName'>,
+  ask:     PromptFn | undefined,
+  context: PermissionContext,
+  tools?:  { resolve(name: string): Pick<Tool, 'pluginName'> | null },
+): Pick<ToolContext, 'gate' | 'gateSnapshot'> {
   const name  = typeof tool === 'string' ? tool : tool.name;
   const owner = typeof tool === 'string' ? undefined : tool.pluginName;
+  const qualify = ({ namespace, ...req }: PermissionRequest & { namespace?: string }): PermissionRequest => {
+    if (namespace !== undefined && namespace !== name
+        && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
+      throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
+    }
+    return { ...req, gate: `${namespace ?? name}.${req.gate}` };
+  };
   return {
-    gate: async ({ namespace, ...req }) => {
-      if (namespace !== undefined && namespace !== name
-          && (owner === undefined || tools?.resolve(namespace)?.pluginName !== owner)) {
-        throw new Error(`Tool "${name}" cannot ask permission under "${namespace}": a gate namespace must be a tool registered by the same plugin.`);
-      }
-      const qualified = { ...req, gate: `${namespace ?? name}.${req.gate}` };
-      const decision = await (gate ?? askPermissionGate).decide(qualified, ask);
+    gate: async req => {
+      const qualified = qualify(req);
+      const decision = await (gate ?? askPermissionGate).decide(qualified, ask, context);
       if (!decision.allowed && decision.source === 'fallback') reportUnattended(name, qualified.gate, qualified.subject);
       return decision;
+    },
+    // Not reported when unattended: a synchronous caller cannot ask even with a human present, so a
+    // fallback here says nothing about whether anybody was there.
+    gateSnapshot: async () => {
+      const snapshot = await (gate ?? askPermissionGate).snapshot(context);
+      return req => snapshot(qualify(req));
     },
   };
 }
@@ -93,7 +108,7 @@ function reportUnattended(tool: string, gate: string, subject: string): void {
  */
 export type InvokeToolOptions =
   Pick<ToolContext, 'session' | 'signal'>
-  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId' | 'turnTools'>>;
+  & Partial<Pick<ToolContext, 'prompt' | 'provider' | 'callId' | 'turnTools' | 'appender'>>;
 
 /**
  * Programmatically invoke a tool by name, the same way the harness does — resolve it off the
@@ -101,7 +116,7 @@ export type InvokeToolOptions =
  * The host-only bits a one-shot caller can't derive (the session under which the call runs, its
  * abort signal, and an optional interactive `prompt`/`provider`) come in via `opts` — pass the
  * calling tool's `ctx` to forward them all (see {@link InvokeToolOptions}); everything else (vault,
- * plugin (un)loading, workdir/configPath/files) is filled from `machine`.
+ * plugin (un)loading, workdir/files) is filled from `machine`.
  *
  * Throws synchronously if no tool is registered under `name`, or if `opts.signal` has already aborted.
  * When no `prompt` is supplied the tool
@@ -132,11 +147,11 @@ export function invokeTool<K extends string, const P>(
     // The raw `opts.prompt`, not the rejecting stand-in above: a gate must be able to tell "nobody is
     // here" from "a human answered", and `POST /tools/:name` reaching a privileged tool is exactly the
     // non-interactive case the request's `fallback` exists to answer.
-    ...bindGate(machine.PermissionGate, tool, opts.prompt, machine.tools),
+    ...bindGate(machine.PermissionGate, tool, opts.prompt, { session: opts.session.id }, machine.tools),
     ...(opts.provider      !== undefined ? { provider:   opts.provider      } : {}),
     ...(opts.turnTools     !== undefined ? { turnTools:  opts.turnTools     } : {}),
+    ...(opts.appender      !== undefined ? { appender:   opts.appender      } : {}),
     ...(machine.workdir    !== undefined ? { workdir:    machine.workdir    } : {}),
-    ...(machine.configPath !== undefined ? { configPath: machine.configPath } : {}),
     ...(machine.files      !== undefined ? { files:      machine.files      } : {}),
   };
 
@@ -252,10 +267,11 @@ async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise
  *   - `signal` — combined with the call's own, so it can cancel the callee SOONER (a deadline for one
  *     call) and never later. Replacing it outright would let a call outlive the turn the user stopped.
  * Not `prompt`: it is the channel a callee's gates ask through, so supplying one answered them. Not
+ * `appender`: it says where this run's reports go, so a caller could read them or send them elsewhere. Not
  * `session`: some standing answers are per session (`tool_function.edit`'s "in this session"), so naming
  * another borrowed what the user granted there. Not `turnTools`: they resolve beside the registry, so a
  * caller could hand over an executor of its own and have the host give it a `ToolContext`. An allow-list
- * rather than leaving those three out, so that a field added to `InvokeToolOptions` later is not
+ * rather than leaving those four out, so that a field added to `InvokeToolOptions` later is not
  * overridable until someone decides it should be.
  */
 export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: AbortSignal }) => ToolProxy;
@@ -271,37 +287,50 @@ export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: A
  * under that provider (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
  * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. `hostCall` is
  * a `FunctionRunner`'s, for a box whose caller is a body that runner runs: each call's params are
- * copied and the call made through it. Built on {@link invokeTool}/{@link toolResult}, which remain the
- * low-level, dynamic-name seam.
+ * copied and the call made through it. `inFlight()` is how many calls the box has started that have not
+ * settled, for a caller that stops them and wants to say so. Built on {@link invokeTool}/{@link toolResult},
+ * which remain the low-level, dynamic-name seam.
+ *
+ * A call's promise is marked handled as it is made, so a rejection the caller never looks at is not an
+ * unhandled rejection: the caller is often model-authored code, and `void tool.x()` there must not end
+ * the process. The caller still sees the rejection wherever it awaits.
  */
 export function makeToolBox(
   machine:     MatbotMachine,
   defaultCall: InvokeToolOptions,
   opts?:       { onEvent?: (event: ToolEvent) => void; hostCall?: <T>(fn: () => T) => T },
-): { tool: ToolProxy; toolInContext: ToolBox } {
+): { tool: ToolProxy; toolInContext: ToolBox; inFlight: () => number } {
   const host = opts?.hostCall;
+  let inFlight = 0;
+  const settled = (): void => { inFlight--; };
   const build = (call: InvokeToolOptions): ToolProxy =>
     new Proxy({}, {
       get(_target, prop) {
         // A symbol key, or `then`, must not read as a callable tool — otherwise the proxy looks like a
         // thenable and awaiting/returning it would try to invoke a tool named `then`.
         if (typeof prop !== 'string' || prop === 'then') return undefined;
-        return async (params?: unknown): Promise<unknown> => {
-          opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-          const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
-          let value: unknown;
-          if (host === undefined) value = await run(params ?? {});
-          else {
-            // Copied here, in the caller's code, so a getter or `toJSON` among the params runs as the
-            // caller's and nothing of the caller's is left to run past `hostCall` (FunctionRunner.hostCall).
-            const copy: unknown = structuredClone(params ?? {});
-            value = await host(() => run(copy));
-          }
-          opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
-          return value;
+        return (params?: unknown): Promise<unknown> => {
+          inFlight++;
+          const made = callOne(prop, params, call);
+          made.then(settled, settled);
+          return made;
         };
       },
     }) as ToolProxy;
+  const callOne = async (prop: string, params: unknown, call: InvokeToolOptions): Promise<unknown> => {
+    opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
+    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
+    let value: unknown;
+    if (host === undefined) value = await run(params ?? {});
+    else {
+      // Copied here, in the caller's code, so a getter or `toJSON` among the params runs as the
+      // caller's and nothing of the caller's is left to run past `hostCall` (FunctionRunner.hostCall).
+      const copy: unknown = structuredClone(params ?? {});
+      value = await host(() => run(copy));
+    }
+    opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
+    return value;
+  };
   // Each field read off the override by name, once, never spread: whatever else the object carries stays
   // with the caller (see ToolBox for why each field is or is not here).
   const toolInContext: ToolBox = (override) => {
@@ -314,5 +343,5 @@ export function makeToolBox(
       ...(signal !== undefined ? { signal: AbortSignal.any([defaultCall.signal, signal]) } : {}),
     });
   };
-  return { tool: build(defaultCall), toolInContext };
+  return { tool: build(defaultCall), toolInContext, inFlight: () => inFlight };
 }

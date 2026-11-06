@@ -160,7 +160,7 @@ test('an origin that never answers fails the import instead of freezing the proc
 
 // The in-thread hooks see `require()` too, which `register()`'s never did. From inside a fetched tree, a
 // `/…` import means a path on the plugin's ORIGIN; a `require('/…')` means a file on this disk, and
-// tool-plugin's dependency notes make exactly that call. Reading it as the former made it a fetch.
+// the plugin tool's dependency notes make exactly that call. Reading it as the former made it a fetch.
 test('a require of an absolute path from inside a fetched tree reads the file, fetching nothing', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-require-')));
   const tree = join(dir, '.plugins', '127.0.0.1:9', 'a');   // port 9 (discard): nothing would answer
