@@ -2,8 +2,9 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { constants, readlinkSync, realpathSync, statSync } from 'node:fs';
 
-/** Which of the two gates a path argument is put to. A grant to read a path does not let a body change it. */
-export type Access = 'read' | 'write';
+/** Which of the three gates a path argument is put to. Each is independent: a grant to read a path does not let
+ *  a body change it, and neither reading nor writing it lets a body change its permissions, owner or timestamps. */
+export type Access = 'read' | 'write' | 'access';
 
 /** For one call: each path argument's index and the access it needs. */
 type PathArgs = (args: readonly unknown[]) => readonly (readonly [index: number, access: Access])[];
@@ -23,9 +24,9 @@ const READ = [
   'openAsBlob', 'watch', 'watchFile',
 ] as const;
 const WRITE = [
-  'mkdir', 'rmdir', 'rm', 'unlink', 'truncate', 'chmod', 'lchmod', 'chown',
-  'lchown', 'utimes', 'lutimes', 'mkdtemp', 'mkdtempDisposable',
+  'mkdir', 'rmdir', 'rm', 'unlink', 'truncate', 'mkdtemp', 'mkdtempDisposable',
 ] as const;
+const ACCESS = ['chmod', 'lchmod', 'chown', 'lchown', 'utimes', 'lutimes'] as const;
 
 /** The calls taking an open flag in an options argument, with where it is and what it defaults to. They are
  *  asked about as what the flag does: `readFile(p, { flag: 'w' })` truncates, whatever its name says. */
@@ -35,16 +36,28 @@ export const FLAG_OPTION: ReadonlyMap<string, readonly [index: number, flag: str
 );
 
 /**
- * The function members known to take no path — fd-based calls, `unwatchFile` (which only removes a
- * listener), and the classes a body is handed rather than constructs onto a file. Everything else that is
- * neither in this list nor in the path table is REFUSED: the table is written by hand, and a member node
- * adds later (as it added `mkdtempDisposable` and `Utf8Stream`) would otherwise be a way to a file that is
- * asked about by nobody. A body that needs one finds out at once, with a message naming it.
+ * The function members known to reach no file: `unwatchFile` (which only removes a listener), and the classes
+ * a body is handed rather than constructs onto a file. Everything else that is in none of the tables here is
+ * REFUSED: the tables are written by hand, and a member node adds later (as it added `mkdtempDisposable` and
+ * `Utf8Stream`) would otherwise be a way to a file that is asked about by nobody. A body that needs one finds
+ * out at once, with a message naming it.
  */
-export const PATHLESS: ReadonlySet<string> = new Set([
-  'close', 'fchown', 'fchmod', 'fdatasync', 'fstat', 'fsync', 'ftruncate', 'futimes', 'read', 'readv',
-  'write', 'writev', 'unwatchFile',
-].flatMap(n => [n, `${n}Sync`]).concat(['Dirent', 'Stats', 'Dir', '_toUnixTimestamp']));
+export const PATHLESS: ReadonlySet<string> = new Set(['unwatchFile', 'unwatchFileSync', 'Dirent', 'Stats', 'Dir', '_toUnixTimestamp']);
+
+/**
+ * The calls that take a descriptor rather than a path, and what each does with it. A descriptor is a capability
+ * only when the body got it from the gate, so each is checked against the ones this invocation opened: any other
+ * number is a file this process has open for its own reasons, found by trying numbers. `close` forgets it, since
+ * the number is reused. The three that change metadata ask `fs-access` about the file it was opened on, because
+ * the kernel allows them on a descriptor opened only for reading.
+ */
+export const FD_CALLS: ReadonlyMap<string, 'use' | 'close' | 'access'> = new Map(
+  ([
+    ['read', 'use'], ['readv', 'use'], ['write', 'use'], ['writev', 'use'], ['fstat', 'use'],
+    ['fsync', 'use'], ['fdatasync', 'use'], ['ftruncate', 'use'], ['close', 'close'],
+    ['fchmod', 'access'], ['fchown', 'access'], ['futimes', 'access'],
+  ] as const).flatMap(([n, use]) => [[n, use] as const, [`${n}Sync`, use] as const]),
+);
 
 const fixed = (...pairs: (readonly [number, Access])[]): PathArgs => () => pairs;
 
@@ -53,6 +66,7 @@ export function fsPathArgs(withSync: boolean): Map<string, PathArgs> {
   const m = new Map<string, PathArgs>();
   for (const name of READ)  m.set(name, fixed([0, 'read']));
   for (const name of WRITE) m.set(name, fixed([0, 'write']));
+  for (const name of ACCESS) m.set(name, fixed([0, 'access']));
   m.set('copyFile', fixed([0, 'read'], [1, 'write']));
   m.set('cp',       fixed([0, 'read'], [1, 'write']));
   // Both give the source's content a new name, which is asked about as itself — so the source is READ as

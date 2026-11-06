@@ -14,7 +14,7 @@ export { caseInsensitiveAt, directoryOf, openAccesses, realResolve, type Access 
  * The import gate asks whether a body may import `node:fs` at all; once it may, the module is granted
  * whole — every path matbot's user can reach, `.env` and `.data` included. This plugin registers an
  * {@link ImportedModuleWrapper} for `node:fs` and `node:fs/promises`, so the module a body receives asks
- * again per path: `tool_function.fs-read` or `tool_function.fs-write`, keyed by the function and the
+ * again per path: `tool_function.fs-read`, `fs-write` or `fs-access`, keyed by the function and the
  * path's realpath, through the same `PermissionGate` and the same store of standing answers as the import
  * itself. There is no list of its own — what a body may touch without being asked is a standing answer,
  * given at a prompt or configured under `default_settings:` for the gate.
@@ -25,8 +25,7 @@ export { caseInsensitiveAt, directoryOf, openAccesses, realResolve, type Access 
  *
  * **What it is.** A guardrail against an OVER-REACHING body: what a call opens is what was asked about,
  * whatever the body then changes of its own. It is NOT a sandbox against hostile code: a body can rewrite a
- * built-in the gate reads, walk a prototype by hand to node's own classes, or use a descriptor it did not open;
- * a granted PACKAGE gets the raw `node:fs` (it is trusted as itself); and code can reach another IO module
+ * built-in the gate reads; a granted PACKAGE gets the raw `node:fs` (it is trusted as itself); and code can reach another IO module
  * (`node:child_process`). Bounding what the PROCESS may touch is the deployment's — the OS user matbot runs
  * as, a container, or node's `--permission` model. See the README and docs/SECURITY.md.
  *

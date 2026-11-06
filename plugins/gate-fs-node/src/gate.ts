@@ -22,9 +22,16 @@ import { caseInsensitiveAt, directoryOf, realResolve, refusal, type Access } fro
  * of one directory reopens it inside a broader deny. "For this session" is how a piece of work reaches a
  * directory without granting it for ever.
  */
+/** How each gate's act is said: a prompt's verb, and what a refusal says may not be done. */
+export const VERB:   Readonly<Record<Access, string>> = { read: 'read', write: 'write to', access: 'change the permissions, owner or timestamps of' };
+export const DOING:  Readonly<Record<Access, string>> = { read: 'reading', write: 'writing to', access: 'changing the permissions, owner or timestamps of' };
+export const DENIED: Readonly<Record<Access, string>> = {
+  read: 'which may not be read', write: 'which may not be written to', access: 'whose permissions, owner and timestamps may not be changed',
+};
+
 export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Access, op: string, real: string): PermissionRequest {
   const dir  = directoryOf(real);
-  const verb = access === 'read' ? 'read' : 'write to';
+  const verb = VERB[access];
   const { fn, who } = caller;
   // A subject ending at the separator covers everything below it, so an answer for the root — even for
   // "this path", `/` itself — would be an answer for every path: path gating switched off, from a prompt
@@ -54,12 +61,18 @@ export function fsRequest(caller: Pick<ImportCaller, 'fn' | 'who'>, access: Acce
  * obtained, so a body reading one file in a loop is asked once — and a refused one is not asked again on
  * every pass; `queue` serialises the questions, so a `Promise.all` over a directory asks one at a time and
  * each later one sees an "Always … in this directory" given to an earlier one instead of prompting too.
+ * `fds` holds the descriptors the body opened through the gate, each with the realpath it was opened on.
  */
 export interface Decisions {
   snapshot: PermissionSnapshot;
   readonly memo: Map<string, PermissionDecision>;
   queue: Promise<unknown>;
+  readonly fds: Map<number, OpenedFile>;
 }
+
+/** A descriptor the body opened, as the gate saw it. An object, so a late `close` of one descriptor can tell it
+ *  from the next file given the same number. */
+export interface OpenedFile { readonly real: string }
 
 const perCaller = new WeakMap<ImportCaller, Promise<Decisions>>();
 
@@ -68,7 +81,7 @@ const perCaller = new WeakMap<ImportCaller, Promise<Decisions>>();
 export function decisionsFor(caller: ImportCaller): Promise<Decisions> {
   let got = perCaller.get(caller);
   if (got === undefined) {
-    got = caller.snapshot().then(snapshot => ({ snapshot, memo: new Map(), queue: Promise.resolve() }));
+    got = caller.snapshot().then(snapshot => ({ snapshot, memo: new Map(), queue: Promise.resolve(), fds: new Map() }));
     perCaller.set(caller, got);
   }
   return got;
@@ -125,6 +138,16 @@ export async function admit(st: Decisions, caller: ImportCaller, access: Access,
   return real;
 }
 
+/**
+ * A standing refusal of `access` to `real`: one in force for this invocation, from the policy or answered
+ * earlier in it. Not "nobody has decided", which would be asked about, and might be allowed.
+ */
+export function standingDenial(st: Decisions, caller: ImportCaller, access: Access, op: string, real: string): PermissionDecision | undefined {
+  const req = fsRequest(caller, access, op, real);
+  const d = foldedDenial(st, caller, access, op, real) ?? st.memo.get(keyOf(req)) ?? st.snapshot(req);
+  return !d.allowed && d.source !== 'fallback' ? d : undefined;
+}
+
 /** Consult what was decided in advance, never asking. For a synchronous operation, which cannot. */
 export function admitSync(st: Decisions, caller: ImportCaller, access: Access, op: string, arg: string): void {
   const real = realResolve(arg);
@@ -136,7 +159,7 @@ export function admitSync(st: Decisions, caller: ImportCaller, access: Access, o
     const async = op.endsWith('Sync') ? `fs.promises.${op.slice(0, -'Sync'.length)}` : 'the fs.promises form';
     throw refusal(
       `fs.${op} of "${arg}": not permitted for ${caller.who}. A synchronous call cannot ask for permission, ` +
-      `and no standing answer allows ${access === 'read' ? 'reading' : 'writing to'} it. Use ${async} (or the ` +
+      `and no standing answer allows ${DOING[access]} it. Use ${async} (or the ` +
       `callback form) to be asked, or have a standing answer given for tool_function.fs-${access}.`,
     );
   }

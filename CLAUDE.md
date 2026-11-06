@@ -59,7 +59,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
                      imports onto the gate; function_runner_config reads and changes its time bound.
                      OPTIONAL and not in a default install — without it a body runs unbounded,
                      unshadowed and ungated
-    gate-fs-node/  — puts each path a tool_function body's node:fs names to the gate (fs-read / fs-write),
+    gate-fs-node/  — puts each path a tool_function body's node:fs names to the gate (fs-read / fs-write /
+                     fs-access),
                      through function-runner-node's ImportedModuleWrapper seam
     tool-types/    — ToolTypeIndex: derives the tool dts + hosts the codegen checker (node)
     caching-tool-types/— tool-types + its build persisted in settings across restarts (node)
@@ -1136,11 +1137,13 @@ wrapper checks what is USED rather than what was passed: a path is read once and
 stream is handed the guarded fs as its `fs` option so each open it ever makes is an ordinary guarded call, and a
 link is resolved again in the tick of the call. A `Proxy` also needs its reflective traps, or a descriptor hands
 back the raw function. Rewriting a built-in the gate reads is tampering, and stays open. Walking a prototype by
-hand to node's own class rewrites nothing, but what a call returns is node's object, so closing that is the
-membrane again: names are closed (a stream's `constructor` is the guarded class), the walk is not, and the
-README says so. An fd-based call is unasked, so a descriptor number the body never opened is open too, and that
-one has NOT been ruled on. `docs/SECURITY.md` *Known gaps in a function body's gates* is the list, with what is
-ruled, what is not and what nobody has examined. Add a newly found gap there before deciding whether it is acceptable.
+hand to node's own class rewrites nothing, and is closed without a membrane by the same caller rule as the code
+builders: `hideFromBody` (function-runner-node) makes the prototype's `constructor` an accessor that a body reads
+as a refusing stand-in and host code reads as itself, so `s.constructor === fs.ReadStream` still holds outside a
+body. A descriptor is the body's only if it opened it through the gate, per invocation, because fd-based calls
+name no path and any other number is the process's own. `docs/SECURITY.md` *Known gaps in a function body's gates*
+is the list, with what is ruled, what is not and what nobody has examined. Add a newly found gap there before
+deciding whether it is acceptable.
 
 **The criterion is reaching a capability without an import, so `Buffer` is NOT withheld** — it does no IO,
 and node 24 has no other way to base64 bytes. It was, and that bought only a prompt in front of

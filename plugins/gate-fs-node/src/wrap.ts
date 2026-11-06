@@ -1,7 +1,10 @@
 import * as nodeFs from 'node:fs';
+import * as path from 'node:path';
+import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { ImportCaller } from '@matatbread/matbot-plugin-api';
-import { FLAG_OPTION, fsPathArgs, GLOB, globBases, openAccesses, PATHLESS, realResolve, refusal, toPath, type Access } from './paths.js';
-import { admit, admitSync, type Decisions } from './gate.js';
+import { hideFromBody } from '@matatbread/matbot-function-runner-node';
+import { FD_CALLS, FLAG_OPTION, fsPathArgs, GLOB, globBases, openAccesses, PATHLESS, realResolve, refusal, toPath, type Access } from './paths.js';
+import { admit, admitSync, DENIED, standingDenial, type Decisions, type OpenedFile } from './gate.js';
 
 /** `node:fs` members that return synchronously though their names have no `Sync`: they cannot wait for an
  *  answer, so they are treated as synchronous calls. (`watch`'s listener is not a completion callback.) */
@@ -27,7 +30,40 @@ const MAX_ASKS = 4;
 interface Call {
   args:   unknown[];
   checks: readonly (readonly [path: string, access: Access])[];
+  /** Run once the call is admitted, in the tick it is made: what has to hold of the filesystem as it is then. */
+  before?: () => void;
 }
+
+/** A descriptor this invocation did not open through the gate. */
+function notOpened(fd: number, op: string, who: string): Error {
+  return refusal(`fs.${op} of descriptor ${fd}: it was not opened by ${who} through node:fs, so it is not available. ` +
+                 'A function may use only the descriptors it opens, and only until it closes them.');
+}
+
+/**
+ * A stand-in for something of node's a body reaches by walking a prototype rather than by name: `.constructor`
+ * of a stream is node's own class, which opens any file unasked. It keeps the name and the `prototype`, so
+ * `x instanceof s.constructor` still holds, and refuses to be called or constructed.
+ */
+function standIn(name: string, prototype: unknown, instead: string): unknown {
+  const f = function (): never {
+    throw refusal(`${name}, reached through a prototype, is not available to a function body: it is node's own, ` +
+                  `and would reach a file without asking. ${instead}`);
+  };
+  Object.defineProperty(f, 'name', { value: name });
+  Object.defineProperty(f, 'prototype', { value: prototype });
+  return f;
+}
+
+/** The class of `obj` (a stream, a watcher), hidden from bodies on its prototype. Host code is unaffected. */
+function hideClassOf(proto: object, instead: string): void {
+  const cls = (proto as { constructor?: unknown }).constructor;
+  if (typeof cls !== 'function') return;
+  hideFromBody(proto, 'constructor', standIn(cls.name, proto, instead));
+}
+
+/** The metadata a handle's methods change, which `fs-access` decides. */
+const HANDLE_ACCESS = ['chmod', 'chown', 'utimes'] as const;
 type Prepare = (args: readonly unknown[]) => Call;
 
 /** The handles this plugin handed out: the one object that is not a path where a path goes
@@ -50,12 +86,16 @@ function streamOptions(o: unknown): Record<string, unknown> {
  * also leaves no reference to the raw module on the stream. A body's own `fs` option is its own code, and is
  * left in place; a `FileHandle` as `fd` opens nothing and refuses to be combined with one.
  */
+type CheckFd = (fd: number) => void;
+
 const STREAMS = {
   ReadStream:  fileStream('r'),
   WriteStream: fileStream('w'),
-  Utf8Stream:  (args: readonly unknown[], gatedFs: object): Call => {
+  Utf8Stream:  (args: readonly unknown[], gatedFs: object, checkFd: CheckFd): Call => {
     const opts = streamOptions(args[0]);
-    const target = toPath(opts['fd'] ?? opts['dest']);
+    const given = opts['fd'] ?? opts['dest'];
+    if (typeof given === 'number') checkFd(given);
+    const target = toPath(given);
     if (target === undefined) return { args: [{ ...opts, fs: opts['fs'] || gatedFs }], checks: [] };
     const { fd: _fd, ...rest } = opts;
     const accesses = opts['flags'] !== undefined ? openAccesses(opts['flags']) : ['write'] as const;
@@ -65,9 +105,10 @@ const STREAMS = {
 type StreamName = keyof typeof STREAMS;
 
 function fileStream(defaultFlags: string) {
-  return (args: readonly unknown[], gatedFs: object): Call => {
+  return (args: readonly unknown[], gatedFs: object, checkFd: CheckFd): Call => {
     const opts = streamOptions(args[1]);
     const fd = opts['fd'];
+    if (typeof fd === 'number') checkFd(fd);
     if (fd !== undefined && fd !== null) {
       return { args: [undefined, typeof fd === 'object' ? opts : { ...opts, fs: opts['fs'] || gatedFs }], checks: [] };
     }
@@ -108,9 +149,11 @@ function gatedStream(name: StreamName, st: Decisions, caller: ImportCaller): Gat
   if (had !== undefined) return had;
 
   const raw = (nodeFs as unknown as Record<string, new (...a: unknown[]) => unknown>)[name]!;
+  hideClassOf(raw.prototype as object, `Use fs.${name} or the call that makes one, from the module you imported.`);
   const gatedFs = wrapFsModule(nodeFs, 'fs', st, caller);
+  const checkFd: CheckFd = fd => { if (!st.fds.has(fd)) throw notOpened(fd, name, caller.who); };
   const construct = (op: string, args: unknown[], newTarget: object): unknown => {
-    const call = STREAMS[name](args, gatedFs);
+    const call = STREAMS[name](args, gatedFs, checkFd);
     for (const [p, access] of call.checks) admitSync(st, caller, access, op, p);
     return Reflect.construct(raw, call.args, newTarget as new (...a: unknown[]) => unknown);
   };
@@ -147,9 +190,25 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
   const globNames = new Set<string>(withSync ? GLOB : GLOB.filter(n => !n.endsWith('Sync')));
 
   const prepareFor = (prop: string): Prepare | undefined => {
+    const fdUse = withSync ? FD_CALLS.get(prop) : undefined;
+    if (fdUse !== undefined) {
+      return given => {
+        const fd = given[0];
+        // Not a number: node rejects it, as it would have.
+        if (typeof fd !== 'number') return { args: [...given], checks: [] };
+        const opened = st.fds.get(fd);
+        if (opened === undefined) throw notOpened(fd, prop, caller.who);
+        return {
+          args:   [...given],
+          checks: fdUse === 'access' ? [[opened.real, 'access']] : [],
+          ...(fdUse === 'close' ? { before: () => { if (st.fds.get(fd) === opened) st.fds.delete(fd); } } : {}),
+        };
+      };
+    }
     const indices = pathArgs.get(prop);
     if (indices !== undefined) {
       const flagAt = FLAG_OPTION.get(prop)?.[0];
+      const renames = prop === 'rename' || prop === 'renameSync';
       return given => {
         const args = [...given];
         if (flagAt !== undefined) args[flagAt] = copied(args[flagAt]);
@@ -158,6 +217,8 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
         for (const [i, access] of indices(args)) {
           if (!read.has(i)) {
             const arg = args[i];
+            // A descriptor where a path can go (`readFile(fd)`) is one the body must have opened.
+            if (typeof arg === 'number' && !st.fds.has(arg)) throw notOpened(arg, prop, caller.who);
             const p = typeof arg === 'object' && arg !== null && handles.has(arg) ? undefined : toPath(arg);
             read.set(i, p);
             if (p !== undefined) args[i] = p;
@@ -165,7 +226,8 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
           const p = read.get(i);
           if (p !== undefined) checks.push([p, access]);
         }
-        return { args, checks };
+        const from = read.get(0);
+        return { args, checks, ...(renames && from !== undefined ? { before: () => refuseDeniedBeneath(from, prop) } : {}) };
       };
     }
     if (globNames.has(prop)) {
@@ -181,6 +243,44 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
   };
 
   /**
+   * A rename moves everything below its source, and an answer names a path, so a denial of something inside
+   * would no longer name it. Refused when anything inside is under a standing denial of any of the three gates,
+   * saying which and why. Undecided paths do not hold it up, so no rename asks about every file. A link is
+   * moved and not what it points at, so the walk does not follow one. Read in the tick of the call, with the
+   * filesystem as the rename will find it.
+   */
+  const refuseDeniedBeneath = (arg: string, op: string): void => {
+    let isDir = false;
+    try { isDir = nodeFs.lstatSync(path.resolve(arg)).isDirectory(); } catch { /* not there: the rename reports it */ }
+    if (!isDir) return;
+    const pending = [realResolve(arg)];
+    for (let dir = pending.pop(); dir !== undefined; dir = pending.pop()) {
+      let entries: nodeFs.Dirent[];
+      try { entries = nodeFs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const p = path.join(dir, entry.name);
+        for (const access of ['read', 'write', 'access'] as const) {
+          const denied = standingDenial(st, caller, access, op, p);
+          if (denied !== undefined) {
+            throw refusal(refusalMessage(denied,
+              `fs.${op} of "${arg}" would move "${p}", ${DENIED[access]}, out from under that answer`));
+          }
+        }
+        if (entry.isDirectory()) pending.push(p);
+      }
+    }
+  };
+
+  /** A descriptor the body now holds, so it may use it, recorded with the file it was opened on. */
+  const opened = (fd: unknown, call: Call): OpenedFile | undefined => {
+    if (typeof fd !== 'number') return undefined;
+    const entry: OpenedFile = { real: realResolve(call.checks[0]?.[0] ?? '') };
+    st.fds.set(fd, entry);
+    return entry;
+  };
+
+  /**
    * Ask each path in turn (so a two-path call asks its questions one at a time), then run `act` in the same
    * tick as the last look at where the paths lead. An answer is about a file, and a symlink on the way to it
    * can be repointed while the question is open — by a body with write access beside it, deterministically,
@@ -191,19 +291,38 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
     for (let asks = 0; asks < MAX_ASKS; asks++) {
       const answered: string[] = [];
       for (const [p, access] of call.checks) answered.push(await admit(st, caller, access, op, p));
-      if (call.checks.every(([p], i) => realResolve(p) === answered[i])) return act();
+      if (call.checks.every(([p], i) => realResolve(p) === answered[i])) { call.before?.(); return act(); }
     }
     throw refusal(`fs.${op} of "${call.checks[0]?.[0]}": where this path leads keeps changing, so it cannot be asked about.`);
   };
 
-  /** A handle's own stream methods are the classes by another name, so they make the gated ones. */
-  const handedOut = (h: object): object => {
+  /**
+   * A handle's own stream methods are the classes by another name, so they make the gated ones. Its descriptor
+   * is the body's until the handle closes. The methods that change metadata ask `fs-access` about the file it was
+   * opened on, and the prototype's own versions of them are hidden from bodies, since they work on a handle
+   * opened only for reading.
+   */
+  const handedOut = (h: nodeFs.promises.FileHandle, call: Call): object => {
     handles.add(h);
+    const fd = h.fd;
+    const entry = opened(fd, call)!;
+    // A FileHandle is an EventEmitter that says when it closes, which its type declarations leave out.
+    (h as unknown as NodeJS.EventEmitter).once('close', () => { if (st.fds.get(fd) === entry) st.fds.delete(fd); });
     const made = (name: StreamName, op: string) => (o?: object) =>
       gatedStream(name, st, caller).make(op, [undefined, { ...o, fd: h }]);
+    const proto = Object.getPrototypeOf(h) as Record<string, (...a: unknown[]) => unknown>;
+    const metadata = Object.fromEntries(HANDLE_ACCESS.map(m => {
+      const own = proto[m]!;
+      hideFromBody(proto, m, standIn(`FileHandle.${m}`, undefined, `Call handle.${m}(…) on the handle, which asks.`));
+      return [m, { value: async (...a: unknown[]): Promise<unknown> => {
+        await admit(st, caller, 'access', `FileHandle.${m}`, entry.real);
+        return Reflect.apply(own, h, a);
+      } }];
+    }));
     Object.defineProperties(h, {
       createReadStream:  { value: made('ReadStream', 'createReadStream') },
       createWriteStream: { value: made('WriteStream', 'createWriteStream') },
+      ...metadata,
     });
     return h;
   };
@@ -219,13 +338,18 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
       return async (...args: unknown[]): Promise<unknown> => {
         const call = prepare(args);
         const result = await whenAdmitted(call, op, () => Reflect.apply(fn, mod, call.args));
-        return op === 'open' ? handedOut(result as object) : result;
+        return op === 'open' ? handedOut(result as nodeFs.promises.FileHandle, call) : result;
       };
     }
     const callSync = (args: unknown[]): unknown => {
       const call = prepare(args);
       for (const [p, access] of call.checks) admitSync(st, caller, access, op, p);
-      return Reflect.apply(fn, mod, call.args);
+      call.before?.();
+      const result = Reflect.apply(fn, mod, call.args);
+      if (op === 'openSync') opened(result, call);
+      // A watcher's class makes a watcher of anything, asking nobody; the one handed back is already watching.
+      if (op === 'watch' || op === 'watchFile') hideClassOf(Object.getPrototypeOf(result) as object, `Use fs.${op}, which asks.`);
+      return result;
     };
     if (op.endsWith('Sync') || RETURNS_SYNC.has(op)) return (...args: unknown[]): unknown => callSync(args);
     return (...args: unknown[]): unknown => {
@@ -239,6 +363,11 @@ export function wrapFsModule<T extends object>(mod: T, kind: 'fs' | 'promises', 
       // reported on a later tick, as a completion callback always is.
       try { call = prepare(args); }
       catch (e) { queueMicrotask(() => fail(e)); return undefined; }
+      if (op === 'open') {
+        // The descriptor it calls back with is the body's from then on.
+        const done = cb as (e: unknown, fd?: unknown) => void;
+        call.args[call.args.length - 1] = (e: unknown, fd?: unknown) => { if (e == null) opened(fd, call); done(e, fd); };
+      }
       whenAdmitted(call, op, () => {
         // Node throws a bad argument synchronously, which here is inside a promise the caller never
         // sees: uncaught, it is an unhandled rejection that takes the process down. The callback is

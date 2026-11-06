@@ -7,8 +7,10 @@ path the matbot process can, including the `.env` vault and `.data` state. This 
 and `node:fs/promises` modules a body receives (through the runner's `ImportedModuleWrapper` seam), so each
 path the body names is asked about again:
 
-- **`tool_function.fs-read`** or **`tool_function.fs-write`**: separate gates, so a grant to read a path
-  doesn't allow changing it. Writing includes creating, renaming and deleting.
+- **`tool_function.fs-read`**, **`tool_function.fs-write`** and **`tool_function.fs-access`**: three
+  independent gates, so a grant to read a path doesn't allow changing it, and neither reading nor writing it
+  allows changing its permissions, owner or timestamps (`chmod`, `chown`, `utimes`), which is `fs-access`.
+  Writing includes creating, renaming and deleting.
 - **subject `<function> <realpath>`**, keyed like the import gate's. Symlinks, `..` and relative paths are
   resolved first, so a file has one subject however it is spelled, and a link can't lead out of a grant.
   The realpath is the name as stored on disk, so on a volume that ignores case (macOS's default) `.ENV`
@@ -32,7 +34,11 @@ default_settings:
     'tool_function.fs-read':       { '*': ['* /home/matt/project/src/'] }
     'deny:tool_function.fs-read':  { '*': ['* /home/matt/.ssh/', '* /home/matt/project/.env'] }
     'deny:tool_function.fs-write': { '*': ['* /home/matt/project/'] }
+    'deny:tool_function.fs-access': { '*': ['* /home/matt/'] }
 ```
+
+`docs/SECURITY.md` (*A default setup for function bodies*) has a fuller example, including protecting
+matbot's own files, which this plugin assumes nothing about.
 
 `'*'` holds the answer everywhere. Where answers overlap, the most specific wins: the answer nearer the
 path, then the one for this function before any function's. So a denial of a file or a directory inside a
@@ -73,26 +79,33 @@ was asked about, whatever the body then changes of its own:
   dangling one is asked about at the file a write through it would create.
 - **The module can't be read around or written through.** A property descriptor gives the guarded function, and
   an assignment is refused. A stream's `constructor` is the guarded class, on a stream from a handle too.
+- **Node's own classes are refused to a body.** A stream's or a watcher's class reached by walking prototypes,
+  and a file handle's own `chmod`, `chown` and `utimes`, refuse a body and say why. Host code still sees node's
+  own, so identity checks elsewhere in the process hold. (`util.inspect` names such a stream `Readable` rather
+  than `ReadStream`, being the one reader that looks past the property.)
+- **A descriptor is the body's only if it opened it.** `read`, `write`, `fstat` and the other fd-based calls,
+  and a descriptor where a path goes, take only descriptors this invocation opened through the gate, until it
+  closes them. Any other number is a file the process has open for its own reasons. `fchmod`, `fchown` and
+  `futimes` ask `fs-access` about the file the descriptor was opened on.
+- **A directory holding a denied path cannot be renamed**, since an answer names a path and the rename would
+  move the file out from under it. The error names the path and why. Only standing denials hold a rename up, so
+  it never asks about every file, and a link inside is moved rather than followed.
 
-**It does not hold against code written to get past it.** Nothing here stops any of these, and a body shares
-matbot's process, so no in-process wrapper can stop them all:
+**It does not hold against code written to get past it.** Nothing here stops these, and a body shares matbot's
+process, so no in-process wrapper can:
 
-- **rewriting a built-in** the gate itself reads (`Map.prototype.get`, say), which is the tampering
+- **rewriting a built-in** the gate or the policy reads (`Map.prototype.get`, say), which is the tampering
   `docs/SECURITY.md` describes;
-- **walking prototypes by hand**: `Object.getPrototypeOf(Object.getPrototypeOf(stream)).constructor` is node's
-  own class, which asks nobody. What a call returns is node's own object, and closing this would need a wrapper
-  around everything handed out;
-- **a descriptor number the body did not open.** `read`, `write` and the other fd-based calls are not asked
-  about, so `fs.readSync(n, …)` reads whatever else this process has open at `n`. A handle opened for reading
-  can also `chmod` and `chown`;
-- **a race**: a link repointed in the instant between the last look at a path and the kernel's own walk of it.
+- **a race**: a link repointed in the instant between the last look at a path and the kernel's own walk of it;
+- **a hard link made outside matbot**, which is a second name for a file.
 
 It also leaves these alone, by design:
 
 - a **granted package** gets the raw `node:fs` (it is trusted as itself), so IO it does goes unasked;
 - a body can reach another IO module (`node:child_process`), which this plugin doesn't touch;
-- an operation that recurses (`rm`/`cp`/`readdir` with `recursive`, a `**` glob) on a directory granted
-  by its exact path, rather than "anything in" it, acts below what was granted.
+- an operation that recurses (`rm`/`cp`/`readdir` with `recursive`, a `**` glob) on a granted directory acts on
+  what is inside it, including a path denied there. Keep what must never be reached outside any granted
+  directory.
 
 Bounding what the **process** may touch, which is what holds against all of the above, is the deployment's job:
 the OS user matbot runs as, a container, or node's `--permission` model (`--allow-fs-read` / `--allow-fs-write`).

@@ -220,17 +220,18 @@ replace it.
   path or host list. So a function granted `node:fs` reads `.env` and the stored gate answers with no
   escape; the grant is enough — unless `gate-fs-node` is loaded. That plugin mediates the granted
   `node:fs` through the runner's `ImportedModuleWrapper` seam, so each path is asked about again
-  (`tool_function.fs-read` / `fs-write`) through the same gate: an asynchronous call prompts, and a
+  (`tool_function.fs-read`, `fs-write`, and `fs-access` for permissions, owner and timestamps, three
+  independent questions) through the same gate: an asynchronous call prompts, and a
   synchronous one, which cannot, is allowed only by a standing answer already in force. It covers the
   body's own `import('node:fs')`, not a granted package's. A grant for a directory covers everything
   below it, so "anything in /home/me/" includes `.ssh` and `.env` there unless a denial carves them out.
   What it opens is what was asked about, whatever the body then changes of its own: a `Buffer` or `URL`
   rewritten after the call, a stream's `path` or `flags` assigned, `Utf8Stream.reopen`, a symlink repointed
   while a question is open. Those use the module as handed and rewrite nothing shared, so they count as
-  reaching past the gate, and it holds against them. Three things get past it because a body shares matbot's
-  process: rewriting a built-in the gate reads (the tampering in the next point), walking a prototype by hand
-  to node's own unguarded classes, and using a descriptor number it did not open, since fd-based calls are not
-  asked about. Closing the second would need a wrapper around everything handed out. Bounding what the *process* may touch is still the deployment's (the user
+  reaching past the gate, and it holds against them. So does walking a prototype to node's own stream or
+  watcher class, which is refused to a body, and a descriptor is usable only if the body opened it through the
+  gate. A directory holding a denied path cannot be renamed. What still gets past it is listed below, under
+  *Known gaps*. Bounding what the *process* may touch is still the deployment's (the user
   matbot runs as, a container, or node's `--permission` model — `--allow-fs-read`/`--allow-fs-write` cap
   the process whatever a grant allows). Network has a finer gate already — `fetch`/`WebSocket` ask per
   origin (`tool_function.connect`) — but a raw `node:net` socket, once the module is granted, does not.
@@ -262,30 +263,29 @@ replace it.
 
 #### Known gaps in a function body's gates
 
-This list exists so the risk can be assessed. It isn't a ruling that each gap is acceptable, and it isn't complete: *Not yet examined* says where nobody has looked. The ruling that applies to the first group is in `CLAUDE.md` (*What this is not*).
+This list exists so the risk can be assessed. It isn't a ruling that each gap is acceptable, and it isn't complete: *Not yet examined* says where nobody has looked. The ruling that applies to tampering is in `CLAUDE.md` (*What this is not*).
 
-**Confirmed by running them against `gate-fs-node` on Node 24.21, and still open:**
+**Closed in `gate-fs-node`, with a regression test each:** a `Buffer` or `URL` changed after a call; a stream repointed before it opens, or `Utf8Stream.reopen`; a flag that does more than its call's name; a symlink changed while a question is open, or a dangling one; walking a prototype to node's own stream or watcher class, or to a file handle's own `chmod`; a descriptor the body did not open; changing permissions, owner or timestamps through a handle opened only for reading, which now needs `fs-access`; renaming a directory that holds a denied path.
+
+**Open, and confirmed by running them on Node 24.21:**
 
 | Gap | What it needs | Status |
 |---|---|---|
-| Rewriting a built-in the gate reads | `node:fs` granted, and code written to do it | Ruled out of scope: tampering needs a process of its own |
-| Walking prototypes by hand to node's own stream classes, from a stream or a file handle | `node:fs` granted, and a path it may open | Ruled out of scope: closing it is a membrane. Reaching the same class by name is closed |
-| A descriptor number the body did not open, used with an fd-based call | `node:fs` granted | **Not ruled on.** Reads whatever else the process has open |
-| `chmod` and `chown` through a handle opened only for reading | A read grant on the file | **Not ruled on.** A read grant changes metadata |
+| Rewriting a built-in the gate or the policy reads | `node:fs` granted, and code written to do it | Ruled out of scope: tampering needs a process of its own |
+| A recursive `cp`, `rm` or `readdir`, or a `**` glob, on a granted directory acts on a path denied inside it, because only the directory is asked about | A grant of the directory | Accepted. Keep what must never be reached outside any granted directory, rather than carving it out of one |
 
-**From reading the code, not run:**
+**Open, from reading the code, not run:**
 
 | Gap | Status |
 |---|---|
-| A recursive `cp`, `rm` or `readdir` on a granted directory acts on a file denied inside it, because only the directory is asked about | **Not ruled on.** It undercuts a denial carved out of a grant |
-| Renaming a directory moves a denied file to a path the denial no longer names, since subjects are paths | **Not ruled on** |
 | A link swapped between the last check and the kernel's walk of the path. A path check cannot close this | Inherent. Bounding the process is the answer |
-| A watcher's class, reached by name from what `watch` returns, is not guarded. It reveals change events, not contents | **Not ruled on** |
+| A hard link made outside matbot is a second name for a file, which a path check sees as a different file | Inherent to answers that name paths |
+| A descriptor's `fs-access` question names the path it was opened on, which a rename since may have changed | Accepted: it is the same file |
 | Code after a body's first `await` has no time bound, and timers can outlive the call | Documented in the runner. **Risk not assessed** |
 
-**By design, listed for completeness:** a granted package gets the raw module; another granted builtin that does IO or loads modules isn't path-gated; a body can call any registered tool, such as `bash`; a write grant over the stored gate answers lets a body change them.
+**By design, listed for completeness:** a granted package gets the raw module; another granted builtin that does IO or loads modules isn't path-gated; a body can call any registered tool, such as `bash`; a write grant over the stored gate answers lets a body change them. *A default setup for function bodies*, under *Deploying*, shows how to configure against the last three.
 
-**Not yet examined:** the runner's code-builder refusals beyond its existing tests, including whether every route keeps the body's span; the objects a body is handed (`tool`, `context`) and the globals it isn't denied; hard links and mounts made outside matbot; Windows path forms. The network gate was read but not tested: `fetch` copies its input into a `Request` before asking, and `WebSocket` copies its URL.
+**Not yet examined:** the runner's code-builder refusals beyond its existing tests, including whether every route keeps the body's span; the objects a body is handed (`tool`, `context`) and the globals it isn't denied; mounts made outside matbot; Windows path forms. The network gate was read but not tested: `fetch` copies its input into a `Request` before asking, and `WebSocket` copies its URL.
 
 The `function-runner-node` implementation of `FunctionRunner` can **optionally** implement gates on any module imported by code written by the LLM. This is acheived by a plugin that registers a module name and re-implements with gates. The `@matatbread/matbot-gate-fs-node`, also in the repo, does this for the `node:fs` module, and asks the user before a function body reads or writes a file, for specific tool functions. That stops a body that over-reaches, not code written to defeat it (see *A granted module is granted whole*). There are no other implementations of this module wrapping by default, but the included one shows the pattern for doing so.
 
@@ -355,6 +355,59 @@ authority, so it is not gated. A different profiles implementation could choose 
   installation, by principle 1.
 - **An egress proxy** is the deployment-level control for where matbot may connect. The gates decide per
   request; a proxy can enforce a policy that nothing in the process can lift. See below.
+
+### A default setup for function bodies
+
+The CLI with its filesystem storage backend, `@matatbread/matbot-function-runner-node` and
+`@matatbread/matbot-gate-fs-node`. This is one starting point, not a policy matbot imposes: gate-fs-node
+assumes nothing about where matbot keeps its state, so protecting that state is configuration. Each piece
+can also be replaced by one with other defaults and semantics.
+
+```yaml
+plugins:
+  - '@matatbread/matbot-function-runner-node'
+  - '@matatbread/matbot-gate-fs-node'
+
+default_settings:
+  '@matatbread/matbot-default-gate':
+    # Builtins that reach files or run code without passing through gate-fs-node.
+    'deny:tool_function.import':
+      '*': ['* node:child_process', '* node:module', '* node:worker_threads', '* node:vm',
+            '* node:process', '* node:sqlite', '* node:inspector', '* node:wasi']
+    # matbot's own files: secrets, configuration, the code it loads, and its state.
+    'deny:tool_function.fs-read':
+      '*': ['* /srv/matbot/.env', '* /srv/matbot/.data/settings/', '* /home/matbot/.ssh/']
+    'deny:tool_function.fs-write':
+      '*': ['* /srv/matbot/.env', '* /srv/matbot/matbot.yaml', '* /srv/matbot/.plugins/', '* /srv/matbot/.data/']
+    'deny:tool_function.fs-access':
+      '*': ['* /srv/matbot/']
+    # Optional: what bodies may read without being asked.
+    'tool_function.fs-read':
+      '*': ['* /srv/matbot/workspace/']
+```
+
+Here `/srv/matbot` holds `matbot.yaml`, so `.data/` and `.env` sit beside it. Use your own paths, spelled as
+they are stored on disk; a directory ends with a separator.
+
+- **Deny writes to `.data/`.** The filesystem backend keeps the gate's standing answers under
+  `.data/settings/`, so a body that can write there can give itself any permission, and every later call
+  honours it at once. The SQLite backend keeps them in `.data/matbot.db`, which the same denial covers.
+  Writing `matbot.yaml` or `.plugins/` changes the code loaded at the next start.
+- **Deny reads of `.env` and `.data/settings/`.** The first holds the vault's secrets. The second shows which
+  standing answers exist, which a body has no need to know. Add `.data/sessions/` if conversations are private
+  between profiles.
+- **Deny the builtins that go round it.** gate-fs-node wraps `node:fs` alone, so a function granted
+  `node:child_process`, `node:module` (which hands back `require`) or one of the others reaches files unasked.
+  `'* node:'` denies every builtin, if bodies need none.
+- **Keep secrets out of granted directories.** A recursive copy or delete of a granted directory acts on what
+  is denied inside it. A rename is refused, but a denial carved out of a grant is not a guarantee against
+  recursion.
+- **A remembered answer replaces the configured list for that gate.** The first time someone answers "always"
+  for a gate, the configured list is stored with that answer, and later edits to that gate's
+  `default_settings` take effect only after `gate_action clear` for it. Check with `gate_action list` after
+  changing them.
+- **Bound the process as well.** Everything above is decided inside matbot's process. Run it as a dedicated
+  user that cannot read what no body should, and consider node's `--permission` flags or a container.
 
 ### When egress is controlled outside matbot
 

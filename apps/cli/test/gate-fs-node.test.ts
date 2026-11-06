@@ -877,3 +877,133 @@ test('a stream a standing answer allows opens with no prompt, though its open is
   assert.equal((await drain(out)).code, 'EACCES', 'outside it, the human says no');
   assert.equal(prompts.length, 1, 'asked about the file it was pointed at');
 });
+
+// ── What a body can reach without naming a path ───────────────────────────────
+
+/** Run `src` as a function body, through the real runner, handed this invocation's `node:fs`. */
+async function asBody(caller: ImportCaller, src: string, ...args: unknown[]): Promise<unknown> {
+  const runner = createVmFunctionRunner(2000);
+  const fs = await guarded(caller);
+  const noLoader = { importModule: (): Promise<never> => Promise.reject(new Error('no loader in this test')) };
+  return runner.compile(`(async function (fs, a, b) { ${src} })`)(noLoader, fs, ...args);
+}
+
+test('node\'s own stream and watcher classes are refused to a body that reaches them through a prototype', async () => {
+  const { caller } = onlyA();
+  const a = path.join(dir, 'src', 'a.ts');
+  const env = path.join(dir, '.env');
+  const refusedOpen = (src: string) => asBody(caller, `try { ${src}; return 'opened'; } catch (e) { return String(e.message); }`, a, env);
+  const deep = 'Object.getPrototypeOf(Object.getPrototypeOf(fs.createReadStream(a))).constructor';
+  assert.match(String(await refusedOpen(`new (${deep})(b)`)), /not available to a function body/, 'a read stream');
+  assert.match(String(await refusedOpen(`new (Object.getPrototypeOf(Object.getPrototypeOf(fs.createWriteStream(a, { flags: 'a' }))).constructor)(b)`)), /not available to a function body/, 'a write stream');
+  assert.match(String(await refusedOpen(`const w = fs.watch(a); try { new (w.constructor)(); } finally { w.close(); }`)), /not available to a function body/, 'a watcher');
+  // Host code still sees node's own class, so identity checks elsewhere in matbot keep holding.
+  const host = realFs.createReadStream(a);
+  assert.equal(Object.getPrototypeOf(host).constructor, realFs.ReadStream);
+  host.destroy();
+});
+
+test('a body may use only the descriptors it opened through the gate', async () => {
+  const a = path.join(dir, 'src', 'a.ts');
+  const { caller } = onlyA();
+  const hostFd = realFs.openSync(path.join(dir, '.env'), 'r');
+  try {
+    const fs = await guarded(caller);
+    const notOpened = (e: NodeJS.ErrnoException) => e.code === 'EACCES' && /not opened by/.test(e.message);
+    assert.throws(() => fs.readSync(hostFd, Buffer.alloc(8)), notOpened, 'one this process has open');
+    assert.throws(() => fs.fstatSync(hostFd), notOpened);
+    assert.throws(() => fs.readFileSync(hostFd, 'utf8'), notOpened, 'in a path position');
+    assert.throws(() => fs.createReadStream('', { fd: hostFd }), notOpened, 'as a stream\'s fd');
+    assert.throws(() => fs.writeSync(1, 'x'), notOpened, 'stdout too');
+    const err = await new Promise<NodeJS.ErrnoException | null>(res => fs.read(hostFd, Buffer.alloc(8), 0, 8, 0, e => res(e)));
+    assert.ok(err !== null && notOpened(err), 'the callback form reports it');
+    assert.throws(() => fs.closeSync(hostFd), notOpened, 'nor close one of matbot\'s');
+
+    const own = fs.openSync(a, 'r');
+    assert.equal(fs.fstatSync(own).size, 'export const a = 1;'.length, 'its own');
+    fs.closeSync(own);
+    assert.throws(() => fs.fstatSync(own), notOpened, 'and not once it is closed, since the number is reused');
+
+    const st = await decisionsFor(caller);
+    const fsp = wrapFsModule(await import('node:fs/promises'), 'promises', st, caller) as typeof import('node:fs/promises');
+    const h = await fsp.open(a);
+    const viaHandle = h.fd;
+    assert.equal(fs.fstatSync(viaHandle).isFile(), true, 'a handle\'s');
+    await h.close();
+    assert.throws(() => fs.fstatSync(viaHandle), notOpened);
+  } finally { realFs.closeSync(hostFd); }
+});
+
+test('changing permissions, owner or timestamps is its own gate, fs-access, whichever way it is spelled', async () => {
+  const a = path.join(dir, 'src', 'a.ts');
+  const realA = path.join(real, 'src', 'a.ts');
+  // Read and write a.ts, and nothing about its metadata.
+  const asked: string[] = [];
+  const allow = (r: PermissionRequest) => r.subject === `probe@1 ${realA}` && r.gate !== 'fs-access';
+  const caller: ImportCaller = {
+    fn: 'probe@1', who: 'function "probe"',
+    gate: async r => { asked.push(r.gate); return allow(r) ? permitted('user') : refused('user'); },
+    snapshot: async () => r => allow(r) ? permitted('configuration') : refused('fallback'),
+  };
+  const { fs, fsp } = await bothSurfaces(caller);
+  const mode = realFs.statSync(a).mode & 0o777;
+  try {
+    await assert.rejects(fsp.chmod(a, 0o600), /declined/, 'by path, though writing it is allowed');
+    assert.deepEqual(asked, ['fs-access']);
+    // Refused again, now from the answer this invocation was given.
+    assert.throws(() => fs.chmodSync(a, 0o600), /declined/);
+    const fd = fs.openSync(a, 'r');
+    assert.throws(() => fs.fchmodSync(fd, 0o600), /declined/, 'through a descriptor opened for reading');
+    assert.throws(() => fs.futimesSync(fd, new Date(), new Date()), /declined/);
+    fs.closeSync(fd);
+    const h = await fsp.open(a);
+    await assert.rejects(h.chmod(0o600), /declined/, 'through a handle');
+    await assert.rejects(Promise.resolve().then(() => asBody(caller, 'return Object.getPrototypeOf(a).chmod.call(a, 0o600);', h)), /not available to a function body/,
+      'and not round the handle\'s own method');
+    await h.close();
+    assert.equal(realFs.statSync(a).mode & 0o777, mode, 'unchanged');
+
+    const granted = { ...caller, gate: async () => permitted('user'), snapshot: async () => () => permitted('configuration') };
+    const ok = await bothSurfaces(granted);
+    ok.fs.chmodSync(a, 0o640);
+    assert.equal(realFs.statSync(a).mode & 0o777, 0o640, 'allowed when fs-access is');
+  } finally { realFs.chmodSync(a, mode); }
+});
+
+test('a directory holding a denied path cannot be renamed out from under the denial', async () => {
+  const box = path.join(dir, 'box');
+  realFs.mkdirSync(path.join(box, 'inner'), { recursive: true });
+  realFs.writeFileSync(path.join(box, 'inner', 'secret'), 's');
+  realFs.writeFileSync(path.join(box, 'plain'), 'p');
+  realFs.symlinkSync(path.join(dir, '.env'), path.join(box, 'env-link'));
+  const realBox = path.join(real, 'box');
+  try {
+    const { caller, prompts } = defaultPolicy({
+      'tool_function.fs-read':       { '*': [`* ${real}${path.sep}`] },
+      'tool_function.fs-write':      { '*': [`* ${real}${path.sep}`] },
+      'deny:tool_function.fs-read':  { '*': [`* ${path.join(realBox, 'inner', 'secret')}`] },
+    }, '0|once|allow');
+    const { fs, fsp } = await bothSurfaces(caller);
+    const why = (e: NodeJS.ErrnoException) => e.code === 'EACCES'
+      && e.message.includes(path.join(realBox, 'inner', 'secret')) && /may not be read/.test(e.message) && /policy does not allow it/.test(e.message);
+    assert.throws(() => fs.renameSync(box, path.join(dir, 'moved')), why);
+    await assert.rejects(fsp.rename(box, path.join(dir, 'moved')), why);
+    assert.throws(() => fs.renameSync(path.join(box, 'inner'), path.join(dir, 'moved')), why, 'any directory above it');
+    assert.ok(realFs.existsSync(path.join(box, 'inner', 'secret')));
+    assert.equal(prompts.length, 0);
+
+    // A link inside is moved, not what it points at, so a denial of its target does not hold the rename up.
+    const linkOnly = defaultPolicy({
+      'tool_function.fs-read':      { '*': [`* ${real}${path.sep}`] },
+      'tool_function.fs-write':     { '*': [`* ${real}${path.sep}`] },
+      'deny:tool_function.fs-read': { '*': [`* ${path.join(real, '.env')}`] },
+    }, '0|once|allow');
+    const free = await bothSurfaces(linkOnly.caller);
+    realFs.rmSync(path.join(box, 'inner'), { recursive: true });
+    free.fs.renameSync(box, path.join(dir, 'moved'));
+    assert.ok(realFs.existsSync(path.join(dir, 'moved', 'plain')));
+  } finally {
+    realFs.rmSync(box, { recursive: true, force: true });
+    realFs.rmSync(path.join(dir, 'moved'), { recursive: true, force: true });
+  }
+});

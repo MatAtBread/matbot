@@ -7,6 +7,7 @@ import type { FunctionRunner, ImportCaller, MatbotMachine, MatbotPluginSpec } fr
 
 export { createVmFunctionRunner, FUNCTION_SYNC_LIMIT_MS, type ReadRunnerSettings, type VmRunSettings } from './runner.js';
 export { transformBody, ROUTE } from './body-transform.js';
+export { hideFromBody } from './host-only.js';
 export { createRunnerConfigTool, TIMEOUT_KEY, type RunnerConfig } from './config.js';
 export {
   createModuleWrapperRegistry, sharedModuleWrapperRegistry,

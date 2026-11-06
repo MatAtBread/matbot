@@ -46,7 +46,7 @@ const fileOf = ((): (c: unknown) => unknown => {
   return c => apply(getFileName, c, []);
 })();
 
-interface Shared { span: AsyncLocalStorage<true>; ownFiles: string[] }
+interface Shared { span: AsyncLocalStorage<true>; ownFiles: string[]; hidden?: WeakMap<object, Set<PropertyKey>> }
 // One per process, so a reloaded copy of this module shares the span and the replacements, and adds its
 // own file to those whose frames — the check's own — are skipped.
 const KEY = Symbol.for('matbot.functionRunner.hostOnly');
@@ -63,6 +63,31 @@ export function inBody<T>(fn: () => T): T {
  *  the body's span, so a tool's continuations — which have no code of the body's above them — are its own. */
 export function hostCall<T>(fn: () => T): T {
   return apply(SPAN_EXIT, shared.span, [fn]) as T;
+}
+
+/**
+ * Make `owner[key]` read as `standIn` to a body, and as itself to everyone else: for a value a body could
+ * reach by walking an object it was handed, such as a stream prototype's `constructor`, which is node's own
+ * class and opens any file unasked. Replacing the value instead would change it for host code as well, and
+ * `stream.constructor === fs.ReadStream` is the kind of test a package makes. An accessor, so it is decided at
+ * each read, by the same nearest-code rule as the code builders. Assigning it puts a plain value back. Once
+ * per process for an owner and key, however many times it is asked for.
+ */
+export function hideFromBody(owner: object, key: PropertyKey, standIn: unknown): void {
+  const hidden = (shared.hidden ??= new WeakMap());
+  let keys = hidden.get(owner);
+  if (keys === undefined) hidden.set(owner, keys = new Set());
+  if (keys.has(key)) return;
+  const was = descriptor(owner, key);
+  if (was === undefined || !('value' in was) || was.configurable !== true) return;
+  keys.add(key);
+  const value: unknown = was.value;
+  const enumerable = was.enumerable === true;
+  defineProp(owner, key, {
+    get(): unknown { return forBody() ? standIn : value; },
+    set(this: object, v: unknown) { defineProp(this, key, { value: v, writable: true, configurable: true, enumerable }); },
+    enumerable, configurable: true,
+  });
 }
 
 /** Whether the code calling right now is a body's. Fails closed: a stack it cannot read is a body's. */

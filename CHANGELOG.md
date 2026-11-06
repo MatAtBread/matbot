@@ -267,9 +267,12 @@ a second host's needs.
   async, and a specifier with no wrapper is handed through raw. The registry is the process's, so a
   reloaded runner keeps the wrappers registered with the one it replaced. A guardrail against an
   over-reaching body, not a sandbox: a granted package still gets the raw module, and bounding the process
-  is the deployment's (`docs/SECURITY.md`).
+  is the deployment's (`docs/SECURITY.md`). `hideFromBody(owner, key, standIn)` makes a property a body would
+  reach by walking a prototype read as a stand-in to the body and as itself to host code, by the same caller
+  rule that refuses a body the function constructors.
 - **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
-  gate: `tool_function.fs-read` / `tool_function.fs-write`, keyed `<function> <realpath>`, offering the
+  gate: `tool_function.fs-read`, `tool_function.fs-write`, and `tool_function.fs-access` for permissions,
+  owner and timestamps (`chmod`, `chown`, `utimes`), three independent questions, keyed `<function> <realpath>`, offering the
   path and everything in its directory, each for this function or for any (a directory grant covers its
   whole subtree; a denial of the file for any function excludes it from one). Async and callback
   calls ask; sync calls consult a snapshot of the answers in force and throw `EACCES` saying how to be
@@ -292,9 +295,15 @@ a second host's needs.
   asked about at the file a write through it would create. The module's property descriptors are guarded and
   it cannot be written through, and a stream's `constructor` is the guarded class.
 
-  This stops a body that over-reaches by using the module. It does not stop code written to defeat it: rewriting
-  a built-in the gate reads, walking a prototype by hand to node's own classes, or using a descriptor number the
-  body did not open, since fd-based calls are not asked about. See its README and `docs/SECURITY.md`.
+  Node's own stream and watcher classes, reached by walking a prototype, and a file handle's own `chmod`, `chown`
+  and `utimes`, refuse a body; host code still sees node's own. A body may use only the descriptors it opened
+  through the gate, until it closes them, so trying numbers reaches none of the process's own files; `fchmod`,
+  `fchown` and `futimes` ask `fs-access`, which a handle opened for reading no longer bypasses. A directory that
+  holds a path under a standing denial cannot be renamed, and the error names the path and why.
+
+  This stops a body that over-reaches by using the module. It does not stop code written to defeat it by
+  rewriting a built-in the gate or the policy reads, and a recursive copy or delete of a granted directory acts
+  on what is denied inside it. See its README, and `docs/SECURITY.md` for those limits and a default setup.
 - **`background-jobs-node`** — its host is the matbot CLI, which it starts again for each job, and it now
   says so: it extends the config the CLI publishes as `MATBOT_CONFIG` rather than reading one off the
   machine. Under any other host it disables itself, as before; `background-jobs` runs jobs in-process
