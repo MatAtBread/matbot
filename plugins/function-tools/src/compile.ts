@@ -356,9 +356,15 @@ export async function* runFunction(
   const emit = (ev: ToolEvent): void => { queue.push(ev); const w = wake; wake = null; w?.(); };
 
   const runner = machine.FunctionRunner;
-  const { tool, toolInContext } = makeToolBox(machine, {
+  // The body's own lifetime, inside the turn's: aborted when the body settles, so a call it started and
+  // did not wait for — a `Promise.race` loser, a sibling of a rejection in `Promise.all`, a call left
+  // behind by an early return — stops with it rather than running on, possibly as a whole agent turn, for
+  // a result nothing will read. Work meant to outlive the call is a `background_job`.
+  const lifetime = new AbortController();
+  const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
+  const { tool, toolInContext, inFlight } = makeToolBox(machine, {
     session: ctx.session,
-    signal:  ctx.signal,
+    signal,
     prompt:  ctx.prompt,
     ...(ctx.provider  !== undefined ? { provider:  ctx.provider  } : {}),
     // How a body reaches this session's own functions: they are never registered, so `tool.x()` finds
@@ -377,7 +383,7 @@ export async function* runFunction(
   const context: ComposedCallContext = {
     callId:    ctx.callId,
     sessionId: ctx.session.id,
-    signal:    ctx.signal,
+    signal,
     // Normalised here rather than in each renderer: this is the boundary where a model-authored body
     // hands over a number, and `i / n * 100` is the obvious way to compute one. The CLI prints it raw.
     progress:  (pct, message) => emit({
@@ -419,7 +425,17 @@ export async function* runFunction(
   void fn({ importModule, ...network, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
-    .finally(() => { done = true; settle(); });
+    .finally(() => {
+      done = true;
+      // Counted only when this is what stops them: after the turn's abort, or the caller abandoning the
+      // call, they were stopped already.
+      const left = signal.aborted ? 0 : inFlight();
+      lifetime.abort();
+      // Said in the log because the caller cannot be told: its result is already settled. A body that
+      // meant the work to finish would otherwise lose it with no trace.
+      if (left > 0) console.warn(`[function-tools] ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}) settled with ${left} tool call${left === 1 ? '' : 's'} still running; ${left === 1 ? 'it was' : 'they were'} stopped.`);
+      settle();
+    });
 
   try {
     for (;;) {
@@ -429,6 +445,9 @@ export async function* runFunction(
     }
   } finally {
     ctx.signal.removeEventListener('abort', onAbort);
+    // However this generator ends — a caller that stops reading included — nothing is waiting on the
+    // body's calls any more.
+    if (!done) lifetime.abort();
   }
   if (!done) { yield { type: 'error', message: CANCELLED }; return; }
   if (errored) {

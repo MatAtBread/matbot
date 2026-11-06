@@ -250,6 +250,9 @@ a second host's needs.
   choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
   marked `submit` is drawn as the buttons that send the answer.
   `options` stays the answer for a frontend that ignores it, in the same encoding.
+- **`makeToolBox` returns `inFlight()`**, the number of calls it has started that have not settled. Each
+  call's promise is marked handled as it is made, so a call the caller never awaits no longer becomes an
+  unhandled rejection (which ends a Node process) when it fails; a caller that awaits still sees the error.
 
 ### Bug fixes
 
@@ -264,6 +267,12 @@ a second host's needs.
 - **`frontend-web`** — a permission prompt reads as a phrase: what, and for how long, as dropdowns, then
   Allow and Deny as the buttons that answer (an axis marked `submit`). `POST /tools/:name` runs its tool in the fixed session `#http`, which an
   installation configures that door's unattended answers against.
+- **`function-tools`** — a body's tool calls stop when the body settles (#114). They were handed the
+  calling turn's signal, so a `Promise.race` loser, a sibling of a rejected call in `Promise.all`, or a call
+  left running by an early return, a throw or the runner's time bound ran on until the turn ended — with
+  `single_turn`'s `tools: true`, as a whole agent turn. Each invocation now has its own signal inside the
+  turn's (also `context.signal`), aborted as the body settles or its caller stops reading; a warning names
+  the function when that stops calls still running. Work meant to outlive the call is a `background_job`.
 - **`function-tools`** — keeping a function's grants across an edit (`tool_function.edit`) is remembered
   for this session only, a real lifetime rather than the session's id inside the subject.
 - **`function-runner-node`** — `permit_imports` is retired, and `function_runner_config` reads and sets

@@ -287,37 +287,50 @@ export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: A
  * under that provider (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
  * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. `hostCall` is
  * a `FunctionRunner`'s, for a box whose caller is a body that runner runs: each call's params are
- * copied and the call made through it. Built on {@link invokeTool}/{@link toolResult}, which remain the
- * low-level, dynamic-name seam.
+ * copied and the call made through it. `inFlight()` is how many calls the box has started that have not
+ * settled, for a caller that stops them and wants to say so. Built on {@link invokeTool}/{@link toolResult},
+ * which remain the low-level, dynamic-name seam.
+ *
+ * A call's promise is marked handled as it is made, so a rejection the caller never looks at is not an
+ * unhandled rejection: the caller is often model-authored code, and `void tool.x()` there must not end
+ * the process. The caller still sees the rejection wherever it awaits.
  */
 export function makeToolBox(
   machine:     MatbotMachine,
   defaultCall: InvokeToolOptions,
   opts?:       { onEvent?: (event: ToolEvent) => void; hostCall?: <T>(fn: () => T) => T },
-): { tool: ToolProxy; toolInContext: ToolBox } {
+): { tool: ToolProxy; toolInContext: ToolBox; inFlight: () => number } {
   const host = opts?.hostCall;
+  let inFlight = 0;
+  const settled = (): void => { inFlight--; };
   const build = (call: InvokeToolOptions): ToolProxy =>
     new Proxy({}, {
       get(_target, prop) {
         // A symbol key, or `then`, must not read as a callable tool — otherwise the proxy looks like a
         // thenable and awaiting/returning it would try to invoke a tool named `then`.
         if (typeof prop !== 'string' || prop === 'then') return undefined;
-        return async (params?: unknown): Promise<unknown> => {
-          opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-          const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
-          let value: unknown;
-          if (host === undefined) value = await run(params ?? {});
-          else {
-            // Copied here, in the caller's code, so a getter or `toJSON` among the params runs as the
-            // caller's and nothing of the caller's is left to run past `hostCall` (FunctionRunner.hostCall).
-            const copy: unknown = structuredClone(params ?? {});
-            value = await host(() => run(copy));
-          }
-          opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
-          return value;
+        return (params?: unknown): Promise<unknown> => {
+          inFlight++;
+          const made = callOne(prop, params, call);
+          made.then(settled, settled);
+          return made;
         };
       },
     }) as ToolProxy;
+  const callOne = async (prop: string, params: unknown, call: InvokeToolOptions): Promise<unknown> => {
+    opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
+    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
+    let value: unknown;
+    if (host === undefined) value = await run(params ?? {});
+    else {
+      // Copied here, in the caller's code, so a getter or `toJSON` among the params runs as the
+      // caller's and nothing of the caller's is left to run past `hostCall` (FunctionRunner.hostCall).
+      const copy: unknown = structuredClone(params ?? {});
+      value = await host(() => run(copy));
+    }
+    opts?.onEvent?.({ type: 'stdout', chunk: `← ${prop}: ${compactTrace(value)}\n` });
+    return value;
+  };
   // Each field read off the override by name, once, never spread: whatever else the object carries stays
   // with the caller (see ToolBox for why each field is or is not here).
   const toolInContext: ToolBox = (override) => {
@@ -330,5 +343,5 @@ export function makeToolBox(
       ...(signal !== undefined ? { signal: AbortSignal.any([defaultCall.signal, signal]) } : {}),
     });
   };
-  return { tool: build(defaultCall), toolInContext };
+  return { tool: build(defaultCall), toolInContext, inFlight: () => inFlight };
 }
