@@ -167,6 +167,28 @@ a second host's needs.
 
 ### API gaps filled
 
+- **`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
+  turn within the calling session: it has the session's id, principal, tools and gate answers, sees none of
+  its conversation and adds nothing to it, and returns its text with the tool calls it made. `turns: [...]`
+  runs several, with tools or without, at the same time, and returns their results in order; one failing
+  does not stop the others (`ok: false` beside the rest). At most 4 of a call's turns run at once, and turns
+  with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
+  `messages`. A field beside `turns` (`tools: true`, a shared `context`) applies to every turn. A turn with
+  tools has its spend recorded on the calling turn. The one-turn form is unchanged, and its result gains
+  `ok`.
+- **`subTurnDepth`** and **`SUB_TURN_CREATOR`** — how many turns below a conversation a session's messages
+  are, for a hook that has nothing to judge in a turn another turn started.
+- **`ToolContract<Result, Args, Call>`** — an optional third argument, the exact call signature `ToolProxy`
+  declares, for a result shaped by the call's own params. Existing contracts are unaffected.
+- **`drainEphemeralTurn`** and **`runEphemeralTurn`'s `initialMessages`** — run an ephemeral turn to its end
+  and be told whether it failed, which a transcript alone cannot say; and start it from something other
+  than nothing.
+- **A model can name an attachment.** Each one on the outgoing copy now has `[Attachment "name", id …]`
+  beside it, and `single_turn`'s `attach` takes that id. An image used to reach a model with no name or id,
+  so nothing could refer to it.
+- **`InvokeToolOptions.appender`** — a composed call on an ephemeral run now reports where the run reports.
+  It reached the machine's appender instead. `function-tools` forwards it.
+
 - **`ToolCheckOptions.importRefused`** — whether the gate refuses the code being checked an import
   outright. Whoever owns the import gate supplies it (`function-tools`, from one gate snapshot per check),
   and a `ToolTypeIndex` declares no types for a refused module and reports a literal `import(…)` of one as
@@ -398,6 +420,9 @@ a second host's needs.
 - **`@matatbread/matbot-files-node` is no longer published.** Its one export, `FilesystemFileStore`, moved
   into `storage-filesystem`, its only user, and is exported from `@matatbread/matbot-storage-filesystem`.
   Import it from there. The versions already on npm are left there.
+- **`triggers`** — a turn another turn started (`single_turn` with `tools: true`) is not judged on either
+  surface. Its prompt is another model's and its answer goes back to that model, whose own reply is judged;
+  judging it cost two classifier calls per sub-turn, most of what one spent.
 - **`triggers`** — a provider profile named `skills-classifier` is no longer used as the classifier by
   name; the classifier uses the `classifierProvider` setting, else the turn's provider. An install that
   has such a profile and no pin is warned at startup, with the one line that keeps it:

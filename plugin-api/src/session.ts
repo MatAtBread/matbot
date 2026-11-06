@@ -71,3 +71,26 @@ export function foldOntoUserTurn(session: Session, blocks: readonly MessageConte
   return { ...session, messages: session.messages.map((m, i) =>
     i === idx ? { ...m, content: [...m.content, ...blocks] } : m) };
 }
+
+/** The creator of the marker a sub-turn's transcript starts with (`single_turn` with `tools: true`). */
+export const SUB_TURN_CREATOR = 'matbot-sub-turn';
+
+/**
+ * How many turns deep these messages are: 0 for a conversation, 1 for a turn another turn started, and so
+ * on. Read off a marker in the transcript because `ctx.session` is the one thing every door hands a tool or
+ * a hook and a body cannot replace, so nothing has to remember to forward it.
+ *
+ * Here rather than in core because a hook needs it too: a sub-turn has no person on either end (its prompt
+ * is another model's, and its answer goes back to that model), so a hook that judges what a person said, or
+ * what was said back to them, has nothing to judge in one.
+ */
+export function subTurnDepth(messages: readonly Message[]): number {
+  let depth = 0;
+  for (const m of messages) {
+    if (m.role !== 'marker') continue;
+    for (const c of m.content) {
+      if (c.type === 'marker' && c.creator === SUB_TURN_CREATOR) depth = Math.max(depth, (c.data as { depth: number }).depth);
+    }
+  }
+  return depth;
+}

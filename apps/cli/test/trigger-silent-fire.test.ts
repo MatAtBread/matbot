@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MatbotMachine, Message, MessageContent, Store, Tool, ToolEvent } from '@matatbread/matbot-plugin-api';
+import { SUB_TURN_CREATOR } from '@matatbread/matbot-core';
 import { setupTriggers } from '../../../plugins/triggers/src/index.ts';
 import type { Trigger } from '../../../plugins/triggers/src/index.ts';
 
@@ -100,4 +101,23 @@ test('a retract-redo leaves no trigger marker: nothing was evaluated, so nothing
   const retraction = { id: 'r', role: 'marker', content: [{ type: 'marker', creator: 'matbot-retraction', data: {} }] } as unknown as Message;
   const out = await hooks.get('screen')!({ session: session([user('q'), retraction]), signal, config: { provider: 'p', traceId: 'tr' } } as never);
   assert.equal(out, undefined);
+});
+
+// A sub-turn's prompt is another model's and its answer goes back to that model, so there is nothing for a
+// trigger to judge, and judging it cost each sub-turn two classifier calls: most of what one spent.
+test('a sub-turn is not judged on either surface', async () => {
+  const { services, hooks } = machine([trigger('ephemeral'), { ...trigger('followup'), id: 't2' }], []);
+  let judged = 0;
+  const classify = (services as unknown as { singleTurn: (r: never) => Promise<unknown> }).singleTurn;
+  (services as unknown as { singleTurn: unknown }).singleTurn = async (r: never) => { judged++; return classify(r); };
+  await setupTriggers(services);
+  const depth = { id: 'd', role: 'marker', content: [{ type: 'marker', creator: SUB_TURN_CREATOR, data: { depth: 1 } }] } as unknown as Message;
+  const messages = [depth, user('q')];
+  await hooks.get('screen')!({ session: session(messages), signal, config: { provider: 'p', traceId: 'sub' } } as never);
+  assert.deepEqual(await followup(hooks, [...messages, assistant('a')], 'sub'), []);
+  assert.equal(judged, 0);
+
+  await hooks.get('screen')!({ session: session([user('q')]), signal, config: { provider: 'p', traceId: 'top' } } as never);
+  await followup(hooks, [user('q'), assistant('a')], 'top');
+  assert.ok(judged > 0, 'the same triggers do judge a conversation\'s own turn');
 });

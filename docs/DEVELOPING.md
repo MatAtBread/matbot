@@ -738,6 +738,20 @@ declare module '@matatbread/matbot-plugin-api' {
 // invokeTool(machine, 'mcp_action', { action: 'list' }) → result is { servers: string[] }
 ```
 
+A result whose keys or fields depend on the call's own params can say so with a third argument, the exact
+signature `await tool.your_tool(params)` should have. The first two still describe every call, for the
+executor, the wire and validation:
+
+```ts
+interface ToolContracts {
+  fetch_all: ToolContract<
+    Record<string, Page>,
+    Record<string, { url: string }>,
+    <P extends Record<string, { url: string }>>(params: P) => Promise<{ [K in keyof P]: Page }>
+  >;
+}
+```
+
 ### `ToolContext`
 
 ```ts

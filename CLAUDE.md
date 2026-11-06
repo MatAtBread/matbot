@@ -629,6 +629,13 @@ helper, `contractArms` in plugin-api: the declarations go in a namespace of thei
 tool beside them, so the contract stays exactly as written and still resolves, and two packages' types of
 one name never merge. A diagnostic inside such a namespace refuses the tools it serves and no others.
 
+**A result shaped by the call's own params takes a third slot, `Call`.** `ToolContract<Result, Args, Call>`
+carries the exact generic signature `ToolProxy` declares, because a fixed `Result` cannot say "in each
+position, what that turn could return" (`single_turn`'s `turns`). `Result` and `Args` stay the whole contract everywhere else (the executor,
+the wire text, validation), so they must describe every call the signature admits, and a model calling the
+tool directly sees the plain form. Only a source-declared contract can use it: a `toolContract` string is
+still exactly two arguments.
+
 **A defined function's `inputSchema` is the checker's on node, and the text's in the browser.** The browser
 has no compiler, so `function-tools` derives a schema from the parameter text by hand, and that cannot see
 a named or imported type, an alias or `Omit<…>`: each degrades to `{}`, which tells a provider nothing and
@@ -1307,6 +1314,92 @@ carry, so the frontend keeps it as its own SSE event.
 **Distributed is left open, not built.** A registered `Notifier` may forward off-box; it stamps
 `instance` on ingress and must not re-forward a foreign `instance` — that is the loop break.
 
+## Sub-turns (`single_turn`)
+
+`single_turn` (`core/src/single-turn.ts`; the turn itself is `sub-turn.ts`) runs a prompt apart from the
+conversation and returns what it said. Without `tools` it is one request to a model (`singleTurn`): no tools,
+no hooks. With `tools: true` it is a **sub-turn**, a full agent turn **executing within the session**, so it
+has the session's id, principal, tools and gate answers. Its working is held in an ephemeral run's private
+store, which is how a tool avoids writing into a session whose own turn is still running. That is an
+implementation detail and not a session of its own: the id is only a key into that store. `turns` runs several
+at the same time and returns their results in order. None of this is the `mode: 'parallel'` submission, which
+merges its reply into the session it runs beside; these merge nothing, and that is what gives them a clean
+return value.
+
+**One tool, because the two questions are independent.** Whether a piece of work has to act and whether its
+pieces can run at once have nothing to do with each other: seven capitals "in parallel" need no tools, and a
+code review needs them whether or not anything runs beside it. It was two tools, `single_turn` and
+`parallel_turns` (every turn an agent turn), and the name did the choosing: a search for "parallel" found the
+agentic one for pure language work, and nothing pointed one delegated agent turn at a tool called
+"parallel". As one tool, choosing is filling in a parameter, and in probes on DeepSeek and Gemini models set
+`tools` correctly from the prompt alone.
+
+**Concurrency is inside one call, and has to be.** The runner executes a message's tool calls one at a time,
+and that is right rather than an omission: the protocols leave the order to the client but warn that calls
+sent together may depend on one another (Anthropic requires its computer-use batches to run in order), so a
+runner cannot run them at once without knowing what each does. Turns listed in one `turns` call are declared
+independent by the caller, which is what makes running them at once sound. It also works from a direct call
+with no `function-tools`, and no sibling is left running after the call returns. In `turns` a failed turn is
+an `ok: false` entry, since the others' results are worth having; one turn alone fails as the tool does.
+`MAX_CONCURRENT_TURNS` queues rather than refuses, per call.
+
+**One turn's fields or `turns`, at the root**, because every provider requires an object at the top of a
+tool's input schema and Anthropic refuses `anyOf` there; the executor refuses both at once. The one-turn form
+is what `single_turn` always took, so `tool.single_turn({ prompt }).text` still works. Results are positional,
+not keyed by a name the caller chose: against a free-keyed root DeepSeek produced no valid call at all, and a
+provider whose adapter strips `additionalProperties` (Gemini's must) was shown no turn schema. Positions are
+typed through `ToolContract`'s third slot, so `const [review, summary] = await tool.single_turn({ turns })`
+knows which has tool calls and which a transcript. **A field beside `turns` applies to every turn** —
+`context` and `attach` add to each turn's own, the rest are defaults — because that is how a model writes
+"all of these act": Gemini put `tools: true` there unprompted, and refusing it was the one way the flag came
+out wrong. Code sets `tools` per turn, since that is what types each position.
+
+**What a model reads is kept small, and that is a design constraint, not polish.** The description and the
+contract text go out with every turn, and every field named in the result is spelt out in them. So the wire
+form is one flat turn type (the `system`/`transcript` exclusions are in the call signatures and the executor,
+not the wire), and a result is `{ ok, text, toolCalls?, messages? }` or `{ ok: false, error }`, without
+`usage`: spend is accounting, already on the calling turn's ledger. The description is the probed one, word
+for word: without its example neither DeepSeek nor Gemini delegated agentic work at all, and an example whose
+prompts read like commands had Gemini write turns as `bash` calls. Change it only with a probe.
+
+**No history is passed, because the caller selects.** The caller has already read the conversation, so what a
+turn needs goes in `context`, once, written by the one party who knows the whole task; replaying history would
+cost N times on every round for each turn to select the same things for itself. Where a turn only finds out
+what it needs by working, it is told the session's id and can read the conversation.
+
+**The tool set is the caller's.** There was an `exclude` list, and it presupposed that a model can judge from
+a name which tools are dangerous or necessary. It also could not work by wrapping the registry, because a
+body's `tool.x()` resolves from `machine.tools` whatever the runner was given. Session writes do not need the
+protection anyway: they go through `run.write`, which waits for the calling turn without deadlocking. So the
+guarantee is that the RUN writes nothing to the session, and a tool a turn calls can act as it could from the
+calling turn.
+
+**Triggers stand down in a sub-turn.** A trigger judges what a person said and what was said back to them,
+and a sub-turn has neither: its prompt is another model's, and its answer goes back to that model, whose own
+reply is judged. A model cannot predict a hook outside its loop, so this is a rule, not an option. It was most
+of what a sub-turn cost: two classifier calls each. `triggers` reads `subTurnDepth` (plugin-api) and
+returns; the hooks are still dispatched, because `function-tools`' `screen` hook is how session functions
+reach the turn.
+
+**Depth is a marker in the turn's transcript** (`MAX_SUB_TURN_DEPTH`, `SUB_TURN_CREATOR`), because
+`ctx.session` is the one thing every door hands a tool or a hook and a body cannot replace, so nothing has to
+remember to forward it. A field on `ToolContext` would be lost at the first door that hand-picks fields, which
+is what happened to `appender`. It does not survive a background job, whose turn is a session of its own. The
+caller's other markers are copied in too, because a session-scoped function is stored as one.
+
+**`system` is for a turn without tools, and with tools `attach` takes this session's attachments only.** A
+sub-turn has the machine's system prompt, and a stored file attached by name would be written into the
+session's media as the turn opened; a turn with tools can open a stored file itself.
+
+**`messages` is opt-in per turn** (`transcript: true`). A tool result is a value in the transcript, so a direct
+call would otherwise put N whole transcripts into the conversation before the model could reduce anything.
+
+**Spend is charged to the calling turn by hand.** A sub-turn's entries land on its own head, which is thrown
+away, and their roll-up into this tool's scope names a head the calling session does not have, so `flushUsage`
+drops them. Re-recording them after the turn puts them on the calling turn, attributed to the tool call. The
+other ephemeral callers (a run-now background job, a skill demonstration) lose that spend from the caller's
+ledger today.
+
 ## Session appends
 
 `services.SessionAppender` adds messages to a session **without running a turn** — a background job's
@@ -1449,6 +1542,12 @@ implement.
 goes in the *registry* rather than on the base object, because `unifyServices` resolves an own property
 first and a member spelled there is one `register()` could never reach. Unregistering reverts to that
 default rather than turning media off.
+
+**A model names an attachment by the id it is shown beside it** (`<message id>#<index>`,
+`withAttachmentsShown`), on the outgoing copy only. A model never sees a `file-ref`: it gets bytes, which carry
+no id or name, or a note. The id is an address within the session, so it can only find that session's
+attachments, and it is how `single_turn`'s `attach` takes one, with tools or without. It adds a stable
+line to the wire of a session with media, which costs a few tokens and no cache.
 
 **Residency is a byte budget** (`MEDIA_RESIDENCY_BYTES`, 8MB), walked newest-first, computed **once per
 turn**. Beyond it a `file-ref` is left alone and the converters degrade it to `[Attached file: x]` —
