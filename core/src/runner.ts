@@ -26,7 +26,7 @@ const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T>
 // Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
 // and visible to a reader while elided from every submission: the model's own text is already truncated
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
-const TRUNCATION_CREATOR = 'matbot-truncation';
+export const TRUNCATION_CREATOR = 'matbot-truncation';
 
 /** An AbortSignal's reason as a turn-terminal string. `reason` is `any` by spec (a caller may abort with
  *  anything), so the two abort exits both had to narrow it; they narrowed it identically. */

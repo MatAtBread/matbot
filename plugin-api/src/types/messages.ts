@@ -74,7 +74,7 @@ export type MessageContent = (
  * Unregistered creators fall back to `data: unknown`. The base `MessageContent` member stays
  * loose (`creator: string`) so the union and its exhaustive switches are unaffected.
  *
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface MarkerData {

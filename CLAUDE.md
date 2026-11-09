@@ -68,6 +68,7 @@ plugins/            — one directory per package, flat but for the frontend/pro
     tool-store/    — store_action: named persistent stores with generated CRUD tools
     edit-session/  — session_edit tool (cut/fork/split/compact)
     sessions/      — session_action: list/get/rename/hide
+    session-data/  — session_data: intermediate results kept in a session as markers, read back by id
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence
     json-validation/— validate hook checking inputs against inputSchema (cross-runtime)
@@ -280,7 +281,7 @@ The CLI publishes the config it booted with as `MATBOT_CONFIG`, beside `IS_SUB_A
 
 ## Open-registry augmentation
 
-**Five extension points, one technique** — the most distinctive thing about matbot's API, and previously explained five times in five places. Each is an empty (or near-empty) interface in `plugin-api` that a package adds a key to via `declare module`; declaration merging accumulates every loaded plugin's contribution, so `plugin-api` never changes and never learns that the package exists. Helper types derive the real shapes from the merged registry.
+**Six extension points, one technique** — the most distinctive thing about matbot's API, and previously explained five times in five places. Each is an empty (or near-empty) interface in `plugin-api` that a package adds a key to via `declare module`; declaration merging accumulates every loaded plugin's contribution, so `plugin-api` never changes and never learns that the package exists. Helper types derive the real shapes from the merged registry.
 
 | Registry | Key | Value | Home |
 |---|---|---|---|
@@ -289,6 +290,12 @@ The CLI publishes the config it booted with as `MATBOT_CONFIG`, beside `IS_SUB_A
 | `Notifications` | `<package-name>#<InterfaceName>` | the notification shape | `notify.ts` |
 | `MarkerData` | marker creator | the `data` shape | `types/messages.ts` |
 | `ProviderMeta` | the package's namespace | its round-trip state | `types/provider.ts` |
+| `SessionTypes` | tool name | what the session being checked holds, for that tool | `types/tools.ts` |
+
+`SessionTypes` is the one a package does not augment itself: its tool's `sessionType(session)` answers, and
+the checker augments it under that tool's name for one check made on a session's behalf (`function-tools`'
+`sessionContext`), so a tool fills its own key and no other. Otherwise it is the same technique, and a check
+made for no session sees it empty — the "absence is a type" consequence below.
 
 Four consequences follow from the technique, and account for most of the per-registry rules stated elsewhere in this document:
 
@@ -297,7 +304,7 @@ Four consequences follow from the technique, and account for most of the per-reg
 3. **Absence is a type** — `?:` is the whole mechanism by which "may not be loaded" reaches a call site. Degrade; never fall back to loading it (*Discovery vs. direct dependency*).
 4. **Unregistered ⇒ loose, not broken** — an unknown tool name yields `unknown`, an unregistered marker creator `data: unknown`. Base types stay permissive so the unions still work.
 
-The author-facing version is `docs/DEVELOPING.md` *Open-registry augmentation*; each of the five declarations points at it rather than restating it.
+The author-facing version is `docs/DEVELOPING.md` *Open-registry augmentation*; each of the six declarations points at it rather than restating it.
 
 ---
 
@@ -1323,8 +1330,8 @@ has the session's id, principal, tools and gate answers. Its working is held in 
 store, which is how a tool avoids writing into a session whose own turn is still running. That is an
 implementation detail and not a session of its own: the id is only a key into that store. `turns` runs several
 at the same time and returns their results in order. None of this is the `mode: 'parallel'` submission, which
-merges its reply into the session it runs beside; these merge nothing, and that is what gives them a clean
-return value.
+merges its reply into the session it runs beside; these merge no messages, and that is what gives them a clean
+return value. What does come back is the **markers its tools recorded**, below.
 
 **One tool, because the two questions are independent.** Whether a piece of work has to act and whether its
 pieces can run at once have nothing to do with each other: seven capitals "in parallel" need no tools, and a
@@ -1373,6 +1380,15 @@ body's `tool.x()` resolves from `machine.tools` whatever the runner was given. S
 protection anyway: they go through `run.write`, which waits for the calling turn without deadlocking. So the
 guarantee is that the RUN writes nothing to the session, and a tool a turn calls can act as it could from the
 calling turn.
+
+**What a sub-turn's tools record comes back, as `single_turn`'s own markers.** A marker a tool yields is its
+record about the session (data it kept, a function it defined), and a sub-turn is part of the calling turn's
+work, so `runSubTurn` hands every marker its run produced to the caller, which yields them before its result
+and the runner stores them as it would any tool's. Core's record of the RUN stays behind: its depth (copied
+back, it would raise the session's), a truncation, a retraction, a hook that threw. There is no flag, because
+nothing calling a sub-turn can know what its tools will record, so a model would set one at random. A turn
+that failed carries nothing, as a crash must not commit half a turn. Inherited markers are not repeated: they are
+the seed, which `own` excludes.
 
 **Triggers stand down in a sub-turn.** A trigger judges what a person said and what was said back to them,
 and a sub-turn has neither: its prompt is another model's, and its answer goes back to that model, whose own
@@ -1431,6 +1447,64 @@ run (`services.ephemeral`), so its own session is in a private memory store no o
 reports through the appender its runner hands tools as `ToolContext.appender` — the scheduler's, which labels
 the message with the job and points it at the job's conversation. Its framing rides in its first message,
 never the system context, which is machine-wide.
+
+## Session data (`session_data`)
+
+`plugins/session-data` keeps a JSON value in a session as a **marker** and reads it back by a short id, so a
+tool's output can be handed to a later step — a query's rows to a chart, turns apart — without the model
+reading it. Being a marker, an entry is private to its session, shared when the session is, carried by fork and
+compaction, gone with a cut back past it, and never sent to a model. The write that matters is from a
+`tool_function` body (`const rows = await tool.q(…); return tool.session_data({ action: 'write', … })`): what
+the model reads back is the entry's id, description and type, never its data. Neither the producing nor the
+consuming tool knows the plugin exists; the body is the glue, which is why a ref is a plain id and not a
+scheme: it only ever goes back to `session_data`.
+
+**A marker from a nested call is kept.** `makeToolBox` passes a callee's `marker` events to its `onEvent`,
+which `function-tools` yields as its own. It kept only the result, so a callee that recorded something
+reported success and its record was gone — a session `define` made from a body said "Defined" and did not
+exist the next round.
+
+**Write-once, capped at 64KB of JSON** (`MAX_ENTRY_BYTES`, refused as `invalid` with the size, saying to use a
+tool that takes data of that size — naming none, because which storage tools an install has, and what it calls
+them, is not this plugin's to know). The session document is written whole at every turn's start and end,
+which is why session *media* is always a reference; this is the deliberate exception, and the cap is its price.
+An entry never changes (`drop` is a later tombstone, which frees nothing), so a fork shares no mutable state.
+
+**Readable within the call that wrote it.** A tool's markers reach the session when its call ends, so a body
+that writes and reads would find nothing. The pending writes are keyed on the session OBJECT the call was
+handed: every call inside it is handed that object, and the runner moves on to a new one carrying the
+markers, so the cache covers exactly the window and is never cleared. Not the quiescent edge — that is
+machine-wide and says nothing about when one call's markers land. A sub-turn is a new object, so it does not
+see a write its caller has not finished.
+
+**A registered tool with one contract, typed per session at check time.** `read` is a `Call`-slot generic,
+`<K extends string>({ id: K }) => Promise<SessionDataRead<K>>`, which looks `K` up in this tool's key of
+`SessionTypes` — empty in every declaration. A check made on a session's behalf (`execute`, a session
+`define`, its re-`check`, `types`) appends what `sessionType(session)` answers: a map from each held id to the
+type inferred from its value (`shapeOf`). So a literal id read in a body is typed exactly, and its rows pass to
+a typed tool with no narrowing; an id not held, or known only at run time, reads `unknown`. A global function
+is checked with nothing appended, so its reads are `unknown` and narrowed, and a read the session running it
+does not hold fails at the call, reported. That is the reason it is registered: it was a turn tool, rebuilt
+each round with an arm per entry, and a global function could not call it at all — a rule borrowed from
+session functions, which genuinely exist in one session only, where `session_data` exists in all of them.
+
+Why each piece is the shape it is:
+- **The type is inferred from the value, not the writer's static type.** An entry never changes, so a type
+  describing this exact value is exact; the static type of what was written is wrong after the JSON round
+  trip (a `Date` reads back as a string, `undefined` and methods are gone), and a direct model write has none.
+  It is re-derived on every read rather than taken from the marker, because it is spliced into a check as
+  source and a stored string is whatever last edited the session file.
+- **A map looked up by one generic, not an overload per entry.** Checker time and the size of "No overload
+  matches this call" grew with every entry; a lookup costs the same however many a session holds.
+- **`SessionTypes` lives in plugin-api** because the generated tool types are one file that copies a package's
+  own declarations into itself, and an augmentation cannot add a new name to another module: plugin-api is
+  the one module every check resolves. Keyed by tool name and written by the checker, so a tool fills its own
+  key and no other.
+- **The description never changes.** It listed the held entries, so every write changed a tool definition,
+  which sits ahead of everything in a provider's prompt cache and discarded it for the whole conversation.
+  `list` finds what a session holds.
+- **The written type is not carried through a just-written id.** `write<T>` returning an id that `read` turns
+  back into `T` is the JSON round-trip lie again, and the body already holds the value it wrote.
 
 ## Accounting
 

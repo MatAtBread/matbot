@@ -1,8 +1,9 @@
-import type { Message, MatbotMachine, Principal, SessionAppender, ToolContext, UserContent } from '@matatbread/matbot-plugin-api';
+import type { MarkerData, Message, MessageContent, MatbotMachine, Principal, SessionAppender, ToolContext, UserContent } from '@matatbread/matbot-plugin-api';
 import { createMessage, defaultingPrompt, failureOf, rejectingPrompt, SUB_TURN_CREATOR } from '@matatbread/matbot-plugin-api';
 import { recordUsage } from '@matatbread/matbot-plugin-api/host';
 import { drainEphemeralTurn } from './ephemeral-turn.js';
-import { withFailureNote } from './runner.js';
+import { TRUNCATION_CREATOR, withFailureNote } from './runner.js';
+import { RETRACTION_CREATOR } from './session-runner.js';
 import { usageEntries } from './usage.js';
 
 /** A conversation's own turn is depth 0, so this allows a sub-turn and a sub-turn that one starts, and no
@@ -53,6 +54,22 @@ function chargeToCaller(messages: readonly Message[]): void {
   }
 }
 
+// Core's record of how the RUN went — its depth, a cut-off reply, a retracted answer, a hook that threw — which
+// describes a transcript that is thrown away, so it stays with it. Raising the session's depth would be the
+// worst of them.
+const RUN_BOOKKEEPING: ReadonlySet<string> = new Set<keyof MarkerData | 'matbot-retraction'>([
+  SUB_TURN_CREATOR, TRUNCATION_CREATOR, RETRACTION_CREATOR, 'matbot-hooks',
+]);
+
+/** Every other marker a sub-turn's run produced: what its tools recorded about the session (data it kept, a
+ *  function it defined), which belongs to the session the sub-turn ran within. A sub-turn is part of the
+ *  calling turn's work, and no flag decides this, because nothing calling one can know what its tools will
+ *  record. */
+function carriedMarkers(own: readonly Message[]): MessageContent[] {
+  return own.filter(m => m.role === 'marker')
+    .flatMap(m => m.content.filter(c => c.type === 'marker' && !RUN_BOOKKEEPING.has(c.creator)));
+}
+
 /** What a sub-turn's private transcript starts from: the caller's markers, because what a session's tools are
  *  can depend on them (a session-scoped function is stored as one) and a marker never reaches a model, then
  *  one more, recording the depth. */
@@ -74,7 +91,9 @@ export function subTurnFrame(sessionId: string): UserContent {
 /**
  * One full agent turn within the calling session, run on an ephemeral run's private store under the
  * session's own id: so it has the session's principal, tools and gate answers, and an answer a person gives
- * it holds for the session, while what the run writes never reaches the session itself.
+ * it holds for the session, while what the run writes never reaches the session itself — except the markers
+ * its tools recorded, which go to `carry` for the caller to yield as its own, so the runner stores them in the
+ * session as it would the caller's. A turn that failed carries nothing: a crash must not commit half a turn.
  */
 export async function runSubTurn(
   machine: MatbotMachine,
@@ -83,6 +102,7 @@ export async function runSubTurn(
   principal: Principal,
   ctx:     ToolContext,
   signal:  AbortSignal,
+  carry:   (markers: MessageContent[]) => void,
 ): Promise<SubTurnWork | SubTurnFailure> {
   if (signal.aborted) return { ok: false, error: 'Cancelled before it started.' };
   try {
@@ -99,6 +119,7 @@ export async function runSubTurn(
     chargeToCaller(own);
     if (failure !== undefined) return { ok: false, error: failure };
     if (session === undefined) return { ok: false, error: 'The turn left no transcript.' };
+    carry(carriedMarkers(own));
     return reduce(own, turn.transcript);
   } catch (e) {
     // Refused media, chiefly, which is raised before the turn exists: its message names the file.

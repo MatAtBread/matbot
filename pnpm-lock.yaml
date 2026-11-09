@@ -66,6 +66,9 @@ importers:
       '@matatbread/matbot-provenance':
         specifier: workspace:^
         version: link:../../plugins/provenance
+      '@matatbread/matbot-session-data':
+        specifier: workspace:^
+        version: link:../../plugins/session-data
       '@matatbread/matbot-sessions':
         specifier: workspace:^
         version: link:../../plugins/sessions
@@ -517,6 +520,15 @@ importers:
         version: 6.0.3
 
   plugins/rumsfeld:
+    devDependencies:
+      '@matatbread/matbot-plugin-api':
+        specifier: workspace:^
+        version: link:../../plugin-api
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
+  plugins/session-data:
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^

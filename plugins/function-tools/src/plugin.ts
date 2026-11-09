@@ -6,7 +6,7 @@ import type {
 import { buildAsyncFn, buildBodyFn, importRefusal, onFirstCall, runFunction, INJECTED, EXECUTE_SUBJECT, TOOL_NAME, type CheckSubject, type CompiledFn } from './compile.js';
 import { DEFINITION_INVALID, DefinitionError, parseSignature, paramsSchema, unwrapPromise, type ParsedParam, type ParsedSignature } from './signature.js';
 import { parsePackage, buildPackageFn, exportFn, type ParsedPackage } from './package.js';
-import { MARKER_CREATOR, sessionFunctions, turnContracts, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
+import { MARKER_CREATOR, sessionFunctions, turnContracts, sessionTypes, shadowMessage, type SessionFunctionMarker, type SessionFunctionRecord, type SessionFunctionRow } from './session.js';
 import { Lineage, carriedNote } from './lineage.js';
 
 const PLUGIN_NAME       = 'function-tools';
@@ -225,6 +225,14 @@ function parseDefinition(definition: string): DefinedSignature {
  */
 const contractOf = (sig: ParsedSignature): string =>
   `ToolContract<${sig.returnType !== undefined ? unwrapPromise(sig.returnType) : 'unknown'}, ${paramsTypeText(sig.params)}>`;
+
+/** What a check made on a session's behalf appends after the code it checks: the turn's own tools'
+ *  contracts, then what every tool says the session holds (`SessionTypes`). Never for a global function,
+ *  which runs in sessions it cannot see. */
+function sessionContext(machine: MatbotMachine, ctx: ToolContext, own?: { name: string; contract: string }): string {
+  return turnContracts(ctx.turnTools, own)
+    + sessionTypes([...machine.tools.list(), ...(ctx.turnTools?.values() ?? [])], ctx.session);
+}
 
 /** A global definition's failed type-check. A global function calling one of this session's functions
  *  fails the check (its check never sees them) and the bare diagnostic does not say why — it would run
@@ -745,7 +753,7 @@ class SessionFunctions {
     let checkedAgainst: string | undefined;
     let inputSchema: JSONSchema | undefined;
     if (index !== undefined && !noTypeCheck) {
-      const report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: sig.name, contract: contractOf(sig) }), {
+      const report = await index.check(checkSnippet(sig) + sessionContext(this.machine, ctx, { name: sig.name, contract: contractOf(sig) }), {
         parametersOf: ['__fn'],
         ...await refusedFor(this.machine, ctx, [{ tool: sig.name, compiled: definition, resolve: this.lineage.resolve }]),
       });
@@ -783,7 +791,7 @@ class SessionFunctions {
       else {
         try {
           const sig = parseSignature(rec.definition);
-          report = await index.check(checkSnippet(sig) + turnContracts(ctx.turnTools, { name: rec.name, contract: contractOf(sig) }),
+          report = await index.check(checkSnippet(sig) + sessionContext(this.machine, ctx, { name: rec.name, contract: contractOf(sig) }),
             await refusedFor(this.machine, ctx, [{ tool: rec.name, compiled: rec.definition, resolve: this.lineage.resolve }]));
         } catch (e) { report = findingRow('PARSE', e instanceof Error ? e.message : String(e)); }
       }
@@ -1075,7 +1083,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
             // parse and therefore no head to get wrong.
             const index = machine.ToolTypeIndex;
             if (index !== undefined && act.noTypeCheck !== true) {
-              const report = await index.check(`async function __fn() ${act.definition}` + turnContracts(ctx.turnTools),
+              const report = await index.check(`async function __fn() ${act.definition}` + sessionContext(machine, ctx),
                 await refusedFor(machine, ctx, [undefined]));
               if (!report.ok) { yield invalid(`type error(s) — fix and re-run, or pass noTypeCheck to bypass:\n${renderCheck(report)}`); return; }
             }
@@ -1137,7 +1145,7 @@ function functionTool(machine: MatbotMachine, store: FunctionStore, packages: Pa
               yield { type: 'result', value: { available: false, dts: '' } };
               return;
             }
-            yield { type: 'result', value: { available: true, dts: `${await index.dts()}${turnContracts(ctx.turnTools)}\n` } };
+            yield { type: 'result', value: { available: true, dts: `${await index.dts()}${sessionContext(machine, ctx)}\n` } };
             return;
           }
           case 'remove': {

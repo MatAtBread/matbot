@@ -337,8 +337,8 @@ resolves from the plugin's cache directory, then the host, so:
 
 ## Open-registry augmentation
 
-matbot's most distinctive API idea, and the one thing worth learning before anything else: **five
-different extension points are the same technique.** Learn it once and you can read all five.
+matbot's most distinctive API idea, and the one thing worth learning before anything else: **six
+different extension points are the same technique.** Learn it once and you can read all six.
 
 Each is an empty (or near-empty) interface in `plugin-api` that your package *adds a key to* via
 `declare module`. TypeScript merges declarations across the whole program, so the interface ends up
@@ -352,6 +352,7 @@ know your package exists. Helper types then derive the real shapes from the merg
 | `Notifications` | `<package-name>#<InterfaceName>` | your notification shape | `notify`/`consume` are typed and your `kind` cannot collide |
 | `MarkerData` | a **marker creator** | your `data` shape | `Marker<'your-creator'>` reads/writes typed |
 | `ProviderMeta` | your **package's namespace** | e.g. `google?: { … }` | core carries provider round-trip state opaquely and never changes when you add some |
+| `SessionTypes` | a **tool name** | nothing yourself: your tool's `sessionType(session)` answers, and the checker adds it for one check | a contract reads what a session holds (`session_data`'s entries by id), and a global function's check sees none of it |
 
 ```ts
 declare module '@matatbread/matbot-plugin-api' {
@@ -373,7 +374,7 @@ Four properties follow from the technique, and explain most of the per-registry 
 - **Unregistered means loose, not broken.** An unknown tool name yields `unknown`, an unregistered
   marker creator yields `data: unknown`. The base types stay permissive so the unions still work.
 
-Each of the five declarations carries its own specifics. This is the shared shape underneath.
+Each of the six declarations carries its own specifics. This is the shared shape underneath.
 
 ### The same technique, one level down: result shapes
 
@@ -972,7 +973,7 @@ replayed in history — Gemini 3 "thought signatures" are mandatory on every his
 `functionCall` or the request 400s. That rides on a tool call's `meta?: ProviderMeta`, on both
 `CompletionEvent` and `MessageContent`, so core stores and replays it without understanding it.
 
-`ProviderMeta` is one of the five open-registry augmentation points: declare your own namespaced
+`ProviderMeta` is one of the six open-registry augmentation points: declare your own namespaced
 slice from your own module and `plugin-api` never changes when you add round-trip state.
 
 ```ts
@@ -1442,6 +1443,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-mcp-http` | `mcp_action` | Connect to HTTP/SSE MCP servers (Node + browser) |
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
+| `@matatbread/matbot-session-data` | `session_data` (a turn tool, `screen` hook) | Keep intermediate results in a session as markers and read them back by id, typed by what each holds; shared when the session is |
 | `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks) | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |

@@ -78,7 +78,7 @@ const DEFAULT_STEER_NUDGE: MessageContent[] = [{
 // Marker creator for a retract-and-rerun: its `data.retracted` carries the popped (superseded) turn
 // messages so a frontend can render them struck-through and a post-mortem can audit them. Core-owned
 // because the pop is a pump operation, not a plugin's.
-const RETRACTION_CREATOR = 'matbot-retraction';
+export const RETRACTION_CREATOR = 'matbot-retraction';
 
 /**
  * A tool's description with its wire contract appended — the text the model actually reads for every

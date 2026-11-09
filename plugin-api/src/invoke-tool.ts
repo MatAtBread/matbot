@@ -163,14 +163,17 @@ export function invokeTool<K extends string, const P>(
 /**
  * The one drain: consume a tool event stream, keeping the last `result` and throwing on the first
  * `error`. Whether a stream that yielded NO result is a failure is the caller's question, and the only
- * thing the three public drains ever disagreed on — so it is the only thing they pass in.
+ * thing the three public drains ever disagreed on — so it is the only thing they pass in. A `marker` goes
+ * to `onMarker` when there is one: it is the callee's durable record, which a drain that keeps only the
+ * value would lose while the callee reported success (a session `define` made from a body was simply gone).
  */
-async function drain<R>(events: AsyncIterable<ToolEvent<R>>): Promise<{ value: R | undefined; hadResult: boolean }> {
+async function drain<R>(events: AsyncIterable<ToolEvent<R>>, onMarker?: (ev: ToolEvent<R>) => void): Promise<{ value: R | undefined; hadResult: boolean }> {
   let value: R | undefined;
   let hadResult = false;
   for await (const ev of events) {
     if      (ev.type === 'result') { value = ev.value; hadResult = true; }
     else if (ev.type === 'error')  { throw new Error(ev.message); }
+    else if (ev.type === 'marker') { onMarker?.(ev); }
   }
   return { value, hadResult };
 }
@@ -251,8 +254,8 @@ function compactTrace(v: unknown): string {
  * and resolve to `undefined` rather than throwing: an explicit `noTypeCheck`, and the browser, where there
  * is no `ToolTypeIndex`. Both are opted into.
  */
-async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>): Promise<R | undefined> {
-  return (await drain(events)).value;
+async function drainProxyResult<R>(events: AsyncIterable<ToolEvent<R>>, onMarker?: (ev: ToolEvent) => void): Promise<R | undefined> {
+  return (await drain(events, onMarker)).value;
 }
 
 /**
@@ -285,7 +288,8 @@ export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: A
  *
  * `tool` is a {@link ToolProxy} bound to `callContext`; `toolInContext({ provider })` returns a fresh proxy
  * under that provider (never mutating `tool`). `onEvent`, when supplied, receives a `stdout`
- * trace per call (→ name / ← result) so a run is observable; omit it for a silent surface. `hostCall` is
+ * trace per call (→ name / ← result) so a run is observable, and every `marker` a callee yields, which
+ * its owner must pass on for the callee's record to be kept; omit it for a silent surface. `hostCall` is
  * a `FunctionRunner`'s, for a box whose caller is a body that runner runs: each call's params are
  * copied and the call made through it. `inFlight()` is how many calls the box has started that have not
  * settled, for a caller that stops them and wants to say so. Built on {@link invokeTool}/{@link toolResult},
@@ -319,7 +323,10 @@ export function makeToolBox(
     }) as ToolProxy;
   const callOne = async (prop: string, params: unknown, call: InvokeToolOptions): Promise<unknown> => {
     opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
-    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call));
+    // A callee's markers go to `onEvent`, so a box whose owner yields what it receives (function-tools)
+    // passes them up to the runner, which stores them as it would the callee's own: the callee was told
+    // its record was kept. A box with no `onEvent` has nowhere to put them.
+    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call), opts?.onEvent);
     let value: unknown;
     if (host === undefined) value = await run(params ?? {});
     else {

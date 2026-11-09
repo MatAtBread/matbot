@@ -366,3 +366,35 @@ test('a define and a package export take their inputSchema from the checker, and
     'type Name = string;\nexport async function hi(name: Name): Promise<string> { return name; }' });
   assert.match(JSON.stringify(bad.at(-1)), /must be an object/);
 });
+
+// A tool called from a body yields its markers into the body's box, which used to keep only the result: the
+// callee reported success and its durable record was gone. A session define made that way said "Defined"
+// and the function did not exist the next round.
+test('a marker a tool yields inside a body is stored in the session, as from a direct call', { timeout: 20000 }, async () => {
+  const machine = machineWith();
+  machine.tools.register({
+    name: 'stash', description: 'emits a marker', inputSchema: { type: 'object' },
+    executor: { async *execute() {
+      yield { type: 'marker', creator: 'probe', data: { stashed: true } };
+      yield { type: 'result', value: 'stashed' };
+    } },
+  } as unknown as Tool);
+  await createFunctionToolsPlugin().setup?.(machine);
+  const store = memStore();
+  const s = await newSession(store);
+
+  const def = JSON.stringify('double(n: number): number { return n * 2; }');
+  const r = await turn(machine, store, s.id, [
+    [{ name: 'tool_function', input: { action: 'execute', definition: '{ return await tool.stash({}); }' } }],
+    [{ name: 'tool_function', input: { action: 'execute', definition: `{ return await tool.tool_function({ action: 'define', scope: 'session', definition: ${def} }); }` } }],
+    [{ name: 'double', input: { n: 4 } }],
+  ]);
+  const results = ends(r.events);
+  assert.equal(results[0]!.result, 'stashed');
+  assert.ok(r.offered[2]!.includes('double'), 'a define made from a body is offered the next round');
+  assert.equal(results[2]!.result, 8);
+
+  const markers = store.docs.get(s.id)!.messages.filter((m: Message) => m.role === 'marker').flatMap(m => m.content);
+  assert.deepEqual(markers.map(c => c.type === 'marker' ? [c.creator, (c.data as { op?: string; stashed?: boolean }).op ?? (c.data as { stashed?: boolean }).stashed] : null),
+    [['probe', true], ['@matatbread/matbot-function-tools', 'define']]);
+});

@@ -57,6 +57,7 @@
     "@matatbread/matbot-gate-fs-node": "workspace:^",
     "@matatbread/matbot-function-tools": "workspace:^",
     "@matatbread/matbot-provenance": "workspace:^",
+    "@matatbread/matbot-session-data": "workspace:^",
     "@matatbread/matbot-sessions": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^",
     "@matatbread/matbot-tool-skill-compiler": "workspace:^",

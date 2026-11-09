@@ -1,5 +1,5 @@
 import type {
-  Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MimeType, UserContent, FileStore,
+  Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
 import { collectBytes, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import { withFailureNote } from './runner.js';
@@ -9,6 +9,10 @@ import { armFor, findAttachment } from './media.js';
 import { MAX_SUB_TURN_DEPTH, runSubTurn, subTurnFrame, subTurnSeed, type SubTurnFailure, type SubTurnWork } from './sub-turn.js';
 
 export { MAX_SUB_TURN_DEPTH, type SubTurnFailure, type SubTurnWork } from './sub-turn.js';
+
+function* markerEvents(carried: readonly MessageContent[][]): Iterable<ToolEvent<never>> {
+  for (const c of carried.flat()) if (c.type === 'marker') yield { type: 'marker', creator: c.creator, data: c.data };
+}
 
 /** How many of one call's `turns` run at once; the rest wait for a free slot. They share a provider's rate
  *  limits, so a larger call takes longer rather than failing. Per call, not across the machine. */
@@ -274,8 +278,11 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
       const signal = AbortSignal.any([ctx.signal, stop.signal]);
       // A turn without tools records its spend ambiently, as any tool's completion does; a sub-turn's is
       // charged to the caller by `runSubTurn`.
-      const runOne = async (p: Prepared): Promise<SubTurnResult> => {
-        if (p.tools) return runSubTurn(machine, p, seed, principal!, ctx, signal);
+      // What each turn's tools recorded, by position, yielded before the result so the runner stores it in
+      // this session as this tool's own markers, in the order the turns were given.
+      const carried: MessageContent[][] = prepared.map(() => []);
+      const runOne = async (p: Prepared, i: number): Promise<SubTurnResult> => {
+        if (p.tools) return runSubTurn(machine, p, seed, principal!, ctx, signal, markers => { carried[i] = markers; });
         try {
           const { text } = await machine.singleTurn({
             provider: p.provider, prompt: p.content, signal, ...(p.system !== undefined ? { system: p.system } : {}),
@@ -290,8 +297,9 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
 
       try {
         if (!many) {
-          const result = await runOne(prepared[0]!);
+          const result = await runOne(prepared[0]!, 0);
           if (!result.ok) { yield { type: 'error', message: result.error }; return; }
+          yield* markerEvents(carried);
           yield { type: 'result', value: result };
           return;
         }
@@ -301,7 +309,7 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
         let next = 0;
         const worker = async (): Promise<void> => {
           for (let i = next++; i < prepared.length; i = next++) {
-            results[i] = await runOne(prepared[i]!);
+            results[i] = await runOne(prepared[i]!, i);
             finished++;
             wake?.();
           }
@@ -319,6 +327,7 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
           }
         }
         await workers;
+        yield* markerEvents(carried);
         yield { type: 'result', value: results as SubTurnResult[] };
       } finally {
         stop.abort();

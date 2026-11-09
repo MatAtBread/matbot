@@ -17,6 +17,7 @@
     "plugins/http",
     "plugins/ask-user",
     "plugins/sessions",
+    "plugins/session-data",
     "plugins/edit-session",
     "plugins/workspace",
     "plugins/rumsfeld",

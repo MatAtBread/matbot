@@ -210,6 +210,30 @@ test('a turn with tools has the session\'s markers and knows it is a sub-turn, a
   assert.deepEqual(depths, { screen: 1, followup: 1 });
 });
 
+// A sub-turn is part of the calling turn's work, so what its tools record about the session comes back as
+// single_turn's own markers, for the runner to store. Core's record of the run (its depth) and what it was
+// seeded with do not, and a turn that failed brings nothing.
+test('what a turn\'s tools record comes back as the call\'s markers, in turn order; the run\'s own record does not', { timeout: 15000 }, async t => {
+  const stash = tool('stash', async function* (input) {
+    yield { type: 'marker', creator: 'probe', data: input } as never;
+    yield { type: 'result', value: 1 };
+  });
+  const m = await machine(t, (prompt, messages) => {
+    // The tool's marker message follows its result, so "answered" looks past markers.
+    const done = messages.filter(x => x.role !== 'marker').at(-1)?.role === 'tool';
+    if (prompt.startsWith('fail') && done) throw new Error('the endpoint refused');
+    return done ? says('done') : calls('stash', { from: prompt });
+  }, [stash]);
+  const session = { ...m.session, messages: [{ id: 'fn', role: 'marker', createdAt: '', traceId: 't', content: [{ type: 'marker', creator: 'keep-me', data: 1 }] }] } as Session;
+  const events = [];
+  for await (const ev of invokeTool(m.services, 'single_turn', { turns: [acting('one'), { prompt: 'plain' }, acting('fail'), acting('two')] } as never, {
+    session, signal: new AbortController().signal, provider: 'fake',
+  })) events.push(ev);
+  const markers = events.flatMap(e => e.type === 'marker' ? [[e.creator, e.data]] : []);
+  assert.deepEqual(markers, [['probe', { from: 'one' }], ['probe', { from: 'two' }]]);
+  assert.equal(events.at(-1)?.type, 'result', 'the markers precede the result');
+});
+
 // Through a body, as the tool's own test of the invariant: `ctx.session` is what carries the depth, so a
 // nested call made with `invokeTool` counts the same as one the runner makes.
 test(`depth stops at ${MAX_SUB_TURN_DEPTH}, through a composed call as well as a direct one`, { timeout: 20000 }, async t => {

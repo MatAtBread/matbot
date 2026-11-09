@@ -86,10 +86,25 @@ export type ToolEvent<Result = unknown> =
  * matches (a non-literal discriminant, or an absence-discriminant the positive patterns can't express),
  * the result falls back to the union of every arm — always sound, just less narrow.
  *
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface ToolContracts {}
+
+/**
+ * Per-tool registry of types whose content depends on the session a type-check runs within, keyed by tool
+ * name like {@link ToolContracts}. Empty in every declaration: for one check made on a session's behalf, the
+ * checker augments it with what each tool's {@link Tool.sessionType} answers for that session, under that
+ * tool's own name and no other. A tool's contract reads its own key (`session_data`'s `read` of a literal id
+ * finds the entry's type there), and a check made for no session — a global function, which cannot know
+ * what any session holds — sees it empty, so the same contract reads `unknown`.
+ *
+ * In plugin-api because the generated tool types are one file that copies a plugin's own declarations into
+ * itself: plugin-api is the one module every check resolves and can augment.
+ *
+ * One of matbot's open-registry augmentation points; see docs/DEVELOPING.md *Open-registry augmentation*.
+ */
+export interface SessionTypes {}
 
 // Phantom carriers for ToolContract's two parameters. `unique symbol` keys rather than `__result`/`__args`
 // so the type is *uninhabitable*: a plugin author cannot name these keys, so no value of ToolContract can
@@ -338,6 +353,11 @@ export interface Tool<R = unknown> {
    *  (`contractArms`), so two tools' types of one name never meet. Absent ⇒ the contract names only
    *  plugin-api types and TypeScript's own. */
   toolContractTypes?: string;
+  /** The type this tool contributes under its own name to {@link SessionTypes} for a type-check of code
+   *  running within `session` — TypeScript source, such as `session_data`'s map from each entry's id to
+   *  what it holds. The contract stays the same everywhere and only a check made on a session's behalf
+   *  learns more; a global function is checked without it. Absent, or `undefined` ⇒ the key is unset. */
+  sessionType?: (session: Session) => string | undefined;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

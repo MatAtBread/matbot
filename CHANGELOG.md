@@ -175,6 +175,12 @@ a second host's needs.
 
 ### API gaps filled
 
+- **`SessionTypes`, a sixth open registry, and `Tool.sessionType`.** A tool whose contract depends on what a
+  session holds declares it once, naming its own key of `SessionTypes`; for a type-check made on a session's
+  behalf, `sessionType(session)` answers that key, and the checker adds it under the tool's name. A check
+  made for no session (a global function) sees it empty. `session_data` uses it to type a read by the
+  entry's id.
+
 - **`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
   turn within the calling session: it has the session's id, principal, tools and gate answers, sees none of
   its conversation and adds nothing to it, and returns its text with the tool calls it made. `turns: [...]`
@@ -183,7 +189,10 @@ a second host's needs.
   with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
   `messages`. A field beside `turns` (`tools: true`, a shared `context`) applies to every turn. A turn with
   tools has its spend recorded on the calling turn. The one-turn form is unchanged, and its result gains
-  `ok`.
+  `ok`. What a turn's tools record in markers (data kept with `session_data`, a session function defined)
+  comes back as `single_turn`'s own markers, so it is kept in the calling session; core's record of the
+  turn itself (its depth, a truncation, a retraction, a hook that threw) is not, and a turn that failed
+  brings nothing back.
 - **`subTurnDepth`** and **`SUB_TURN_CREATOR`** — how many turns below a conversation a session's messages
   are, for a hook that has nothing to judge in a turn another turn started.
 - **`ToolContract<Result, Args, Call>`** — an optional third argument, the exact call signature `ToolProxy`
@@ -278,6 +287,14 @@ a second host's needs.
 
 ### Bug fixes
 
+- **A marker a tool yields when called from a composed body is kept.** The `tool` proxy that
+  `function-tools` bodies and compiled skills call through (`makeToolBox`) kept a callee's result and
+  dropped its markers, so a tool that recorded something reported success and the record was gone. A
+  session function defined from a body (`tool.tool_function({ action: 'define', scope: 'session', … })`)
+  said "Defined" and did not exist the next round. A box now passes a callee's markers to its `onEvent`,
+  which `function-tools` yields as its own, so the runner stores them as it would from a direct call. A
+  box with no `onEvent` (a compiled skill's) still has nowhere to put them.
+
 - **A secret stored in the `.env` vault comes back as it was written.** The writer and the reader of the
   file lived in different packages and disagreed: a value was written bare and read with comment and quote
   rules, so `abc #1` came back as `abc`, `"x"` as `x` and ` padded ` as `padded` after a restart.
@@ -298,6 +315,19 @@ a second host's needs.
   submission without trace.
 
 ### Optional
+
+- **`session-data`** (new) — `session_data` keeps a JSON value in a conversation and reads it back by a
+  short id: a tool's output written from a `tool_function` body (`write { description, data }`) and handed
+  to another tool turns later (`read { id }`), without the model reading it. Entries are markers, so they
+  are private to the session, shared when it is, carried by fork and compaction, and never sent to a model;
+  `list` and `drop` manage them. An entry is written once, holds at most 65536 bytes of JSON, and is
+  readable within the call that wrote it. Code checked on a conversation's behalf (an `execute` body, a
+  session function) reading an entry by its literal id gets the type inferred from what the entry holds, so
+  its rows pass to a typed tool unnarrowed; a global function may call it too, reads `unknown`, and fails at
+  the read in a conversation that does not hold the id. Node and browser.
+- **`function-tools`** — a check made on a conversation's behalf (`execute`, a session `define`, its
+  re-`check`, `types`) adds what each tool's `sessionType` says that conversation holds; a global function's
+  check does not.
 
 - **`frontend-web`** — a permission prompt reads as a phrase: what, and for how long, as dropdowns, then
   Allow and Deny as the buttons that answer (an axis marked `submit`). `POST /tools/:name` runs its tool in the fixed session `#http`, which an
