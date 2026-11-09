@@ -2,7 +2,8 @@ import type { Message, Session, Store, TurnEntry, UserContent } from './types.js
 import type { ParallelReply, SessionState } from './session-state.js';
 import { notify } from './session-state.js';
 import { appendMessage } from './session.js';
-import { isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { failureOf, isReadOnlyError } from '@matatbread/matbot-plugin-api';
+import { errorText } from './runner.js';
 
 // Writing into a session from beside its turns: a settled parallel turn's reply placed into history, the
 // writes queued for a moment no turn holds the session, and the accounting a turn leaves behind. Each is
@@ -109,18 +110,31 @@ export async function drainMerges(store: Store<Session>, id: string, s: SessionS
   // a running turn's in-memory session would pick it up, and there is no running turn here.
   const taken = s.merges.splice(0).filter(r => r.persisted !== true);
   if (taken.length === 0) return;
-  const session = await store.get(id);
-  if (session === null) return;
-  // And one whose `placeNow` is still in flight has no flag set yet, so the id is the authority: every
-  // placement path is idempotent on it, and whichever gets there first is the one that announces.
-  const have    = new Set(session.messages.map(m => m.id));
-  const replies = taken.filter(r => !have.has(r.messages[0].id));
-  if (replies.length === 0) return;
+  let replies = taken;
   try {
+    const session = await store.get(id);
+    if (session === null) return;
+    // And one whose `placeNow` is still in flight has no flag set yet, so the id is the authority: every
+    // placement path is idempotent on it, and whichever gets there first is the one that announces.
+    const have = new Set(session.messages.map(m => m.id));
+    replies = taken.filter(r => !have.has(r.messages[0].id));
+    if (replies.length === 0) return;
     await store.set(id, replies.flatMap(r => r.messages).reduce(appendMessage, session));
   } catch (e) {
-    if (!isReadOnlyError(e)) throw e;
-    for (const r of replies) notify(s, { type: 'error', error: e.message, traceId: r.traceId });
+    // Reported, not retried and not put back. Put back, a store that stays down is read again at every
+    // pass of the pump that drains this, and the session reads as busy for as long; retried here, the
+    // decision to try again is taken for a caller who can weigh it. Whoever sent the message can send it
+    // again — knowing, from this, that its tool calls would run again.
+    const failure = failureOf(e);
+    console.error(`[matbot] parallel replies of session "${id}" were not saved:`, e instanceof Error ? e : String(e));
+    for (const r of replies) {
+      const acted = r.messages.some(m => m.role === 'tool');
+      notify(s, {
+        type: 'error', traceId: r.traceId, ...(failure !== undefined ? { failure } : {}),
+        error: `This reply was shown but could not be saved: ${errorText(e)}.`
+          + (acted ? ' Its tool calls did run, and sending the message again would run them again.' : ''),
+      });
+    }
     return;
   }
   for (const r of replies) notify(s, { type: 'merged', traceId: r.traceId });

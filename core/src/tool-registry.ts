@@ -68,7 +68,7 @@ function validatingTool(tool: Tool, judge: ToolCallJudge): Tool {
           const errs = await judge(tool.name, input, ctx.signal);
           if (errs !== undefined && errs.length > 0) {
             const detail = errs.map(formatError).join('; ');
-            yield { type: 'error', message: `Invalid input for tool "${tool.name}": ${detail}`, code: TOOL_INPUT_INVALID };
+            yield { type: 'error', message: `Invalid input for tool "${tool.name}": ${detail}`, code: TOOL_INPUT_INVALID, failure: 'invalid' };
             return;
           }
           // `yield*` delegates `return`/`throw` as well as values, so an abort still reaches the tool.

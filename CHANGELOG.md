@@ -165,6 +165,14 @@ a second host's needs.
   node:fs`, not `Always allow …`): the policy words the lifetime. Every call site in this repository is
   updated; a plugin offering `standing` answers should drop the prefix.
 
+- **`SessionRunner.open` returns a `SubmittedView` for a submission, with no `session`** (and a required
+  `traceId`); observing a session still returns a `SessionView`, which no longer has `traceId`. The session
+  was read back after the submission had been queued, for a field no submitter read: a failed read made
+  `open()` throw while the submission ran anyway, so a caller that sent it again ran it twice, and every
+  submission paid a store round trip before its turn could start. Now `open()` awaits nothing after
+  queueing, so if it throws, nothing was queued. A submission to a session that does not exist no longer
+  throws: it is an `error` on the submission's `events`, with `failure: 'invalid'`.
+
 ### API gaps filled
 
 - **`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
@@ -254,6 +262,20 @@ a second host's needs.
   call's promise is marked handled as it is made, so a call the caller never awaits no longer becomes an
   unhandled rejection (which ends a Node process) when it fails; a caller that awaits still sees the error.
 
+- **`FailureClass`: a failure says whether trying again could help.** matbot does not retry on a caller's
+  behalf; it reports, and the caller decides, which needs more than a message. `failure?: 'unavailable' |
+  'denied' | 'invalid'` (may work later / not allowed / the request is wrong) is a property on a thrown
+  error and a field on both `error` events (a turn's and a tool's); absent means whoever failed did not say.
+  `withFailure(e, class)` marks an error, `failureOf(e)` reads one, `failureForStatus(status)` maps an
+  HTTP status and `FAILURE_STATUS` maps back. `ReadOnlyError` is `denied`, `MediaRejectedError` and
+  input the executor's validator refuses are `invalid`. A tool's failure reaches the model beside its
+  message (`{ error, failure }`), `single_turn`'s failures say it in their text, and a turn's `error` event
+  carries it from whichever layer raised it — a store, a provider adapter, a tool.
+- **`responseError(label, res)`** (`@matatbread/matbot-core/providers-base`) is the error for an endpoint's
+  non-ok answer: its status and body in the message, its class from the status.
+- **A turn's `error`, and a tool's thrown error, include the error's `cause`** (`TypeError: fetch failed
+  (SocketError: other side closed)`), which is usually the half that says what happened.
+
 ### Bug fixes
 
 - **A secret stored in the `.env` vault comes back as it was written.** The writer and the reader of the
@@ -261,6 +283,19 @@ a second host's needs.
   rules, so `abc #1` came back as `abc`, `"x"` as `x` and ` padded ` as `padded` after a restart.
   `EnvFileVault` now reads its own file (`EnvFileVault.open`), quotes a value the reader would otherwise
   reinterpret, and refuses one containing a line break rather than writing it broken.
+
+- **A store failure in the turn pump no longer exits the process (#115).** The pump runs detached, and a
+  failed store read or write at a turn's start, a failure resolving its provider or its tool types, a
+  failed usage flush, or a failed write of a settled parallel reply rejected its promise with nothing
+  awaiting it — an unhandled rejection, which ends a Node process and every turn in it. The turn just
+  taken off the queue also vanished, with no terminal event. Each is now reported where it belongs: the
+  turn's own `error` (with the store's `failure`, if it gave one) after which the next turn runs, an
+  `error` against the parallel reply that could not be saved (saying, when it made tool calls, that sending
+  it again would make them again), a log line for the usage. None is retried. Every start of a pump also
+  goes through one place that logs whatever else might reach it.
+- **A parallel turn stopped before it started is recorded**, with a note where its reply would have been,
+  as it was when the stop landed a moment later. A stop arriving while it read its session dropped the
+  submission without trace.
 
 ### Optional
 
@@ -473,6 +508,24 @@ a second host's needs.
 - **`tool-store`** depends on `function-tools` for that scanner, as a package — installing `tool-store`
   installs it; nothing loads it as a plugin. A `/` in a shape that opens a regex literal is now skipped
   like a string.
+- **Provider adapters classify their failures** (`anthropic`, `openai-compat`, `google`, `chatjimmy`,
+  `webllm`), so an overloaded or rate-limited endpoint (`unavailable`) reads differently from a rejected key
+  (`denied`) or a malformed or too-long request (`invalid`). An HTTP status is classified by
+  `failureForStatus`; an error sent in the stream after a 200 by the endpoint's own word for it
+  (Anthropic's error `type`, Gemini's `status`, a numeric `code` from an OpenAI-compatible host). The
+  messages are unchanged. A network failure is left unclassified: a reset and a failed lookup look the
+  same from the adapter.
+- **`openai-compat`** — an error an endpoint sends mid-stream (OpenRouter does, after its 200) ends the call
+  with that error. It was ignored, and the turn ended as an empty completion with the reason thrown away.
+- **`storage-sqlite`** — a database another connection holds (`SQLITE_BUSY`, `SQLITE_LOCKED`) fails as
+  `unavailable`, and a read-only one as `denied`.
+- **`storage-google-drive`** — failures carry the class of Drive's status; a 403 that is a rate limit is
+  `unavailable`, not `denied`.
+- **`mcp-http`** — a tool call the MCP server answers with an HTTP error carries that status's class to
+  the model.
+- **`frontend-web`** — `POST /tools/:name` answers a classified failure with its status (503 for
+  `unavailable`, so a client knows asking again later may work) and puts `failure` in the body; the submit
+  route does the same for a submission `open()` refused.
 
 ---
 

@@ -1,7 +1,8 @@
 import type {
   Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
-import { collectBytes, encodeBase64, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { collectBytes, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { withFailureNote } from './runner.js';
 // The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
 // rule with two copies is one that gets fixed in one of them.
 import { armFor, findAttachment } from './media.js';
@@ -281,7 +282,9 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
           });
           return { ok: true, text };
         } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          // The class goes in the text, not a field of its own: what a model reads of this tool is spelt out
+          // in its contract on every turn, and a model reasons from the words anyway.
+          return { ok: false, error: withFailureNote(e instanceof Error ? e.message : String(e), failureOf(e)) };
         }
       };
 

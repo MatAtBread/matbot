@@ -1,4 +1,5 @@
 import type { EphemeralRun, Message, PipelineEvent, Principal, PromptFn, Session, UserContent } from '@matatbread/matbot-plugin-api';
+import { withFailureNote } from './runner.js';
 
 /**
  * One turn on an ephemeral run, from a fresh session to its committed transcript: what a background job
@@ -85,7 +86,7 @@ export async function drainEphemeralTurn(
   let next = await turn.next();
   while (!next.done) {
     const ev = next.value;
-    if      (ev.type === 'error')   failure = ev.error;
+    if      (ev.type === 'error')   failure = withFailureNote(ev.error, ev.failure);
     else if (ev.type === 'aborted') failure = ev.reason;
     else if (ev.type === 'done')    finished = true;
     next = await turn.next();

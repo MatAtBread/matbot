@@ -12,11 +12,12 @@ export {
   readOnlyError, isReadOnlyError,
   mediaRejectedError, isMediaRejectedError,
   invalidSecretNameError, isInvalidSecretNameError,
+  failureOf, withFailure, failureForStatus, FAILURE_STATUS,
   StoreQueryError,
 } from '@matatbread/matbot-plugin-api';
 export type {
   MissingSecretError, IncompatibleRuntimeError, NotAPluginError, PromptCancelledError, ReadOnlyError,
-  MediaRejectedError, InvalidSecretNameError, MatbotErrorKind,
+  MediaRejectedError, InvalidSecretNameError, MatbotErrorKind, FailureClass,
 } from '@matatbread/matbot-plugin-api';
 export { applyResolve, applyCreateSecret, assertStorableKey, unreferenceableKey, REFERENCEABLE_KEY_RULE } from '@matatbread/matbot-plugin-api';
 // The `provider update` patch policy, alongside the vault's: written once in plugin-api so the hosts

@@ -1,7 +1,8 @@
 import type { Message, MatbotMachine, Principal, SessionAppender, ToolContext, UserContent } from '@matatbread/matbot-plugin-api';
-import { createMessage, defaultingPrompt, rejectingPrompt, SUB_TURN_CREATOR } from '@matatbread/matbot-plugin-api';
+import { createMessage, defaultingPrompt, failureOf, rejectingPrompt, SUB_TURN_CREATOR } from '@matatbread/matbot-plugin-api';
 import { recordUsage } from '@matatbread/matbot-plugin-api/host';
 import { drainEphemeralTurn } from './ephemeral-turn.js';
+import { withFailureNote } from './runner.js';
 import { usageEntries } from './usage.js';
 
 /** A conversation's own turn is depth 0, so this allows a sub-turn and a sub-turn that one starts, and no
@@ -101,6 +102,6 @@ export async function runSubTurn(
     return reduce(own, turn.transcript);
   } catch (e) {
     // Refused media, chiefly, which is raised before the turn exists: its message names the file.
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, error: withFailureNote(e instanceof Error ? e.message : String(e), failureOf(e)) };
   }
 }

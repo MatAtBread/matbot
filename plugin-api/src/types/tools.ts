@@ -5,6 +5,7 @@ import type { JSONSchema } from './primitives.js';
 import type { PermissionDecision, PermissionRequest } from './permission.js';
 import type { Vault } from './vault.js';
 import type { SessionAppender } from './session-append.js';
+import type { FailureClass } from '../errors.js';
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ export type ToolEvent<Result = unknown> =
   // marker. Independent of `result` — a tool may emit markers and no result (a silent side-effect,
   // e.g. a trigger-fired tool), a result and no markers, or both.
   | { type: 'marker';   creator: string; data: unknown }
-  | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
+  // `failure` is whether trying again could help (see `FailureClass`), and reaches the model beside the
+  // message. `code` is the tool's own number — an exit status, or an HTTP status a transport may answer with.
+  | { type: 'error';    message: string; code?: number; failure?: FailureClass; stdout?: string; stderr?: string };
 
 /**
  * Per-tool call-contract registry: maps a tool's `name` to a {@link ToolContract} arm (or a union of

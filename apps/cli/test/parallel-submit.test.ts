@@ -292,7 +292,7 @@ test('a parallel turn can be stopped on its own, leaving the running turn alone'
   const par = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q'), provider: 'fake', principal, mode: 'parallel' });
   assert.equal(runner.status(sid).parallel, 1);
 
-  assert.equal(runner.abortParallel(sid, par.traceId!), true);
+  assert.equal(runner.abortParallel(sid, par.traceId), true);
   while (runner.status(sid).parallel > 0) await new Promise(r => setImmediate(r));
 
   assert.equal(runner.status(sid).running, true, 'the turn it ran beside is untouched');
@@ -318,7 +318,7 @@ test('abortParallel with an unknown traceId stops nothing', { timeout: 10000 }, 
   const collector = watch(main, events);
   await started.wait;
 
-  assert.equal(runner.abortParallel(sid, main.traceId!), false);     // the RUNNING turn's traceId, not a parallel one
+  assert.equal(runner.abortParallel(sid, main.traceId), false);     // the RUNNING turn's traceId, not a parallel one
   assert.equal(runner.abortParallel(sid, 'nope'), false);
   assert.equal(runner.status(sid).running, true);
 
@@ -624,6 +624,47 @@ test('a parallel reply that settles while another is being written is written to
     assert.ok(merged >= 0 && merged < idleAt, `${p.traceId} announced as merged before idle`);
   }
   assert.equal(runner.status(sid).busy, false, 'idle means idle');
+});
+
+// A settled reply is placed between turns by a read and a write of the session. A failure of either was
+// thrown out of the detached pump — an unhandled rejection, which exits the process — and the reply, taken
+// off the list before the read, was lost with no word to anyone. Now it is reported against that reply, and
+// not retried or kept: whoever sent it decides whether to send it again.
+test('a parallel reply the store fails to take is reported, and the session goes idle', { timeout: 10000 }, async () => {
+  const g1 = gate();
+  let failNext = false;
+  const read = { get: () => (failNext ? (failNext = false, Promise.reject(new TypeError('fetch failed'))) : undefined) };
+  const { sid, store, started, release, runner } = setup(text => (text.startsWith('Q1') ? g1.wait : Promise.resolve()), undefined, undefined, undefined, read);
+
+  const unhandled: unknown[] = [];
+  const onUnhandled = (e: unknown): void => { unhandled.push(e); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const main = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('do it'), provider: 'fake', principal });
+    const events: PipelineEvent[] = [];
+    const mainDone = gate();
+    const collector = watch(main, events, ev => { if (ev.type === 'done' && ev.traceId === main.traceId) mainDone.open(); });
+    await started.wait;
+    const p1 = await runner.open({ sessionId: sid, signal: new AbortController().signal, content: submit('Q1'), provider: 'fake', principal, mode: 'parallel' });
+    release.open();
+    await mainDone.wait;  // committed: the pump now waits for the parallel turn, and its next read places the reply
+
+    failNext = true;
+    g1.open();
+    await collector;
+    await new Promise(r => setTimeout(r, 20));
+
+    assert.deepEqual(unhandled, [], 'nothing escaped the pump');
+    const err = events.find(e => e.type === 'error' && e.traceId === p1.traceId);
+    assert.ok(err && err.type === 'error', `the reply's failure is reported against it: ${JSON.stringify(events.map(e => e.type))}`);
+    assert.match(err.error, /could not be saved/);
+    assert.ok(!events.some(e => e.type === 'merged' && e.traceId === p1.traceId), 'not announced as merged');
+    assert.equal(runner.status(sid).busy, false, 'not left busy holding a reply it will never place');
+    const final = (await store.get(sid))!;
+    assert.ok(!final.messages.some(m => textOf(m) === 'Q1'), 'and not written');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 // The turn head was set only after the turn's store read, but `runningTraceId` — which is what admits a

@@ -1,4 +1,5 @@
 import type { DriveAuth } from './drive-auth.js';
+import { failureForStatus, withFailure } from '@matatbread/matbot-plugin-api';
 
 // Thin wrapper over the Google Drive v3 REST + upload endpoints. Every call carries the bearer token
 // from DriveAuth; a 401 invalidates the token and retries once (covers silent renewal of an expired
@@ -40,7 +41,7 @@ export class DriveClient {
   private async json<T>(res: Response): Promise<T> {
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(`Google Drive ${res.status} ${res.statusText}: ${body.slice(0, 500)}`);
+      throw failed(res.status, `Google Drive ${res.status} ${res.statusText}: ${body.slice(0, 500)}`);
     }
     return res.json() as Promise<T>;
   }
@@ -92,13 +93,13 @@ export class DriveClient {
 
   async readText(fileId: string): Promise<string> {
     const res = await this.fetch(`${API}/files/${encodeURIComponent(fileId)}?alt=media`, { method: 'GET' });
-    if (!res.ok) throw new Error(`Google Drive read ${res.status} for ${fileId}`);
+    if (!res.ok) throw failed(res.status, `Google Drive read ${res.status} for ${fileId}`);
     return res.text();
   }
 
   async readBytes(fileId: string): Promise<Uint8Array> {
     const res = await this.fetch(`${API}/files/${encodeURIComponent(fileId)}?alt=media`, { method: 'GET' });
-    if (!res.ok) throw new Error(`Google Drive read ${res.status} for ${fileId}`);
+    if (!res.ok) throw failed(res.status, `Google Drive read ${res.status} for ${fileId}`);
     return new Uint8Array(await res.arrayBuffer());
   }
 
@@ -128,7 +129,7 @@ export class DriveClient {
     const res = await this.fetch(`${API}/files/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
     // 404 ⇒ already gone, which is the caller's desired end state.
     if (!res.ok && res.status !== 404) {
-      throw new Error(`Google Drive delete ${res.status} for ${fileId}`);
+      throw failed(res.status, `Google Drive delete ${res.status} for ${fileId}`);
     }
   }
 }
@@ -147,4 +148,12 @@ function multipart(metadata: unknown, media: Blob | string, mediaType: string): 
     contentType: `multipart/related; boundary=${boundary}`,
     payload:     new Blob([head, media, tail]),
   };
+}
+
+// Drive rate-limits with 403 as well as 429, naming the limit in the body — a 403 that is NOT a refusal.
+// Read as `denied`, a caller told "trying again will not change this" would give up on a write that only
+// needed a moment.
+function failed(status: number, message: string): Error {
+  const rateLimited = status === 403 && /rateLimitExceeded|userRateLimitExceeded|quotaExceeded/i.test(message);
+  return withFailure(new Error(message), rateLimited ? 'unavailable' : failureForStatus(status));
 }

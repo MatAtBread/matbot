@@ -1599,6 +1599,44 @@ delete exists.
 
 ---
 
+## Reporting failures
+
+**matbot reports; it does not retry.** Whoever called — a person, a frontend, a model that delegated the
+work — decides whether to try again, as a reasoned choice. A retry inside matbot takes that choice for
+them, hides the failure, and may repeat work with side effects (a parallel turn's tool calls, a write that
+landed before its answer was lost).
+
+That choice needs to know whether trying again could help, which a message alone does not carry. So a
+failure has a **`FailureClass`** (`plugin-api` `errors.ts`): `unavailable` (may work later), `denied`
+(not allowed; trying again changes nothing), `invalid` (the request is wrong; trying it unchanged changes
+nothing). It is a property on a thrown error (`withFailure`, read by `failureOf`) and a field on both
+`error` events, and it describes what happened, never what to do. Three words because three is what a
+caller does differently; a fourth needs a matbot caller that branches on it. The words are the ones
+`SkipKind` already used for this exact distinction (`edit-session`, `background-jobs`), plus `invalid`
+for what `TOOL_INPUT_INVALID` and `MediaRejectedError` already meant.
+
+**Only the layer that raised a failure classifies it.** A store knows that `SQLITE_BUSY` clears, an adapter
+knows what Anthropic's `overloaded_error` means; core does not, and does not guess from shapes: a reset
+socket and a failed DNS lookup reach a caller as the same `TypeError`, and a browser's carries no cause at
+all. Unclassified is a real answer and is said as one. Core carries a class unchanged from where it was
+raised to where it is read: a turn's `error`, a tool result (`{ error, failure }`, beside the message the
+model reads), `single_turn`'s text, an HTTP status (`FAILURE_STATUS`). A type that is wire text spells the
+words out rather than deriving them (`Extract<FailureClass, …>` is what a model would read).
+
+**Detached work must not reject.** The turn pump runs with nothing awaiting it, so a rejection is
+unhandled, and under Node's default that exits the process — every turn on every session with it (#115).
+Each failure the pump can meet is therefore reported where it belongs: the turn's own `error` (the
+per-turn `try` starts at the turn's first await, not at its run, so a store read or a provider resolving
+before the run is that turn's), an `error` against a parallel reply that could not be written, a log line
+for accounting. `startPump` is the one way a pump starts, and logs whatever else arrives; it only logs,
+because by then the drain's own `finally` has run and another pump may own the state.
+
+**A failure report must be true, so `open()` awaits nothing after queueing a submission.** It used to read
+the session back for the caller after queueing it, and a failed read told the caller a submission had
+failed that was already running; sent again, it ran twice. A submission's view (`SubmittedView`) therefore
+has no `session`, and `open()` throws only before anything is queued. A session that does not exist is the
+submission's `error` (`invalid`) on its stream.
+
 ## Plugin hot-reload
 
 Reload from disk without restart (`plugin reload`; `loadPlugins(..., bustCache = true)`). Freshness all the way down:

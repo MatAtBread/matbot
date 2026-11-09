@@ -1,4 +1,5 @@
 import type { Message, Tool } from '@matatbread/matbot-plugin-api';
+import { withFailure } from '@matatbread/matbot-plugin-api';
 import { toChatMessages, type ChatMessage, type RenderOptions } from './format.js';
 
 // Measured on chatjimmy.ai: the prompt and the reply share a window of about 6k tokens. Past it the
@@ -101,7 +102,7 @@ export function fitToWindow(messages: readonly Message[], tools: readonly Tool[]
   if (shown < ranked.length) cuts.push(`${ranked.length - shown} of ${ranked.length} tools left out`);
   if (fits()) return { ...r, cuts };
 
-  throw new Error(`ChatJimmy: the conversation does not fit its ~${budgetTokens}-token prompt budget even with every tool `
+  throw withFailure(new Error(`ChatJimmy: the conversation does not fit its ~${budgetTokens}-token prompt budget even with every tool `
     + 'and all earlier turns left out — the system prompt and the current turn alone are too long '
-    + `(${size(r)} characters). Start a new conversation, or use another provider for this.`);
+    + `(${size(r)} characters). Start a new conversation, or use another provider for this.`), 'invalid');
 }

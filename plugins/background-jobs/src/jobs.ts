@@ -17,7 +17,8 @@ import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs, tryCurren
 
 // Why a schedule was left alone, split the way a caller has to act on it — the 4xx/5xx distinction.
 // `denied` will be refused again however many times it is asked; `unavailable` may succeed later. `reason`
-// is the prose; branch on `kind`, never on the prose.
+// is the prose; branch on `kind`, never on the prose. The words are `FailureClass`'s, spelled out because
+// this type is wire text (see compact-sessions' `SkipKind`).
 type SkipKind = 'denied' | 'unavailable';
 interface SkippedJob { id: string; kind: SkipKind; reason: string }
 

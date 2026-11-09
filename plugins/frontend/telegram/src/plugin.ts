@@ -568,7 +568,7 @@ export const plugin: MatbotPluginSpec = {
           // assistant text is sent when it completes. A turn's machine-authored (robo) content — a
           // trigger's fenced context, a followup's prompt — is not sent: it is matbot talking to the
           // model, and on a phone it is noise around the answer it produces.
-          const owned = new Set<string>([view.traceId!]);
+          const owned = new Set<string>([view.traceId]);
           for await (const event of view.events) {
             if (event.type === 'idle') break;
             if (event.type === 'queued') {

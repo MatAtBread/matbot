@@ -685,9 +685,24 @@ const mcpAction: Tool = {
 | `file` | `handle: FileHandle` | Output file reference |
 | `model-content` | `content: ModelContent[]` | Media for the *model* to read — see [Media](#media) |
 | `marker` | `creator: string`, `data: unknown` | Emit a durable marker (see [Markers](#markers)) |
-| `error` | `message: string`, `code?: number`, `stdout?: string`, `stderr?: string` | Expected tool error |
+| `error` | `message: string`, `code?: number`, `failure?: FailureClass`, `stdout?: string`, `stderr?: string` | Expected tool error |
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
+
+**Say whether trying again could help.** matbot never retries on a caller's behalf: the model reads your
+error and decides, and it needs more than prose to decide well. Set `failure` on the event (or on what you
+throw, with `withFailure`) when you know it: `unavailable` (it may work later: a busy upstream, a lost
+race), `denied` (not allowed, and asking again changes nothing), `invalid` (the input is wrong). The model
+sees it beside your message as `{ error, failure }`. Leave it out when you don't know; don't guess. An
+error you catch from a store or an upstream may already carry one (`failureOf(e)`), so pass it on rather
+than flattening the error to a string:
+
+```ts
+} catch (e) {
+  const failure = failureOf(e);
+  yield { type: 'error', message: `Lookup failed: ${String(e)}`, ...(failure !== undefined ? { failure } : {}) };
+}
+```
 
 `result`, `model-content` and `marker` are independent: a tool may yield a result and no markers, a
 marker and no result (a silent side-effect), or show the model an image whose `result` is a one-line
@@ -911,6 +926,13 @@ export const plugin: MatbotPluginSpec = {
 A provider is selected by name in `matbot.yaml` (each named block sets `module`, `endpoint`,
 `model`, and `credentials`); the `module` resolves to the package exporting this spec.
 
+**Classify your failures.** Throw `await responseError('MyProvider', res)`
+(`@matatbread/matbot-core/providers-base`) for a non-ok response: it keeps the status and body in the
+message and sets the `FailureClass` the status implies, so a caller can tell "overloaded, try later" from
+"bad key". An error the endpoint sends in the stream after its 200 has no status to go by: classify it
+from the endpoint's own word for it with `withFailure`, as the Anthropic adapter does from its error
+`type`. Leave a network failure unclassified.
+
 ### `CompletionEvent` variants
 
 | Event | Key fields |
@@ -1013,6 +1035,11 @@ interface Store<T extends { id: string; version: string }> {
 }
 ```
 
+A failure that may clear on its own (the medium is busy or unreachable) should be thrown as
+`withFailure(e, 'unavailable')`, and one the caller may not do as `denied`. The runner passes the class on
+in the turn's `error`, so a person or a model can decide whether to send it again; it never retries for
+them. `storage-sqlite` classifies `SQLITE_BUSY` this way, in one wrapper rather than at every statement.
+
 All writes are compare-and-swap where concurrent updates are possible — `cas(id, expectedVersion,
 next)`, never a bare `set`. The **one place CAS is not sufficient** is a session with a turn in
 flight: the runner commits its own in-memory copy with an unconditional `set`, so it clobbers a
@@ -1080,6 +1107,12 @@ the boundary is a trust boundary), relaying a `MediaRejectedError` as something 
 serving the bytes back if you draw them. See [MEDIA.md](MEDIA.md); `frontend/web` and
 `frontend/telegram` are the two templates, and they differ in the way that matters — one could upload in
 advance and chooses not to, the other cannot.
+
+A submission (`open()` with `content`) returns a `SubmittedView`: its `traceId`, how many turns are ahead
+of it, and `events`, but not the session, which it does not read. If `open()` throws, nothing was queued,
+so it is safe to tell the user it was not sent. If it returns, every outcome arrives on `events`,
+including a session that does not exist (an `error` with `failure: 'invalid'`). An `error` event's
+`failure` says whether sending again could help: offer a retry for `unavailable`, not for the others.
 
 > **Security note:** the `toolcall` hook gates only the *runner* path (model-driven turns).
 > A frontend that executes tools directly — e.g. a `POST /tools` endpoint — bypasses it and

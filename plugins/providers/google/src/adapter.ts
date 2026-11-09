@@ -1,5 +1,6 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
-import { parseSSE } from '@matatbread/matbot-core/providers-base';
+import { parseSSE, responseError } from '@matatbread/matbot-core/providers-base';
+import { failureForStatus, withFailure, type FailureClass } from '@matatbread/matbot-plugin-api';
 import { toGeminiContents, toGeminiSystem, toGeminiTools, type GeminiPart } from './convert.js';
 
 const DEFAULT_ENDPOINT   = 'https://generativelanguage.googleapis.com/v1beta';
@@ -36,7 +37,7 @@ interface GeminiChunk {
     thoughtsTokenCount?:      number;
     [key: string]:            unknown;
   };
-  error?: { message?: string; status?: string };
+  error?: { message?: string; status?: string; code?: number };
 }
 
 export class GoogleAdapter implements ProviderAdapter {
@@ -84,10 +85,7 @@ export class GoogleAdapter implements ProviderAdapter {
       signal,
     });
 
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new Error(`Google ${res.status}: ${text}`);
-    }
+    if (!res.ok || !res.body) throw await responseError('Google', res);
 
     // Gemini streams `text` deltas across chunks but delivers each `functionCall` complete in one part,
     // so tool calls are yielded on sight. Thought text is accumulated into a single signed block flushed
@@ -103,7 +101,10 @@ export class GoogleAdapter implements ProviderAdapter {
       let chunk: GeminiChunk;
       try { chunk = JSON.parse(line) as GeminiChunk; } catch { continue; }
 
-      if (chunk.error) throw new Error(`Google stream error: ${chunk.error.message ?? chunk.error.status ?? 'unknown'}`);
+      if (chunk.error) {
+        throw withFailure(new Error(`Google stream error: ${chunk.error.message ?? chunk.error.status ?? 'unknown'}`),
+          streamFailure(chunk.error.status) ?? (chunk.error.code !== undefined ? failureForStatus(chunk.error.code) : undefined));
+      }
       if (chunk.usageMetadata) lastUsage = chunk.usageMetadata;
 
       const cand = chunk.candidates?.[0];
@@ -181,7 +182,7 @@ export class GoogleAdapter implements ProviderAdapter {
         headers: { 'x-goog-api-key': config.credentials?.['apiKey'] ?? '' },
         ...(signal !== undefined ? { signal } : {}),
       });
-      if (!res.ok) throw new Error(`Google ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      if (!res.ok) throw await responseError('Google', res);
       const body = await res.json() as { models?: Array<{ name?: unknown; supportedGenerationMethods?: unknown }>; nextPageToken?: string };
       for (const m of body.models ?? []) {
         if (typeof m.name !== 'string') continue;
@@ -203,4 +204,18 @@ function modelsUrl(endpoint: string): URL {
   u.search = '';
   u.pathname = `${u.pathname.replace(/\/models\/.*$/, '').replace(/\/+$/, '')}/models`;
   return u;
+}
+
+// The canonical status a Gemini error carries in the stream, after the 200 that would have classified it.
+function streamFailure(status: string | undefined): FailureClass | undefined {
+  switch (status) {
+    case 'UNAVAILABLE': case 'RESOURCE_EXHAUSTED': case 'DEADLINE_EXCEEDED': case 'INTERNAL': case 'ABORTED':
+      return 'unavailable';
+    case 'PERMISSION_DENIED': case 'UNAUTHENTICATED':
+      return 'denied';
+    case 'INVALID_ARGUMENT': case 'FAILED_PRECONDITION': case 'NOT_FOUND': case 'OUT_OF_RANGE': case 'UNIMPLEMENTED':
+      return 'invalid';
+    default:
+      return undefined;
+  }
 }

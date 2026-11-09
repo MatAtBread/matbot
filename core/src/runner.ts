@@ -2,14 +2,14 @@ import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn,
-  PermissionGate,
+  PermissionGate, FailureClass,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter, SessionAppender, TurnToolSource } from '@matatbread/matbot-plugin-api';
 import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt, failureOf } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia, withAttachmentsShown } from './media.js';
 
@@ -41,10 +41,28 @@ const abortReason = (signal: AbortSignal): string =>
  * with a string — escaping the generator and skipping the `end()` commit that the branch calling this
  * exists to perform. The one place in this package that took `any` rather than narrow.
  */
-const errorText = (e: unknown): string => {
+// The cause rides along because it is usually the useful half: `TypeError: fetch failed` says nothing,
+// `SocketError: other side closed` says what. A cause that is not an Error is shown as data.
+export const errorText = (e: unknown): string => {
   const cause = typeof e === 'object' && e !== null && 'cause' in e ? (e as { cause?: unknown }).cause : undefined;
-  return cause ? `${String(e)} (${String(cause)})` : String(e);
+  if (!cause) return String(e);
+  const why = cause instanceof Error || typeof cause !== 'object' ? String(cause) : safeJson(cause);
+  return `${String(e)} (${why})`;
 };
+const safeJson = (v: unknown): string => { try { return JSON.stringify(v); } catch { return String(v); } };
+
+// A failure's class in words, for a reader that gets only the text — a model that delegated the work. It
+// says what happened and leaves the decision to that reader; unclassified is said too, since silence would
+// read as "nothing to add" rather than "nobody said".
+export function withFailureNote(text: string, failure: FailureClass | undefined): string {
+  switch (failure) {
+    case 'unavailable': return `${text} [temporary: the same request may work if tried again later]`;
+    case 'denied':      return `${text} [refused: trying again will not change this]`;
+    case 'invalid':     return `${text} [the request itself is wrong: trying it again unchanged will not help]`;
+    case undefined:     return `${text} [not classified: nothing said whether trying again could help]`;
+    default:            return text;
+  }
+}
 
 /** How long a tool executor may keep the turn alive AFTER the turn was aborted, before the runner stops
  *  reading it. An abort must abort: any executor can fail to end — a child process whose stdout was
@@ -505,7 +523,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
         bookRound();
-        yield* end({ type: 'error', error: errorText(e), traceId });
+        const failure = failureOf(e);
+        yield* end({ type: 'error', error: errorText(e), traceId, ...(failure !== undefined ? { failure } : {}) });
         return;
       }
     }
@@ -700,13 +719,17 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {
               error: toolEv.message,
+              // Beside the message, so the model can tell "try again later" from "this will never work"
+              // without the tool having had to say so in prose — the choice to retry is the model's.
+              ...(toolEv.failure !== undefined ? { failure: toolEv.failure } : {}),
               ...(toolEv.stdout !== undefined ? { stdout: toolEv.stdout } : {}),
               ...(toolEv.stderr !== undefined ? { stderr: toolEv.stderr } : {}),
             }; isError = true; break;
           }
         }
       } catch (e) {
-        result  = { error: String(e) };
+        const failure = failureOf(e);
+        result  = { error: errorText(e), ...(failure !== undefined ? { failure } : {}) };
         isError = true;
       } finally {
         deadline.dispose();

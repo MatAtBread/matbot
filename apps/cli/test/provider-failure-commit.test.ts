@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier } from '@matatbread/matbot-core';
+import { createSessionRunner, createSession, installPrincipalCarrier, installUsageCarrier, withFailure } from '@matatbread/matbot-core';
 import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
   PipelineEvent, Principal, MessageContent,
@@ -142,4 +142,29 @@ test('a provider that rejects with a non-Error still commits the turn', { timeou
   assert.ok(saved, 'the session survives');
   assert.equal(saved.messages.filter(m => m.role === 'assistant').length, 1, "round 1's assistant message is not lost");
   assert.equal(saved.messages.filter(m => m.role === 'tool').length, 1, "round 1's tool result is not lost");
+});
+
+// Whether trying again could help is the provider's to say, and the turn's `error` carries it to whoever
+// decides: a frontend offering a retry, a model that delegated the turn.
+test("a provider failure's class reaches the turn's error", { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  const counter = { calls: 1 };   // fails at once
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: failsOnSecondCall(counter, withFailure(new Error('Anthropic 529: Overloaded'), 'unavailable')), config }),
+    tools: toolRegistry(okTool),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+
+  const view = await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: text('go'), provider: 'fake', principal });
+  const events: PipelineEvent[] = [];
+  for await (const ev of view.events) { events.push(ev); if (ev.type === 'idle') break; }
+
+  const err = events.find(e => e.type === 'error');
+  assert.ok(err && err.type === 'error');
+  assert.equal(err.failure, 'unavailable');
+  assert.match(err.error, /529: Overloaded/);
 });

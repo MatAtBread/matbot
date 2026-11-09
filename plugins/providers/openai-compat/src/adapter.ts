@@ -1,5 +1,6 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
-import { parseSSE } from '@matatbread/matbot-core/providers-base';
+import { parseSSE, responseError } from '@matatbread/matbot-core/providers-base';
+import { failureForStatus, withFailure } from '@matatbread/matbot-plugin-api';
 import { toOAIMessages, toOAITools } from './convert.js';
 
 const DEFAULT_ENDPOINT   = 'https://api.openai.com/v1/chat/completions';
@@ -43,6 +44,8 @@ interface OAIChunk {
   usage?:   { prompt_tokens?: number; completion_tokens?: number;
               prompt_tokens_details?: { cached_tokens?: number };
               [key: string]: unknown };
+  // An endpoint that fails after its 200 (OpenRouter does, mid-stream) says so in a chunk of its own.
+  error?:   { message?: string; code?: number | string; type?: string };
 }
 
 export class OpenAICompatAdapter implements ProviderAdapter {
@@ -121,10 +124,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       signal,
     });
 
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new Error(`OpenAI-compat ${res.status}: ${text}`);
-    }
+    if (!res.ok || !res.body) throw await responseError('OpenAI-compat', res);
 
     // Accumulate streaming tool call arguments and reasoning per index
     const toolAccum    = new Map<number, { id: string; name: string; args: string; sig?: string }>();
@@ -142,6 +142,14 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     for await (const line of parseSSE(res.body)) {
       let chunk: OAIChunk;
       try { chunk = JSON.parse(line) as OAIChunk; } catch { continue; }
+
+      // Ignored, it ended the turn as an "empty completion" with the endpoint's reason thrown away. A numeric
+      // `code` is the HTTP status the failure would have had; a string one is the host's own word, unclassified.
+      if (chunk.error) {
+        const { message, code } = chunk.error;
+        throw withFailure(new Error(`OpenAI-compat stream error: ${message ?? JSON.stringify(chunk.error)}`),
+          typeof code === 'number' ? failureForStatus(code) : undefined);
+      }
 
       // Usage (some providers send at end of stream). `prompt_tokens` is the full input including any
       // cache hit; `prompt_tokens_details.cached_tokens` is the cached portion (OpenAI auto-cache,
@@ -278,7 +286,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       },
       ...(signal !== undefined ? { signal } : {}),
     });
-    if (!res.ok) throw new Error(`OpenAI-compat ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+    if (!res.ok) throw await responseError('OpenAI-compat', res);
     const body = await res.json() as { data?: Array<{ id?: unknown }> };
     // Gemini's compat layer says `models/<id>`; the request names the bare id.
     return (body.data ?? []).flatMap(m => typeof m.id === 'string' ? [m.id.replace(/^models\//, '')] : []);

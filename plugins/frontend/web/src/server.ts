@@ -6,7 +6,7 @@ import type {
 } from '@matatbread/matbot-core';
 import {
   createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
-  isMediaRejectedError,
+  isMediaRejectedError, failureOf, FAILURE_STATUS,
 } from '@matatbread/matbot-core';
 import { bindGate, HTTP_TOOL_SESSION } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
@@ -844,7 +844,10 @@ export function createWebServer(deps: WebServerDeps) {
           json(res, status, { error: e.message, reason: e.reason, ...(e.file !== undefined ? { file: e.file } : {}) });
           return;
         }
-        json(res, 500, { error: String(e) });
+        // Nothing was queued: `open()` throws only before it queues a submission. Its class says whether
+        // sending it again could help, and the status says the same to a client that reads only that.
+        const failure = failureOf(e);
+        json(res, failure !== undefined ? FAILURE_STATUS[failure] : 500, { error: String(e), ...(failure !== undefined ? { failure } : {}) });
       }
       return;
     }
@@ -966,11 +969,14 @@ export function createWebServer(deps: WebServerDeps) {
             // A tool that reports a 4xx code is naming a CLIENT error, so answer with it rather than
             // 500 — input rejected by the executor's validator arrives this way (TOOL_INPUT_INVALID).
             // Safe to read as a status: a process exit code cannot exceed 255, so `bash` and friends
-            // can never land in this range.
-            const status = ev.code !== undefined && ev.code >= 400 && ev.code <= 499 ? ev.code : 500;
+            // can never land in this range. Otherwise its class, if it gave one: 503 tells a client that
+            // asking again later may work, which a 500 never could.
+            const status = ev.code !== undefined && ev.code >= 400 && ev.code <= 499 ? ev.code
+                         : ev.failure !== undefined ? FAILURE_STATUS[ev.failure] : 500;
             json(res, status, {
               error: ev.message,
               ...(ev.code !== undefined ? { code: ev.code } : {}),
+              ...(ev.failure !== undefined ? { failure: ev.failure } : {}),
               ...(stdout               ? { stdout }         : {}),
               ...(stderr               ? { stderr }         : {}),
             });
@@ -979,7 +985,10 @@ export function createWebServer(deps: WebServerDeps) {
         }
         json(res, 500, { error: 'Tool returned no result' });
       } catch (e) {
-        json(res, 500, { error: String(e), ...(stdout ? { stdout } : {}), ...(stderr ? { stderr } : {}) });
+        const failure = failureOf(e);
+        json(res, failure !== undefined ? FAILURE_STATUS[failure] : 500, {
+          error: String(e), ...(failure !== undefined ? { failure } : {}), ...(stdout ? { stdout } : {}), ...(stderr ? { stderr } : {}),
+        });
       }
       return;
     }

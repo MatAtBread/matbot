@@ -9,9 +9,9 @@ import type { Store } from './storage.js';
 // ── Session runner ──────────────────────────────────────────────────────────────
 
 /**
- * A view onto a session returned by `SessionRunner.open`. `session` is the authoritative
- * server-side state — committed messages only, ending at the running turn's user message. The
- * in-flight turn and any queued submissions are the delta, delivered over `events`, never overlaid
+ * A view onto a session returned by `SessionRunner.open` when observing it. `session` is the
+ * authoritative server-side state — committed messages only, ending at the running turn's user message.
+ * The in-flight turn and any queued submissions are the delta, delivered over `events`, never overlaid
  * here. `events` is a lazy, per-session live tap: accessing it subscribes to the turn event stream
  * from now (replaying the in-flight turn, then the queue); never touching it costs nothing.
  */
@@ -19,8 +19,22 @@ export interface SessionView {
   session:        Session;
   /** Submissions waiting behind the current turn (does not count the running turn). */
   queued:         number;
-  /** Correlation id of the submission this call enqueued — present only when content was supplied. */
-  traceId?:       string;
+  readonly events: AsyncIterable<PipelineEvent>;
+}
+
+/**
+ * What `SessionRunner.open` returns for a submission: the submission's correlation id and the live tap,
+ * with no `session`. Reading the session there cost a store round trip in front of every submission, for
+ * a field no submitter read, and it was read AFTER the submission had been queued — so a failed read
+ * told the caller the submission had failed when it was already running, and a caller that sent it again
+ * ran it twice. Without it, nothing `open()` awaits comes after the queueing: if it throws, nothing ran.
+ * A session that does not exist is reported on `events` as an `error` whose `failure` is `invalid`.
+ */
+export interface SubmittedView {
+  /** Submissions waiting behind this one's turn, or behind the running turn if this one interrupted it. */
+  queued:          number;
+  /** Correlation id of this submission: its turn's events carry it. */
+  traceId:         string;
   readonly events: AsyncIterable<PipelineEvent>;
 }
 
@@ -90,7 +104,8 @@ export interface SubmitOpenOpts extends OpenOpts {
  * returns and treats the live `events` stream purely as an optimisation.
  */
 export interface SessionRunner {
-  open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
+  open(opts: SubmitOpenOpts): Promise<SubmittedView>;
+  open(opts: OpenOpts): Promise<SessionView>;
   /** Abort the running turn (if any), any `parallel` turns beside it, and drop all queued submissions,
    *  emitting `cancelled` for each. */
   abort(sessionId: string): void;
