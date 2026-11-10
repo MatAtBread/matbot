@@ -512,6 +512,25 @@ a second host's needs.
   `ephemeral` when it is read, with a warning. Unmigrated, it was judged on no surface, so its trigger
   never fired and nothing said so. A write-back that fails or is refused (a trigger shared in read-only) still
   reads as `ephemeral`, and costs no other trigger.
+- **`triggers` — behaviour change for every installation: the answer now waits for the user-surface
+  verdict.** `classifierGraceMs` defaults to 10 s (`DEFAULT_GRACE_MS`) instead of `0`: the first token is
+  held until the classifier settles, so a matched `ephemeral`/`contextual` trigger informs the answer rather
+  than retracting it and running the turn again. A turn with user-surface conditions starts as late as its
+  classifier call takes; one with none is not delayed. A classifier slower than the hold still races, as
+  before. `classifierGraceMs: 0` restores the pure race (in the CLI's `matbot.yaml`: `default_settings: {
+  '@matatbread/matbot-triggers': { classifierGraceMs: 0 } }`). The hold's timer is cleared when the verdict
+  wins, so a turn no longer leaves one pending.
+- **`triggers`** — the classifier names only the conditions that match, each with its evidence, and its
+  conditions are in the system prompt, which providers cache, rather than after the exchange. A verdict per
+  condition cost output in proportion to the trigger set (~6,500 tokens and two minutes for 125
+  conditions), and only the rubric could be cached. A reply in the old per-condition shape (`{ "match":
+  true, "why": … }`, or `true`) still counts what it marked matched. `TriggerManager.evaluate` takes the
+  session as its first argument.
+- **`triggers`** gains the **`TriggerGate`** service: a policy that withholds triggers from one
+  conversation. Registered by the plugin that holds the policy and read by `triggers` at every evaluation,
+  `admit(triggers, { session, surface })` answers with those that may be judged; a withheld trigger is never
+  shown to the classifier, so it cannot fire. The answer is read as a subset of the offer, in stored order,
+  and a gate that throws is skipped with every trigger judged. Absent, every trigger is judged, as before.
 - **`cognition`** — a trigger seeded before 0.2.4 that loads the retired "Remember this" skill is no
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
   Nor is the Inner Voice trigger's cool-down backfilled onto one seeded before 0.3.8; set it with

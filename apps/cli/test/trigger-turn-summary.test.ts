@@ -73,7 +73,7 @@ test('the agent-surface classifier is shown each side\'s summary after its text'
   await hooks.get('followup')!({ session: { id: 's', version: '1', messages }, signal, resubmitDepth: 0, config: { provider: 'p' } } as never);
   assert.equal(prompts.length, 1);
   assert.match(prompts[0]!, /PRECEDING USER MESSAGE \(earlier\) ===\nsummarise this\n\n\[Files in this turn: def\.pdf \(application\/pdf\)\]\n\n/);
-  assert.match(prompts[0]!, /ASSISTANT RESPONSE \(later — judge the conditions against THIS\) ===\nhere\n\n\[Tool calls in this turn: http\]\n\n/);
+  assert.match(prompts[0]!, /ASSISTANT RESPONSE \(later — judge the conditions against THIS\) ===\nhere\n\n\[Tool calls in this turn: http\]$/);
 });
 
 test('a user message that is only an attachment is still judged', async () => {
@@ -84,7 +84,7 @@ test('a user message that is only an attachment is still judged', async () => {
   await hooks.get('followup')!({ session: { id: 's', version: '1', messages: [...messages, msg('assistant', [text('a')])] }, signal, resubmitDepth: 0, config: { provider: 'p', traceId: 'tr' } } as never);
   assert.equal(prompts.length, 1);
   assert.match(prompts[0]!, /PRECEDING ASSISTANT MESSAGE \(earlier\) ===\n\(none\)\n\n/);
-  assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\n\[Files in this turn: def\.pdf \(application\/pdf\)\]\n\n/);
+  assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\n\[Files in this turn: def\.pdf \(application\/pdf\)\]$/);
 });
 
 test('on the user surface, the preceding reply says it called no tools', async () => {
@@ -94,5 +94,5 @@ test('on the user surface, the preceding reply says it called no tools', async (
   await hooks.get('screen')!({ session: { id: 's', version: '1', messages }, signal, config: { provider: 'p', traceId: 'tr' } } as never);
   await hooks.get('followup')!({ session: { id: 's', version: '1', messages: [...messages, msg('assistant', [text('a1')])] }, signal, resubmitDepth: 0, config: { provider: 'p', traceId: 'tr' } } as never);
   assert.match(prompts[0]!, /PRECEDING ASSISTANT MESSAGE \(earlier\) ===\na0\n\n\[Tool calls in this turn: none\]\n\n/);
-  assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\nq1\n\n=== CONDITIONS/);
+  assert.match(prompts[0]!, /LATEST USER MESSAGE \(later — judge the conditions against THIS\) ===\nq1$/);
 });

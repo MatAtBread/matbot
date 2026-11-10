@@ -606,6 +606,12 @@ The user-surface kinds were one kind named `augment` (= today's `ephemeral`); a 
 
 **Fails soft.** Absent tool → nothing happens. Conditions evaluated by a classifier provider (Settings-resolved, falls back to turn's provider). Zero config required.
 
+**The classifier names its matches only, and the conditions are its cached prefix.** The conditions go in the classifier's *system* prompt, stable while the trigger set is, so a provider reads them from cache; the exchange is the prompt. The reply is a JSON object of the matched condition ids alone, each with its evidence. Output tokens are what take the time: a verdict per condition cost ~6,500 for 125 conditions, two minutes, so it always lost the race below.
+
+**The user surface holds the answer for its verdict.** `screen` kicks the classifier off and waits up to `classifierGraceMs` (default `DEFAULT_GRACE_MS`, 10 s) before the first token, so a match informs the answer. A slower verdict races generation: an in-situ restart if it lands before commit, else a retract-redo from `followup`. `0` is the pure race (the default before 0.5.0).
+
+**`TriggerGate` withholds triggers from one conversation.** An optional `MatbotServices` member registered by whichever plugin holds the policy — never by triggers, which reads it at every evaluation (the `ToolPresenter` shape), so load order is irrelevant and unloading the policy's plugin withdraws it. `admit(triggers, { session, surface })` is offered the enabled triggers on that surface and returns those that may be judged; a withheld trigger never reaches the classifier, so it cannot fire. The answer is intersected with the offer, in stored order (no invented triggers, no cache churn). A throwing gate is skipped with a warning and everything is judged. triggers knows nothing of *why* a gate withholds.
+
 **Orthogonal to skills.** Skills own content; triggers own conditions and firing. A skill is fired only by a trigger naming it.
 
 ---

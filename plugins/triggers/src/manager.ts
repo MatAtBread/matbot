@@ -1,5 +1,5 @@
-import type { Store, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition } from './types.js';
+import type { Store, MatbotMachine, Session } from '@matatbread/matbot-plugin-api';
+import type { Trigger, TriggerSpec, TriggerSurface, TriggerKind, Triggers, FiredCondition, TriggerGateContext } from './types.js';
 import { surfaceOfKind } from './types.js';
 
 const MAX_MSG_CHARS = 4000;
@@ -27,6 +27,17 @@ export interface ClassifiedMessage {
 function render(m: ClassifiedMessage): string {
   const parts = [...(m.text !== '' ? [clip(m.text)] : []), ...(m.summary !== undefined ? [m.summary] : [])];
   return parts.length > 0 ? parts.join('\n\n') : '(none)';
+}
+
+// A matched condition's evidence, or undefined when the reply does not name it as matched. The reply maps a
+// match to its evidence; a model answering in the per-condition shape asked for before 0.5.0
+// (`{ "match": true|false, "why": … }`, or a bare boolean) still counts only what it marked matched.
+function matchOf(v: unknown): { why?: string } | undefined {
+  if (typeof v === 'string') return v !== '' ? { why: v } : {};
+  if (v === true) return {};
+  if (typeof v !== 'object' || v === null || (v as { match?: unknown }).match !== true) return undefined;
+  const why = (v as { why?: unknown }).why;
+  return typeof why === 'string' ? { why } : {};
 }
 
 /** Stable identity for seed idempotency: a trigger is "the same" if it invokes the same tool with
@@ -172,36 +183,45 @@ export class TriggerManager implements Triggers {
    * the same kind is indistinguishable in the trace from one with a single condition — "it fired" tells
    * you nothing about *why*, which is the question a false-positive post-mortem actually asks. Both
    * sides of the exchange are passed: `subject` is judged, `context` is what it is paired with — many
-   * conditions are relational ("disputes the previous answer") and can only be judged from the pair. No
-   * LLM call when there are no candidate conditions or the subject has neither text nor a summary.
+   * conditions are relational ("disputes the previous answer") and can only be judged from the pair.
+   * `session` is the conversation, for the {@link TriggerGate}: only the triggers it admits are judged.
+   * No LLM call when there are no candidate conditions or the subject has neither text nor a summary.
    */
   async evaluate(
+    session:      Session,
     surface:      TriggerSurface,
     subject:      ClassifiedMessage,
     context:      ClassifiedMessage,
     signal:       AbortSignal,
     turnProvider: string,
   ): Promise<{ trigger: Trigger; kinds: TriggerKind[]; matched: FiredCondition[] }[]> {
+    if (subject.text === '' && subject.summary === undefined) return [];
+    const offered = (await this.all())
+      .filter(t => t.enabled !== false && t.conditions.some(c => surfaceOfKind(c.kind) === surface));
+    if (offered.length === 0) return [];
+    const triggers = await this.admitted(offered, { session, surface });
+
     // Candidate key is `${triggerId}#${conditionIndex}` — addressing conditions by index is fine
     // because evaluation is per-turn and the trigger set is stable for its duration. The surface a
     // condition belongs to is derived from its `kind` (ephemeral/contextual→user, retract/followup→agent).
-    const triggers   = await this.all();
-    const candidates = triggers
-      .filter(t => t.enabled !== false)
-      .flatMap(t => t.conditions
-        .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, index: i, kind: c.kind, rule: c.rule }))
-        .filter(c => surfaceOfKind(c.kind) === surface));
-    if (candidates.length === 0 || (subject.text === '' && subject.summary === undefined)) return [];
+    const candidates = triggers.flatMap(t => t.conditions
+      .map((c, i) => ({ triggerId: t.id, key: `${t.id}#${i}`, index: i, kind: c.kind, rule: c.rule }))
+      .filter(c => surfaceOfKind(c.kind) === surface));
+    if (candidates.length === 0) return [];
 
+    // The conditions are in the SYSTEM prompt and the exchange is the prompt. A provider caches the system
+    // prompt, and it is stable while the trigger set is, so the conditions — nearly all of the input — are
+    // read from cache on the next turn. They used to follow the exchange in the prompt, which left the
+    // rubric as the only prefix a provider could reuse.
     const res = await this.services.singleTurn({
       provider: await this.resolveClassifierProvider(turnProvider),
       signal,
       system:
-        'You are a trigger classifier for a conversational assistant. Below is the current exchange — ' +
-        'the user message and the assistant message, in chronological order and clearly labelled — ' +
-        `followed by a list of conditions. Evaluate each condition against the "${subject.label}". The ` +
-        `"${context.label}" is the message it is paired with; use it fully whenever a condition is ` +
-        'relational (refers to what was asked, answered, disputed, or repeated).\n\n' +
+        'You are a trigger classifier for a conversational assistant. The current exchange — the user ' +
+        'message and the assistant message, in chronological order and clearly labelled — is in the ' +
+        `message you are sent; a list of conditions follows these instructions. Evaluate each condition ` +
+        `against the "${subject.label}". The "${context.label}" is the message it is paired with; use it ` +
+        'fully whenever a condition is relational (refers to what was asked, answered, disputed, or repeated).\n\n' +
         // Deliberately short. An earlier version enumerated precedence rules for MATCH vs DO NOT MATCH
         // clauses, written to adjudicate the long exclusion lists the stored conditions then carried.
         // That machinery had no business surviving the exclusions: it was itself a patch, and it was
@@ -233,18 +253,22 @@ export class TriggerManager implements Triggers {
         // The classifier sees text only; the rest of a turn reaches it as these summaries (turnSummary).
         'A bracketed line closing a message — "[Tool calls in this turn: …]", "[Files in this turn: …]" — ' +
         'is a summary of what that message\'s turn held besides its text, and is evidence like the text.\n\n' +
-        'Match only on evidence actually present in the text above. A condition that stays silent costs ' +
+        'Match only on evidence actually present in the exchange. A condition that stays silent costs ' +
         'nothing; one that fires wrongly is disruptive and expensive.\n\n' +
+        // Matches only. A verdict per condition cost output tokens in proportion to the trigger set — about
+        // 6,500 for 125 conditions, two minutes of generation — so the verdict landed after the answer it
+        // was meant to inform. Output is what takes the time; the matches alone are tens of tokens.
         `Judge only the "${subject.label}" — the other message is context for relational conditions, ` +
-        'never itself a subject to judge. Return ONLY a JSON object mapping each condition id (the ' +
-        'bracketed value) to an object {"match": true|false, "why": "<a terse fragment, at most ~15 words, ' +
-        'citing the specific evidence — not a full sentence>"}. No other text.',
-      prompt:
-        `=== ${context.label.toUpperCase()} (earlier) ===\n${render(context)}\n\n` +
-        `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${render(subject)}\n\n` +
+        'never itself a subject to judge. Return ONLY a JSON object whose keys are the ids (the bracketed ' +
+        'values) of the conditions that MATCH, each mapped to a terse fragment, at most ~15 words, citing the ' +
+        'specific evidence — not a full sentence. Omit every condition that does not match; if none match, ' +
+        'return {}. No other text.\n\n' +
         `=== CONDITIONS (${candidates.length}) ===\n` +
         candidates.map(c => `--- [${c.key}] ---\n${c.rule}`).join('\n\n') +
         `\n\n=== END CONDITIONS ===`,
+      prompt:
+        `=== ${context.label.toUpperCase()} (earlier) ===\n${render(context)}\n\n` +
+        `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${render(subject)}`,
     });
 
     let verdicts: Record<string, unknown> = {};
@@ -258,15 +282,14 @@ export class TriggerManager implements Triggers {
 
     // Group fired conditions back to their triggers, keeping each matched condition's index/rule/why
     // alongside the distinct kinds that matched (kinds is a projection of matched, kept for callers
-    // that only need delivery routing).
+    // that only need delivery routing). Only candidates are looked up, so an id the classifier invents
+    // — or one the gate withheld — fires nothing.
     const firedByTrigger = new Map<string, FiredCondition[]>();
     for (const c of candidates) {
-      const v = verdicts[c.key] as { match?: unknown; why?: unknown } | boolean | undefined;
-      const isMatch = typeof v === 'object' && v !== null ? v.match === true : v === true;
-      if (!isMatch) continue;
-      const why = typeof v === 'object' && v !== null && typeof v.why === 'string' ? v.why : undefined;
+      const v = matchOf(verdicts[c.key]);
+      if (v === undefined) continue;
       const list = firedByTrigger.get(c.triggerId) ?? [];
-      list.push({ index: c.index, kind: c.kind, rule: c.rule, ...(why !== undefined ? { why } : {}) });
+      list.push({ index: c.index, kind: c.kind, rule: c.rule, ...v });
       firedByTrigger.set(c.triggerId, list);
     }
     const byId = new Map(triggers.map(t => [t.id, t]));
@@ -274,6 +297,20 @@ export class TriggerManager implements Triggers {
       const trigger = byId.get(id);
       return trigger ? [{ trigger, kinds: [...new Set(matched.map(m => m.kind))], matched }] : [];
     });
+  }
+
+  // The triggers the registered TriggerGate admits, as a subset of `offered` in offered order — see
+  // TriggerGate for why the answer is not taken as it stands, and why a throw admits everything.
+  private async admitted(offered: Trigger[], ctx: TriggerGateContext): Promise<Trigger[]> {
+    const gate = this.services.TriggerGate;
+    if (gate === undefined) return offered;
+    try {
+      const ids = new Set((await gate.admit(offered, ctx)).map(t => t.id));
+      return offered.filter(t => ids.has(t.id));
+    } catch (e) {
+      console.warn(`[triggers] the TriggerGate threw, so every trigger is judged: ${e instanceof Error ? e.message : String(e)}`);
+      return offered;
+    }
   }
 
   private async casMutate(doc: Trigger, mutate: (cur: Trigger) => Trigger): Promise<Trigger> {
