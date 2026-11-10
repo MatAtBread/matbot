@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, createConstantPrincipalCarrier, installUsageCarrier,
-  createSession, invokeTool, toolResult, usageEntries, subTurnDepth, MAX_CONCURRENT_TURNS, MAX_SUB_TURN_DEPTH,
+  createSession, invokeTool, toolResult, usageEntries, subTurnDepth, MAX_CONCURRENT_TURNS, MAX_SUB_TURN_DEPTH, callFramesOf,
 } from '@matatbread/matbot-core';
 import type {
   CompletionEvent, FormField, MatbotPlugin, Message, ProviderAdapter, PromptFn, Session, Tool, ToolContext, SubTurnResult,
@@ -232,6 +232,10 @@ test('what a turn\'s tools record comes back as the call\'s markers, in turn ord
   const markers = events.flatMap(e => e.type === 'marker' ? [[e.creator, e.data]] : []);
   assert.deepEqual(markers, [['probe', { from: 'one' }], ['probe', { from: 'two' }]]);
   assert.equal(events.at(-1)?.type, 'result', 'the markers precede the result');
+  // Each keeps the frame its sub-turn's runner stamped (CallFrame), so the runner storing it puts
+  // single_turn's own frame ahead of the call that recorded it, rather than losing where it came from.
+  const frames = events.flatMap(e => e.type === 'marker' ? [callFramesOf(e)?.map(f => f.tool)] : []);
+  assert.deepEqual(frames, [['stash'], ['stash']]);
 });
 
 // Through a body, as the tool's own test of the invariant: `ctx.session` is what carries the depth, so a

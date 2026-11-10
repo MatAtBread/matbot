@@ -685,7 +685,7 @@ const mcpAction: Tool = {
 | `result` | `value: unknown` | Final result (JSON-serialisable) |
 | `file` | `handle: FileHandle` | Output file reference |
 | `model-content` | `content: ModelContent[]` | Media for the *model* to read — see [Media](#media) |
-| `marker` | `creator: string`, `data: unknown` | Emit a durable marker (see [Markers](#markers)) |
+| `marker` | `creator: string`, `data: unknown` | Emit a durable marker (see [Markers](#markers)); the host stamps where it came from |
 | `error` | `message: string`, `code?: number`, `failure?: FailureClass`, `stdout?: string`, `stderr?: string` | Expected tool error |
 
 Throw only for unexpected failures; yield `{ type: 'error' }` for expected ones.
@@ -1275,6 +1275,19 @@ function markerMessage(data: MarkerData['my-plugin']): Message {
 
 A tool emits one inline with `yield { type: 'marker', creator, data }` rather than building the
 message itself.
+
+**Where a tool's marker came from is recorded for you.** The stored block carries `by`, the calls that
+produced it, outermost first (`CallFrame`: `tool`, the `plugin` that registered it, and `callId` on the call
+the transcript records). A marker your tool yields when called directly has one frame; one it yields when a
+composed body called it has the body's call first. You cannot set `by`: the host builds every frame. To ask
+"did my plugin write this?", read the frames and compare `plugin`, never anything in `data`:
+
+```ts
+const mine = (m: Marker) => m.by?.some(f => f.plugin === 'my-plugin') ?? false;
+```
+
+Which frame you look at is the question: a record written by a call your tool made has your plugin's frame
+directly above the writer's; one a body wrote after reading your output does not.
 
 ---
 

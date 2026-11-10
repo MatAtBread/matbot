@@ -175,6 +175,13 @@ a second host's needs.
 
 ### API gaps filled
 
+- **A tool's marker records the calls that produced it (`Marker.by`, `CallFrame`).** The host stamps each
+  marker a tool yields with the chain of calls it came through, outermost first: the runner's call (`tool`,
+  the registering `plugin`, `callId`), each nested call a `makeToolBox` made, and a sub-turn's own calls
+  when `single_turn` hands its markers back. A tool cannot supply the frames, so a reader can tell who wrote
+  a record (`plugin`) without trusting the record. `/host` exports `callFrame`, `callFramesOf` and
+  `withCallFrames` for a host relaying markers.
+
 - **`SessionTypes`, a sixth open registry, and `Tool.sessionType`.** A tool whose contract depends on what a
   session holds declares it once, naming its own key of `SessionTypes`; for a type-check made on a session's
   behalf, `sessionType(session)` answers that key, and the checker adds it under the tool's name. A check

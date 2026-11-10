@@ -24,6 +24,11 @@
 // half, and the one-shot CompletionRequest builder behind MatbotRuntime.singleTurn.
 export * from './host-machine.js';
 
+// The frames a nested call's marker carries up (CallFrame): written by `makeToolBox` and core's
+// `single_turn`, read by the runner when it stores a marker. Host-side because a tool must not be able to
+// state where its own record came from.
+export { callFrame, callFramesOf, withCallFrames } from './call-frames.js';
+
 // Ambient scope carriers. The host installs a platform impl once at boot (node: AsyncLocalStorage;
 // browser/single-principal: a constant carrier) and never touches them again.
 export { installPrincipalCarrier, enterPrincipal, createConstantPrincipalCarrier } from './principal-context.js';

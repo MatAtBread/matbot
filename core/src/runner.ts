@@ -6,7 +6,7 @@ import type {
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter, SessionAppender, TurnToolSource } from '@matatbread/matbot-plugin-api';
-import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite, scopeIterable, callFrame, callFramesOf } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
 import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt, failureOf } from '@matatbread/matbot-plugin-api';
@@ -714,7 +714,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
-            case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
+            // Built from `creator` and `data` alone: where the marker came from is the host's to say (CallFrame),
+            // so this call's frame leads and only the frames a box attached for nested calls follow it.
+            case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data,
+                                                by: [callFrame(tc.name, tool, tc.id), ...(callFramesOf(toolEv) ?? [])] }); break;
             case 'model-content': toolMedia.push(...toolEv.content); break;
             case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {

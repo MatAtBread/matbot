@@ -1,6 +1,7 @@
 import type { MatbotMachine, MatbotPlugin } from './plugin.js';
 import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionContext, PermissionGate, PermissionRequest } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
+import { callFrame, callFramesOf, withCallFrames } from './call-frames.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
 export interface PluginOps {
@@ -325,8 +326,15 @@ export function makeToolBox(
     opts?.onEvent?.({ type: 'stdout', chunk: `→ ${prop}(${compactTrace(params)})\n` });
     // A callee's markers go to `onEvent`, so a box whose owner yields what it receives (function-tools)
     // passes them up to the runner, which stores them as it would the callee's own: the callee was told
-    // its record was kept. A box with no `onEvent` has nowhere to put them.
-    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call), opts?.onEvent);
+    // its record was kept. A box with no `onEvent` has nowhere to put them. Each goes up stamped with this
+    // call's frame ahead of any its own callees added, so the runner can store the whole chain (CallFrame).
+    const onEvent = opts?.onEvent;
+    const callee = machine.tools.resolve(prop) ?? call.turnTools?.get(prop);
+    const onMarker = onEvent === undefined ? undefined : (ev: ToolEvent): void => {
+      if (ev.type !== 'marker') { onEvent(ev); return; }
+      onEvent(withCallFrames(ev, [callFrame(prop, callee), ...(callFramesOf(ev) ?? [])]));
+    };
+    const run = (p: unknown): Promise<unknown> => drainProxyResult(invokeTool(machine, prop, p, call), onMarker);
     let value: unknown;
     if (host === undefined) value = await run(params ?? {});
     else {

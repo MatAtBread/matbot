@@ -41,7 +41,8 @@ export type MessageContent = (
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
   | { type: 'form-response';     values: Record<string, string> }
   // Durable, opaque annotation — persisted unchanged, elided from every submission. See MarkerData below.
-  | { type: 'marker';            creator: string; data: unknown }
+  // `by` is the chain of tool calls that produced it, stamped by the host (see CallFrame).
+  | { type: 'marker';            creator: string; data: unknown; by?: CallFrame[] }
 
   // ── a provider block this build does not know: preserved verbatim rather than dropped ──
   | { type: 'unknown-content';   blockType: string; raw: unknown }
@@ -95,7 +96,35 @@ export type Marker<K extends string = string> = {
   type:    'marker';
   creator: K;
   data:    K extends keyof MarkerData ? MarkerData[K] : unknown;
+  by?:     CallFrame[];
 };
+
+/**
+ * One tool call in the chain that produced a marker. A marker a tool yields is stamped with `by`, the
+ * calls it came through, OUTERMOST FIRST: the call the runner made, then each nested call a composed body
+ * (or any `makeToolBox` owner) made inside it, down to the tool that yielded it.
+ *
+ * It is what a consumer needs to say where a record came from without trusting the record: a reader asking
+ * "was this written by a call `my-plugin` made?" looks at the frames, not at anything in `data`, which is the
+ * writer's to say. So the host builds every frame and a tool cannot supply one — a `by` on the event a tool
+ * yields is not read (the runner builds the stored block from `creator` and `data` alone), and the frames a
+ * nested call carries up travel on a symbol only the host writes (`/host`'s `withCallFrames`).
+ *
+ * - `tool` is the name the call was made by. A name is a weak identity — a tool can be wrapped, and a
+ *   reload may register another under it — so read it as what was called, never as who answered.
+ * - `plugin` is the host's own stamp of who registered the tool (`Tool.pluginName`), which a tool cannot
+ *   choose. It is the field to decide on. Absent for a tool registered outside any plugin.
+ * - `callId` is set on the frame of a call the transcript records (the runner's own), so the frame can be
+ *   joined to its `tool-call` block. A nested call is recorded nowhere, so it has none.
+ *
+ * Absent `by` means the marker was not yielded by a tool: a hook's, the runner's own bookkeeping, or one
+ * written before 0.5.0. Its absence is not an answer to "who wrote this".
+ */
+export interface CallFrame {
+  tool:     string;
+  plugin?:  string;
+  callId?:  string;
+}
 
 /**
  * One choice in a `select`. A bare string is the ordinary form and means "the value IS the label";

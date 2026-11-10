@@ -2,6 +2,7 @@ import type {
   Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
 import { collectBytes, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { withCallFrames } from '@matatbread/matbot-plugin-api/host';
 import { withFailureNote } from './runner.js';
 // The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
 // rule with two copies is one that gets fixed in one of them.
@@ -10,8 +11,14 @@ import { MAX_SUB_TURN_DEPTH, runSubTurn, subTurnFrame, subTurnSeed, type SubTurn
 
 export { MAX_SUB_TURN_DEPTH, type SubTurnFailure, type SubTurnWork } from './sub-turn.js';
 
+// A sub-turn's markers come back as this call's own, still carrying the frames the sub-turn's runner stamped
+// on them, so the runner storing them puts `single_turn`'s frame ahead of the calls made inside the sub-turn.
 function* markerEvents(carried: readonly MessageContent[][]): Iterable<ToolEvent<never>> {
-  for (const c of carried.flat()) if (c.type === 'marker') yield { type: 'marker', creator: c.creator, data: c.data };
+  for (const c of carried.flat()) {
+    if (c.type !== 'marker') continue;
+    const ev = { type: 'marker' as const, creator: c.creator, data: c.data };
+    yield c.by !== undefined ? withCallFrames(ev, c.by) : ev;
+  }
 }
 
 /** How many of one call's `turns` run at once; the rest wait for a free slot. They share a provider's rate

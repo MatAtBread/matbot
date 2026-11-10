@@ -1543,6 +1543,23 @@ endpoint did not send.
 
 Opaque, durable annotations in the message stream — `{ type: 'marker', creator: string, data: unknown }`. Stored as marker-role messages, **elided from LLM submission**, **persisted unchanged**, **preserved by compaction**. A tool emits one via `marker` `ToolEvent`; the triggers dispatcher collects and persists them for silent-side-effect trace. For type safety, augment `MarkerData` registry (same pattern as `MatbotServices`).
 
+**A tool's marker says which calls produced it, and the host says so, not the tool** (`by: CallFrame[]`,
+outermost first). The runner stamps the call it made (`tool`, the registering `plugin`, `callId`); a
+`makeToolBox` stamps each nested call it makes (`tool`, `plugin`), ahead of the frames its own callees
+added; `single_turn` hands a sub-turn's markers back still carrying the frames its runner stamped. The
+stored block is built from `creator` and `data` alone, so a `by` on the event a tool yields is never read,
+and the frames a nested call carries up ride on a symbol only `/host` writes (`withCallFrames`), which JSON
+cannot carry and so model-authored data never can.
+
+It exists because a reader often needs to know who WROTE a record without trusting the record: an entry
+of `session_data` that a governed query wrote itself, through a nested call, is a different fact from the
+same rows read back and written again by a composed body, and only the frames tell them apart (the body's
+write has `tool_function` above `session_data`, the query's has the query tool). Decide on `plugin`, the
+host's stamp of who registered the tool; `tool` is the name it was called by, which a wrapper or a reload
+can change. `callId` is on the runner's frame only, because only that call is recorded in the transcript to
+be joined to. A marker with no `by` came from no tool — a hook, the runner's own bookkeeping, a trigger's
+dispatch, or a session written before 0.5.0 — and its absence answers nothing.
+
 ---
 
 ## Media
