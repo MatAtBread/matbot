@@ -518,7 +518,9 @@ a second host's needs.
   minutes for 125 conditions), and with the exchange ahead of the conditions only the rubric was a stable
   prefix; now the conditions are a prefix any provider's prompt cache can reuse. A reply in the old
   per-condition shape counts only an explicit `{ "match": true }` or `true`. `TriggerManager.evaluate` takes
-  the session as its first argument.
+  the session as its first argument. A reply is read for its LAST verdict: a classifier that
+  second-guesses itself ("Wait, let me re-check…") and writes a corrected object was refused as non-JSON —
+  one greedy brace match spanned both objects and the prose between — and that turn fired nothing.
 - **`triggers`** — with `classifierGraceMs` set, the hold's timer is cleared when the verdict wins, so a
   turn no longer leaves one pending for the rest of the window.
 - **`triggers`** gains the **`TriggerFilter`** service: a policy that withholds triggers from one

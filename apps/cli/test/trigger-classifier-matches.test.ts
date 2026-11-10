@@ -105,3 +105,32 @@ test('an id the classifier was not asked about fires nothing', async () => {
   assert.equal(await judge(hooks, 'q', 'a'), undefined);
   assert.deepEqual(fired, []);
 });
+
+// Seen live on Maxie's 124 conditions: the classifier answered, then wrote "Wait, let me re-check…" and a
+// corrected object. The greedy brace match spanned both objects and the prose between them, which is not
+// JSON, so the turn fired NOTHING and logged "returned non-JSON". The last complete verdict is the answer.
+test('a reply that corrects itself is read for its last verdict, not refused as non-JSON', async () => {
+  const reply = '{"matched": [{"id": "t3#0", "why": "gloats"}]}\n\nWait, let me re-check t3 — "obviously" is ' +
+    'not gloating. {"matched": [{"id": "t2#0", "why": "names 3 May"}]}';
+  const { services, hooks, fired } = machine(triggers, reply);
+  await setupTriggers(services);
+  const out = await judge(hooks, 'when?', 'On 3 May, obviously.');
+  assert.deepEqual(fired, ['tool-t2']);
+  assert.deepEqual(firedMatches(out?.markers).map(t => t.id), ['t2']);
+});
+
+test('braces in the evidence or in prose around the verdict do not break it', async () => {
+  const reply = 'Checked {all three}.\n{"matched": [{"id": "t1#0", "why": "says \\"sorry {again}\\""}]}\nDone.';
+  const { services, hooks, fired } = machine(triggers, reply);
+  await setupTriggers(services);
+  await judge(hooks, 'q', 'Sorry again.');
+  assert.deepEqual(fired, ['tool-t1']);
+});
+
+test('an unclosed brace in prose does not swallow the verdict, nor does a trailing non-verdict object', async () => {
+  const reply = 'Thinking { about it.\n{"matched": [{"id": "t2#0", "why": "a date"}]}\n{"confidence": "high"}';
+  const { services, hooks, fired } = machine(triggers, reply);
+  await setupTriggers(services);
+  await judge(hooks, 'when?', 'On 3 May.');
+  assert.deepEqual(fired, ['tool-t2']);
+});

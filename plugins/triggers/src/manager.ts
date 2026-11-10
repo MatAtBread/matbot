@@ -52,6 +52,53 @@ function matchesOf(reply: unknown): Map<string, { why?: string }> {
   return out;
 }
 
+// Each complete JSON object in a reply, in order, outermost only. Not one greedy brace match: a classifier
+// that second-guesses itself writes its verdict, some prose ("Wait, let me re-check…") and a corrected
+// verdict, and a greedy match spans all of it, which is not JSON, so the turn fired nothing. Each `{` is
+// tried as the start of an object (a string-aware scan to its matching `}`), so a stray brace in prose
+// costs only itself.
+function* jsonObjects(text: string): Generator<unknown> {
+  for (let start = text.indexOf('{'); start !== -1; ) {
+    const end = closingBrace(text, start);
+    if (end !== -1) {
+      try {
+        yield JSON.parse(text.slice(start, end + 1));
+        start = text.indexOf('{', end + 1);
+        continue;
+      } catch { /* not JSON: try the next brace */ }
+    }
+    start = text.indexOf('{', start + 1);
+  }
+}
+
+// The index of the `}` closing the `{` at `start`, skipping braces inside strings; -1 if it never closes.
+function closingBrace(text: string, start: number): number {
+  let depth = 0, inString = false, escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
+
+// The verdict a reply ends on: the LAST object listing `matched`, so a correction overrides what it
+// corrects; failing that the last object (the 0.4.x per-condition map); `undefined` with no object at all.
+function lastVerdict(text: string): unknown {
+  let listed: unknown, other: unknown;
+  for (const o of jsonObjects(text)) {
+    if (typeof o !== 'object' || o === null || Array.isArray(o)) continue;
+    if (Array.isArray((o as { matched?: unknown }).matched)) listed = o;
+    else other = o;
+  }
+  return listed ?? other;
+}
+
 /** Stable identity for seed idempotency: a trigger is "the same" if it invokes the same tool with
  *  the same params. Triggers carry no name, so the invocation is the natural key. */
 function invokeKey(t: { invoke: Trigger['invoke'] }): string {
@@ -285,14 +332,12 @@ export class TriggerManager implements Triggers {
         `=== ${subject.label.toUpperCase()} (later — judge the conditions against THIS) ===\n${render(subject)}`,
     });
 
-    let matches: Map<string, { why?: string }>;
-    try {
-      const m = res.text.match(/\{[\s\S]*\}/);
-      matches = matchesOf(m ? JSON.parse(m[0]) : {});
-    } catch {
-      console.warn(`[triggers] ${surface} classifier returned non-JSON:`, res.text.slice(0, 200));
+    const verdict = lastVerdict(res.text);
+    if (verdict === undefined) {
+      console.warn(`[triggers] ${surface} classifier returned no JSON verdict:`, JSON.stringify(res.text.slice(0, 400)));
       return [];
     }
+    const matches = matchesOf(verdict);
 
     // Group fired conditions back to their triggers, keeping each matched condition's index/rule/why
     // alongside the distinct kinds that matched (kinds is a projection of matched, kept for callers
