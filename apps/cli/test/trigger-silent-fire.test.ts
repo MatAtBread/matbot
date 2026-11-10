@@ -27,7 +27,7 @@ function machine(triggers: Trigger[], events: ToolEvent[]) {
     providers:   { has: () => false },
     // Every condition matches, with its key as the evidence.
     singleTurn:  async (req: { system: string }) => ({
-      text: JSON.stringify(Object.fromEntries([...req.system.matchAll(/--- \[(.+?)\] ---/g)].map(m => [m[1], `evidence for ${m[1]}`]))),
+      text: JSON.stringify({ matched: [...req.system.matchAll(/--- \[(.+?)\] ---/g)].map(m => ({ id: m[1], why: `evidence for ${m[1]}` })) }),
     }),
   };
   return { services: services as unknown as MatbotMachine, hooks };

@@ -4,10 +4,10 @@ import type { DeferredCorrection, MatbotMachine, Message, MessageContent, Store,
 import { setupTriggers } from '../../../plugins/triggers/src/index.ts';
 import type { Trigger } from '../../../plugins/triggers/src/index.ts';
 
-// `classifierGraceMs` defaulted to 0, a pure race: the answer started at once and a user-surface verdict
-// that fired after it committed retracted it and ran the turn again, so a matched trigger cost a whole
-// discarded answer. The default now holds the answer for the verdict (10 s), and only a classifier slower
-// than that races. `0` still means the race.
+// `classifierGraceMs` is how long the answer is held for the user-surface verdict. Unset it is 0, a pure race:
+// the answer starts at once, and a verdict that fires after it commits retracts it. An installation with a
+// fast classifier and frequent matches sets it, so a match informs the answer; a classifier slower than the
+// hold still races. The hold's timer is cleared when the verdict wins.
 
 const RESULT = 'the routed context';
 
@@ -51,8 +51,8 @@ const followup = async (hooks: Map<string, (ctx: never) => Promise<unknown>>, me
   await hooks.get('followup')!({ session: session(messages), signal, resubmitDepth: 0, config: { provider: 'p', traceId: 'tr' } } as never) as FollowupOut;
 const events   = (out: FollowupOut) => (out?.markers ?? []).map(m => (m as { data?: { event?: string } }).data?.event);
 
-test('unset, the answer waits for the verdict: it is delivered before the first token and nothing is retracted', async () => {
-  const m = machine(30);
+test('with a hold, the answer waits for the verdict: it is delivered before the first token and nothing is retracted', async () => {
+  const m = machine(30, { classifierGraceMs: 10_000 });
   await setupTriggers(m.services);
   const q = [user('how many bids yesterday?')];
   const out = await screen(m.hooks, q);
@@ -66,8 +66,8 @@ test('unset, the answer waits for the verdict: it is delivered before the first 
   assert.equal(m.invoked(), 1);
 });
 
-test('classifierGraceMs: 0 races: the answer starts at once, and a verdict after it retracts it', async () => {
-  const m = machine(30, { classifierGraceMs: 0 });
+test('unset, it races: the answer starts at once, and a verdict after it retracts it', async () => {
+  const m = machine(30);
   await setupTriggers(m.services);
   const q = [user('how many bids yesterday?')];
   const out = await screen(m.hooks, q);

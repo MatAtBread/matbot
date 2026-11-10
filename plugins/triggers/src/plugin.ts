@@ -3,7 +3,7 @@ import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, S
 import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
-import type { Trigger, Triggers, TriggerGate, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
+import type { Trigger, Triggers, TriggerFilter, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
 
 /** A firing trigger's id plus the specific condition(s) that matched — the unit markers trace, so a
  *  post-mortem can see not just that a trigger fired but which rubric the classifier judged true and
@@ -31,7 +31,7 @@ const NO_USER_PHASE = (): UserPhaseOutcome => ({ ephemeralBodies: [], durableBod
 
 /** A user-phase evaluation in flight for one turn, shared between the three places that may deliver its
  *  correction: the runner's in-situ restart (via the `DeferredScreen.claim()` the screen hook returns),
- *  the pre-first-token grace inject (screen, unless `classifierGraceMs` is 0), and the post-commit
+ *  an optional pre-first-token grace inject (screen, when `classifierGraceMs > 0`), and the post-commit
  *  `followup` retract. `ready`/`correction` let the runner poll synchronously; `claimed` is the
  *  exactly-once latch — whoever delivers sets it, so the other two see it and don't re-deliver. */
 interface UserPhaseInFlight {
@@ -48,13 +48,9 @@ declare module '@matatbread/matbot-plugin-api' {
     Triggers?: Triggers;
     /** Withholds triggers from one conversation's evaluation. Registered by the plugin that holds the
      *  policy, never by triggers, which reads it at every evaluation; absent ⇒ every trigger is judged. */
-    TriggerGate?: TriggerGate;
+    TriggerFilter?: TriggerFilter;
   }
 }
-
-/** How long the answer waits for the user-surface verdict when `classifierGraceMs` is unset. Long enough
- *  for a classifier that names only its matches; one slower than this still races. */
-export const DEFAULT_GRACE_MS = 10_000;
 
 /** One-shot reachability probe for a pinned provider, used only when forming installationMessage
  *  (install/reload) — never on the hot path. Fails soft: a thrown error becomes `{ ok: false }`. */
@@ -372,11 +368,11 @@ function side(label: string, messages: readonly Message[], msg: Message | undefi
  * the `Triggers` service and the `trigger_action` tool, then install the two evaluation hooks:
  *
  *   user  — a `screen` hook (pre-response) that kicks off the `user`-phase classify+dispatch and holds
- *           the first token for it, up to `classifierGraceMs` (DEFAULT_GRACE_MS when unset). A verdict
- *           inside the hold informs the answer — `ephemeral` for this turn, `contextual` durably. One
- *           slower than that races the turn's generation: the runner restarts in-situ if it lands before
- *           commit, else the `followup` hook (below) supersedes the answer with a retract-redo. At 0 the
- *           hold is skipped and it always races. A silent side-effect (no result) needs no delivery.
+ *           the first token for it for up to `classifierGraceMs` (0, the default, holds nothing). A
+ *           verdict inside the hold informs the answer — `ephemeral` for this turn, `contextual` durably.
+ *           Otherwise it races the turn's generation: the runner restarts in-situ if it lands before
+ *           commit, else the `followup` hook (below) supersedes the answer with a retract-redo. A silent
+ *           side-effect (no result) needs no delivery.
  *   agent — the `followup` hook (post-commit) also judges agent-surface conditions against the
  *           assistant's response, invokes each fired trigger's tool, and delivers the result per the
  *           fired condition's `kind`: `retract` (discard the response and re-run with the result
@@ -410,16 +406,15 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   // sessions never collide.
   const pendingUserPhase = new Map<string, UserPhaseInFlight>();
 
-  // The pre-first-token grace: how long `screen` holds the answer for the verdict before handing off to
-  // the race. A classifier that settles within it injects BEFORE the first token, so a matched trigger
-  // informs the answer instead of discarding it; a slower one still races. Unset (or not a number ≥ 0)
-  // ⇒ DEFAULT_GRACE_MS. 0 ⇒ the pure race: no added latency, and a correction lands in-situ or as a
-  // retract — the default before 0.5.0, while the classifier gave a verdict on every condition and took
-  // too long to wait for. Read live so a settings change takes effect next turn.
+  // Optional pre-first-token grace: how long `screen` waits for the verdict before handing off to the
+  // race. 0 (default) ⇒ pure race (the responsive path — no added latency, correction lands in-situ or
+  // as a retract). A positive value trades that responsiveness back for cleanliness: a classifier that
+  // settles within the window injects BEFORE the first token (the old "slow but clean" feel), a slower
+  // one still races. Read live so a triggers_config/settings change takes effect next turn.
   const resolveGraceMs = async (): Promise<number> => {
     const v = await services.settings().get<number | string>('classifierGraceMs');
-    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v;
-    return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : DEFAULT_GRACE_MS;
+    const n = typeof v === 'string' ? Number(v) : v;
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : 0;
   };
 
   // Judge the user message and dispatch every fired user-phase trigger, partitioning result bodies by
@@ -464,10 +459,10 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
     return { ephemeralBodies, durableBodies, sources, silent, markers };
   };
 
-  // user phase — kicked off pre-response, then held for up to `classifierGraceMs` (DEFAULT_GRACE_MS when
-  // unset). The correction is delivered by whichever of three points wins: the pre-first-token grace
-  // inject (the verdict settled within the hold), the runner's in-situ restart (via the returned
-  // DeferredScreen), or the post-commit `followup` retract.
+  // user phase — kicked off pre-response, NOT awaited. Judging the user message concurrently with the
+  // turn keeps the classifier off the pre-first-token critical path. The correction is delivered by
+  // whichever of three points wins: the runner's in-situ restart (via the returned DeferredScreen), a
+  // pre-first-token grace inject (when `classifierGraceMs > 0`), or the post-commit `followup` retract.
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
@@ -507,10 +502,11 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
         .catch((): UserPhaseOutcome => { rec.ready = true; return NO_USER_PHASE(); });
       pendingUserPhase.set(traceId, rec);
 
-      // The grace: wait up to `classifierGraceMs` for the verdict before racing. If it lands with a
+      // Optional grace: wait up to `classifierGraceMs` for the verdict before racing. If it lands with a
       // result-fire, deliver it as ordinary ephemeral (injected before the first token — the clean path)
-      // and latch `claimed` so neither the runner nor followup re-delivers it. At 0 this is skipped
-      // entirely — pure race, no added latency. The timer is cleared, since a verdict nearly always beats it.
+      // and latch `claimed` so neither the runner nor followup re-delivers it. At 0 (default) this is
+      // skipped entirely — pure race, no added latency. The timer is cleared when the verdict wins, so a
+      // turn does not leave one pending for the rest of the window.
       const graceMs = await resolveGraceMs();
       if (graceMs > 0) {
         let timer: ReturnType<typeof setTimeout> | undefined;

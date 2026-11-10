@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { MatbotMachine, Message, MessageContent, Session, Store, Tool } from '@matatbread/matbot-plugin-api';
 import { setupTriggers } from '../../../plugins/triggers/src/index.ts';
-import type { Trigger, TriggerGate, TriggerSurface } from '../../../plugins/triggers/src/index.ts';
+import type { Trigger, TriggerFilter, TriggerSurface } from '../../../plugins/triggers/src/index.ts';
 
 // Nothing could withhold a trigger from one conversation: the classifier judged every stored condition on
-// every turn. A `TriggerGate`, registered by whichever plugin holds the policy, now sees the triggers a turn
+// every turn. A `TriggerFilter`, registered by whichever plugin holds the policy, now sees the triggers a turn
 // would judge and the conversation, and answers with the ones it may.
 
 interface Request { system?: string; prompt: string }
@@ -28,14 +28,14 @@ function machine(triggers: Trigger[], reply: string) {
     providers:   { has: () => false },
     singleTurn:  async (req: Request) => { requests.push(req); return { text: reply }; },
   };
-  const gate = (g: TriggerGate | undefined) => { (services as Record<string, unknown>)['TriggerGate'] = g; };
-  return { services: services as unknown as MatbotMachine, hooks, requests, fired, gate };
+  const filter = (g: TriggerFilter | undefined) => { (services as Record<string, unknown>)['TriggerFilter'] = g; };
+  return { services: services as unknown as MatbotMachine, hooks, requests, fired, filter };
 }
 
 const trigger = (id: string, kind: Trigger['conditions'][number]['kind']): Trigger => ({
   id, version: '1', conditions: [{ kind, rule: `rule of ${id}` }], invoke: { tool: `tool-${id}` }, createdAt: '', updatedAt: '',
 });
-const everything = (ids: string[]) => JSON.stringify(Object.fromEntries(ids.map(id => [`${id}#0`, { match: true, why: 'matched' }])));
+const everything = (ids: string[]) => JSON.stringify({ matched: ids.map(id => ({ id: `${id}#0`, why: 'matched' })) });
 // What the classifier was shown, wherever in the request the conditions sit.
 const shown = (r: Request) => `${r.system ?? ''}\n${r.prompt}`;
 
@@ -51,11 +51,11 @@ async function turn(hooks: Map<string, (ctx: never) => Promise<unknown>>, s: Ses
   return { screened, followed };
 }
 
-test('a gate registered after triggers is asked, with the conversation and the surface, and what it withholds is neither judged nor fired', async () => {
+test('a filter registered after triggers is asked, with the conversation and the surface, and what it withholds is neither judged nor fired', async () => {
   const m = machine([trigger('data', 'ephemeral'), trigger('chat', 'ephemeral'), trigger('critic', 'followup')], everything(['data', 'chat', 'critic']));
   await setupTriggers(m.services);
   const asked: { ids: string[]; session: Session; surface: TriggerSurface }[] = [];
-  m.gate({ admit(ts, ctx) { asked.push({ ids: ts.map(t => t.id), ...ctx }); return ts.filter(t => t.id !== 'data'); } });
+  m.filter({ admit(ts, ctx) { asked.push({ ids: ts.map(t => t.id), ...ctx }); return ts.filter(t => t.id !== 'data'); } });
 
   const s = { id: 'governed', version: '1', messages: [user('how many bids?')] } as unknown as Session;
   await turn(m.hooks, s, 'tr');
@@ -67,25 +67,25 @@ test('a gate registered after triggers is asked, with the conversation and the s
   assert.deepEqual(m.fired.sort(), ['tool-chat', 'tool-critic'], 'the classifier named the withheld trigger, and it fired anyway');
 });
 
-test('withdrawing the gate restores the trigger', async () => {
+test('withdrawing the filter restores the trigger', async () => {
   const m = machine([trigger('data', 'ephemeral')], everything(['data']));
   await setupTriggers(m.services);
-  m.gate({ admit: () => [] });
+  m.filter({ admit: () => [] });
   await turn(m.hooks, { id: 's', version: '1', messages: [user('first')] } as unknown as Session, 'a');
   assert.equal(m.requests.length, 0, 'nothing left to judge, so no classifier call');
   assert.deepEqual(m.fired, []);
 
-  m.gate(undefined);
+  m.filter(undefined);
   await turn(m.hooks, { id: 's', version: '1', messages: [user('second')] } as unknown as Session, 'b');
   assert.equal(m.requests.length, 1);
   assert.deepEqual(m.fired, ['tool-data']);
 });
 
-test('a gate cannot add a trigger or reorder them: its answer is read as a subset of what it was offered', async () => {
+test('a filter cannot add a trigger or reorder them: its answer is read as a subset of what it was offered', async () => {
   const t = [trigger('a', 'followup'), trigger('b', 'followup'), trigger('c', 'followup')];
   const m = machine(t, '{}');
   await setupTriggers(m.services);
-  m.gate({ admit: ts => [ts[2]!, trigger('stranger', 'followup'), ts[0]!] });
+  m.filter({ admit: ts => [ts[2]!, trigger('stranger', 'followup'), ts[0]!] });
   await turn(m.hooks, { id: 's', version: '1', messages: [user('q')] } as unknown as Session, 'tr');
   const system = shown(m.requests[0]!);
   assert.ok(!system.includes('stranger'));
@@ -93,10 +93,10 @@ test('a gate cannot add a trigger or reorder them: its answer is read as a subse
   assert.ok(system.indexOf('[a#0]') < system.indexOf('[c#0]'), 'the stored order is kept, so the cached prompt does not churn');
 });
 
-test('a gate that throws is skipped: every trigger is judged', async () => {
+test('a filter that throws is skipped: every trigger is judged', async () => {
   const m = machine([trigger('data', 'ephemeral')], everything(['data']));
   await setupTriggers(m.services);
-  m.gate({ admit: () => { throw new Error('policy store down'); } });
+  m.filter({ admit: () => { throw new Error('policy store down'); } });
   const warn = console.warn;
   const warned: unknown[] = [];
   console.warn = (...a: unknown[]) => { warned.push(a.join(' ')); };

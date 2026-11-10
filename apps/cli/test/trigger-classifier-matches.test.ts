@@ -52,7 +52,7 @@ const firedMatches = (markers: MessageContent[] | undefined) => (markers ?? [])
     ? (m.data as { triggers: { id: string; matched: { why?: string }[] }[] }).triggers : []);
 
 test('the conditions are in the system prompt, and the exchange alone is the prompt', async () => {
-  const { services, hooks, requests } = machine(triggers, '{}');
+  const { services, hooks, requests } = machine(triggers, '{"matched": []}');
   await setupTriggers(services);
   await judge(hooks, 'when is it due?', 'Sorry — on 3 May.');
   await judge(hooks, 'and the next one?', 'The 9th, I think.');
@@ -65,10 +65,10 @@ test('the conditions are in the system prompt, and the exchange alone is the pro
 });
 
 test('the classifier is asked for the matches alone, and only those fire, each with its evidence', async () => {
-  const { services, hooks, requests, fired } = machine(triggers, 'Here: {"t2#0": "names 3 May"}');
+  const { services, hooks, requests, fired } = machine(triggers, 'Here: {"matched": [{"id": "t2#0", "why": "names 3 May"}]}');
   await setupTriggers(services);
   const out = await judge(hooks, 'when is it due?', 'On 3 May.');
-  assert.match(requests[0]!.system!, /Omit every condition that does not match; if none match, return \{\}/);
+  assert.match(requests[0]!.system!, /Leave out every condition that does not match; if none match, return \{"matched": \[\]\}/);
   assert.deepEqual(fired, ['tool-t2']);
   assert.deepEqual(firedMatches(out?.markers), [{ id: 't2', matched: [{ index: 0, kind: 'followup', rule: 'CONTENT: the reply names a date', why: 'names 3 May' }] }]);
 });
@@ -82,8 +82,25 @@ test('a reply in the per-condition shape still counts only what it marked matche
   assert.deepEqual(firedMatches(out?.markers).map(t => [t.id, t.matched[0]?.why]), [['t2', 'a date'], ['t3', undefined]]);
 });
 
+test('a listed entry may be a bare id, and an id listed twice fires once, with the first evidence', async () => {
+  const { services, hooks, fired } = machine(triggers, '{"matched": ["t1#0", {"id": "t3#0", "why": "gloats"}, {"id": "t3#0", "why": "again"}]}');
+  await setupTriggers(services);
+  const out = await judge(hooks, 'q', 'Sorry, but I was right.');
+  assert.deepEqual(fired, ['tool-t1', 'tool-t3']);
+  assert.deepEqual(firedMatches(out?.markers).map(t => [t.id, t.matched.map(c => c.why)]), [['t1', [undefined]], ['t3', ['gloats']]]);
+});
+
+// The reply is a list because in a map from id to evidence every value is a string, so a model that wrote
+// out the non-matches too ("no evidence") would have fired every one of them.
+test('a map from ids to strings fires nothing: only a listed match, or an explicit true, counts', async () => {
+  const { services, hooks, fired } = machine(triggers, '{"t1#0": "no apology here", "t2#0": "no date", "t3#0": ""}');
+  await setupTriggers(services);
+  assert.equal(await judge(hooks, 'q', 'a'), undefined);
+  assert.deepEqual(fired, []);
+});
+
 test('an id the classifier was not asked about fires nothing', async () => {
-  const { services, hooks, fired } = machine(triggers, '{"t9#0": "made up", "t1#4": "no such condition"}');
+  const { services, hooks, fired } = machine(triggers, '{"matched": [{"id": "t9#0", "why": "made up"}, {"id": "t1#4", "why": "no such condition"}]}');
   await setupTriggers(services);
   assert.equal(await judge(hooks, 'q', 'a'), undefined);
   assert.deepEqual(fired, []);

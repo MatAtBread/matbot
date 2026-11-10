@@ -530,26 +530,26 @@ plugin that registered one is unloaded. For any key, unloading a plugin withdraw
 registration: if another plugin had registered over it, that one stays; if it had displaced another
 plugin's, that one is reinstated.
 
-### Withholding triggers from a conversation (`TriggerGate`)
+### Withholding triggers from a conversation (`TriggerFilter`)
 
 `triggers` judges every enabled condition on every turn. A plugin with a reason to keep some triggers
-out of one conversation registers a `TriggerGate`, the type exported by `@matatbread/matbot-triggers`:
+out of one conversation registers a `TriggerFilter`, the type exported by `@matatbread/matbot-triggers`:
 
 ```ts
-import type {} from '@matatbread/matbot-triggers';   // the `TriggerGate` augmentation
+import type {} from '@matatbread/matbot-triggers';   // the `TriggerFilter` augmentation
 
-await services.register('TriggerGate', {
+await services.register('TriggerFilter', {
   admit: (triggers, { session, surface }) => triggers.filter(t => mayJudge(t, session, surface)),
 });
 ```
 
 It is asked at every evaluation, once per surface (`user` before the answer, `agent` after), with the
 enabled triggers that have a condition on that surface. What it leaves out is never shown to the
-classifier, so it cannot fire. Register it whenever you like: `triggers` reads `services.TriggerGate`
+classifier, so it cannot fire. Register it whenever you like: `triggers` reads `services.TriggerFilter`
 when it evaluates, and your registration is withdrawn when your plugin unloads. Keep it cheap, since it
 runs before the classifier on the turn's path. The answer can only withhold — a trigger you add is ignored
-and the stored order is kept — and a gate that throws is skipped, with every trigger judged. The key holds
-one gate; a second that should compose captures the one it displaces and intersects with its answer.
+and the stored order is kept — and a filter that throws is skipped, with every trigger judged. The key holds
+one filter; a second that should compose captures the one it displaces and intersects with its answer.
 
 ### Plugin settings
 
@@ -1175,7 +1175,7 @@ other plugin.
 generation instead of gating on it: return immediately, hand back a `DeferredScreen`, and the runner
 restarts the turn in-situ if the verdict fires before commit. A hook that would rather block until
 the verdict just returns `ephemeral` as usual. `triggers` does both: it waits up to its
-`classifierGraceMs` setting (10 s unless set) and hands back a `deferred` only for a slower verdict.
+`classifierGraceMs` setting (0 unless set) and hands back a `deferred` for a slower verdict.
 
 **`followup`'s `retractAndRerun`** is the inverse of `resubmit`: rather than appending a robo turn
 after the response, it *supersedes* it. The pump pops the committed turn back to (and excluding) the
@@ -1479,7 +1479,7 @@ Each plugin is **Functional** (intended for real use as shipped) or an **Example
 | `@matatbread/matbot-sessions` | `session_action` | Session lifecycle: list, get, rename, hide |
 | `@matatbread/matbot-edit-session` | `session_edit`, `compact_sessions` | Trim, branch, split, compact and LLM-summarise sessions |
 | `@matatbread/matbot-session-data` | `session_data` (a turn tool, `screen` hook) | Keep intermediate results in a session as markers and read them back by id, typed by what each holds; shared when the session is |
-| `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks); `Triggers` service; reads an optional `TriggerGate` | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
+| `@matatbread/matbot-triggers` | `trigger_action`, `triggers_config` (`screen`/`followup` hooks); `Triggers` service; reads an optional `TriggerFilter` | Data-driven hooks: stored conditions that invoke a tool when an LLM classifier judges them matched |
 | `@matatbread/matbot-tool-json-validation` | `validate` hook | Validate tool inputs against their schema; the model self-corrects on mismatch |
 | `@matatbread/matbot-skills` | `skill_action`, `skills_config` | Cross-runtime skill CRUD (named markdown playbooks) |
 | `@matatbread/matbot-tool-skill-compiler` | `skill_compiler` | Compile procedural markdown skills into executable TypeScript tool plugins |

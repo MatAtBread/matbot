@@ -127,8 +127,9 @@ export interface TriggerSpec {
   cooldown?:  TriggerCooldown;
 }
 
-/** What a {@link TriggerGate} is told about the evaluation it is asked about. */
-export interface TriggerGateContext {
+/** What a {@link TriggerFilter} is told about the evaluation it is asked about. An object so that it can
+ *  gain fields without changing `admit`'s signature; a filter reads only what it needs. */
+export interface TriggerFilterContext {
   /** The conversation being judged, as it stands when the surface is judged. */
   session: Session;
   /** `user` before the answer (the `screen` hook), `agent` after it (the `followup` hook). */
@@ -137,20 +138,20 @@ export interface TriggerGateContext {
 
 /**
  * Withholds triggers from one conversation: a read-only *view* over the stored set, as `ToolPresenter` is
- * over the tool registry. The plugin that holds the policy registers it (`services.register('TriggerGate',
- * gate)`), and triggers reads `services.TriggerGate` at every evaluation, so neither load order matters and
+ * over the tool registry. The plugin that holds the policy registers it (`services.register('TriggerFilter',
+ * filter)`), and triggers reads `services.TriggerFilter` at every evaluation, so neither load order matters and
  * unloading that plugin withdraws it. Absent ⇒ every trigger is judged.
  *
  * `admit` is offered the enabled triggers with a condition on the surface being judged, in stored order,
  * and answers with those that may be judged. A withheld trigger's conditions never reach the classifier, so
  * it cannot fire whatever the classifier replies. The answer is read as a subset of the offer: a trigger it
- * was not offered is ignored and the offered order kept, so a gate cannot invent a trigger or churn the
- * classifier's cached prompt. A gate that throws is skipped, with a warning, and every trigger is judged:
- * a broken policy must not switch triggers off. One gate per machine, like any service key; a second
+ * was not offered is ignored and the offered order kept, so a filter cannot invent a trigger or churn the
+ * classifier's cached prompt. A filter that throws is skipped, with a warning, and every trigger is judged:
+ * a broken policy must not switch triggers off. One filter per machine, like any service key; a second
  * composes by capturing the one it displaces and intersecting with its answer.
  */
-export interface TriggerGate {
-  admit(triggers: readonly Trigger[], ctx: TriggerGateContext): readonly Trigger[] | Promise<readonly Trigger[]>;
+export interface TriggerFilter {
+  admit(triggers: readonly Trigger[], ctx: TriggerFilterContext): readonly Trigger[] | Promise<readonly Trigger[]>;
 }
 
 /**
