@@ -45,10 +45,10 @@ churn and less likely to affect a consumer who doesn't use them.
   and a sub-turn sets `a sub-turn run from this conversation`. Without it, the line says an automated
   process sent the message. It is never stored, and is the same text every round, so it costs no prompt
   cache.
-- **A `single_turn` sub-turn may robo-submit.** Its appender refused everything, on the grounds that a
-  sub-turn reports by returning. That still holds for an assistant append, which is refused. A user message
-  is a request the calling turn does not answer, so it goes to the machine's appender. It defaults to the
-  calling conversation, so a sub-turn does not have to look up its own session id.
+- **A `single_turn` sub-turn may append.** Its appender refused everything, on the grounds that a sub-turn
+  reports by returning. Returning a value and writing to a conversation are different acts, so it now
+  appends as any turn does, to any session it names. An append naming no session goes to the calling
+  conversation, and a robo-submit says it came from a sub-turn.
 
 - **`SessionRunner.status()` reports `prompting`**: a turn of the session has asked its submitter's
   `prompt` a question nobody has answered. The runner counts this across every submission's `prompt`, so

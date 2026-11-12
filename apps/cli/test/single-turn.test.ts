@@ -274,21 +274,29 @@ test('a parent\'s abort stops its turns', { timeout: 15000 }, async t => {
   assert.equal(r[0]!.ok, false);
 });
 
-test('a turn cannot append to a conversation, directly or from a composed call', { timeout: 15000 }, async t => {
-  const results: string[] = [];
+test('a turn appends as any turn does: to the calling conversation by default, directly or from a composed call', { timeout: 15000 }, async t => {
+  // Returning a value and writing to a conversation are different acts ("append the time here and return
+  // nothing"), so a sub-turn's append is not refused. It used to be, as a report its caller would relay anyway.
   const tell = tool('tell', async function* (_i, ctx) {
-    await ctx.appender!.append(ctx.session.id, [{ role: 'assistant', content: [{ type: 'text', text: 'chatter' }] }]).catch((e: Error) => results.push(e.message));
+    await ctx.appender!.append(undefined, [{ role: 'assistant', content: [{ type: 'text', text: 'noted' }] }]);
     yield { type: 'result', value: 1 };
   });
   const viaBody = tool('via_body', async function* (_i, ctx) {
     await toolResult(invokeTool(m.services, 'tell', {}, { session: ctx.session, signal: ctx.signal, ...(ctx.appender !== undefined ? { appender: ctx.appender } : {}) }));
     yield { type: 'result', value: 1 };
   });
-  const m: M = await machine(t, (prompt, messages) => answered(messages) ? says('done') : calls(prompt), [tell, viaBody]);
-  await many(m, m.session, [acting('tell'), acting('via_body')]);
-  assert.equal(results.length, 2);
-  assert.match(results[0]!, /reports by returning/);
-  assert.deepEqual((await m.services.sessions.get(m.session.id))!.messages, []);
+  const other = createSession();
+  const elsewhere = tool('elsewhere', async function* (_i, ctx) {
+    await ctx.appender!.append(other.id, [{ role: 'assistant', content: [{ type: 'text', text: 'over there' }] }]);
+    yield { type: 'result', value: 1 };
+  });
+  const m: M = await machine(t, (prompt, messages) => answered(messages) ? says('done') : calls(prompt), [tell, viaBody, elsewhere]);
+  await m.services.sessions.set(other.id, other);
+  const results = await many(m, m.session, [acting('tell'), acting('via_body'), acting('elsewhere')]);
+  assert.ok(results.every(r => r.ok), JSON.stringify(results));
+  const said = (s: Session | null) => (s?.messages ?? []).map(msg => msg.content.map(c => c.type === 'text' ? c.text : '').join(''));
+  assert.deepEqual(said(await m.services.sessions.get(m.session.id)), ['noted', 'noted']);
+  assert.deepEqual(said(await m.services.sessions.get(other.id)), ['over there'], 'any session it names');
 });
 
 test('a turn may ask the calling conversation something: a user message is a robo-submit, not a report', { timeout: 15000 }, async t => {

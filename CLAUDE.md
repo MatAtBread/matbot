@@ -1414,10 +1414,12 @@ caller's other markers are copied in too, because a session-scoped function is s
 sub-turn has the machine's system prompt, and a stored file attached by name would be written into the
 session's media as the turn opened; a turn with tools can open a stored file itself.
 
-**A sub-turn reports by returning, but may ask.** An assistant append from it could only be a report to a
-conversation about to get the result anyway, so its appender refuses one. A user message is a robo-submit, a
-request the calling turn does not answer (it runs beside it), so that goes to the machine's appender,
-defaulting to the calling conversation.
+**A sub-turn appends as any turn does.** Returning a value to the caller and writing to a conversation are
+different acts, and a prompt can ask for either ("append the time here and return nothing"), so its appender
+passes everything to the machine's, to any session it names. An append naming none goes to the calling
+conversation (the run's own session is a private copy nobody reads), and a robo-submit says it came from a
+sub-turn. It refused every append until 0.5.0, as a report the caller would relay anyway; that duplication is
+the prompt's to avoid, not something to forbid.
 
 **`messages` is opt-in per turn** (`transcript: true`). A tool result is a value in the transcript, so a direct
 call would otherwise put N whole transcripts into the conversation before the model could reduce anything.
