@@ -1,4 +1,4 @@
-import type { Message, MessageContent, MessageRole, Session } from './types.js';
+import type { Message, MessageContent, MessageRole, Session, SessionIndicator } from './types.js';
 
 /**
  * A `Message` with the fields every one carries minted for it — a fresh id, `createdAt` now — and the
@@ -41,6 +41,64 @@ export function createMessage(opts: {
 export function lastActivityAt(session: Session): string {
   const last = session.messages[session.messages.length - 1];
   return last ? last.createdAt : session.createdAt;
+}
+
+/**
+ * The `Message.metadata` key marking a user message as a **robo-submit**: machine-authored (its blocks are
+ * `origin: 'robo'`) and still a request in its own right, which the conversation answers as a turn — a
+ * background job asking about what it found. Set by the host when a `SessionAppender` is handed a user
+ * message, never by the author.
+ *
+ * It exists because `origin: 'robo'` alone has always meant two things: who wrote a message, and that it is
+ * not a new request — a `followup` resubmit, which continues the turn before it. A robo-submit is the first
+ * message that is one and not the other.
+ */
+export const ROBO_SUBMIT = 'roboSubmit';
+
+/** What a robo-submit's mark holds: who sent it, in words a model is shown (`background job "x"`). */
+export interface RoboSubmitMark { from?: string }
+
+/** Whether `message` is a robo-submit (see {@link ROBO_SUBMIT}). */
+export function isRoboSubmit(message: Message): boolean {
+  const mark = message.role === 'user' ? message.metadata?.[ROBO_SUBMIT] : undefined;
+  return mark === true || (typeof mark === 'object' && mark !== null);
+}
+
+/**
+ * `message` as a model is shown it: a robo-submit says who sent it, since nothing else on the wire does —
+ * `origin` and metadata are not sent — and a model told nothing answers a job's question as the person's.
+ * For the outgoing copy only, never stored; fixed per message, so it costs no prompt cache.
+ */
+export function withSenderShown(message: Message): Message {
+  if (!isRoboSubmit(message)) return message;
+  const mark = message.metadata?.[ROBO_SUBMIT] as RoboSubmitMark | true;
+  const from = mark !== true && typeof mark.from === 'string' && mark.from !== '' ? mark.from : 'an automated process';
+  return { ...message, content: [{ type: 'text', text: `[Sent by ${from}, not by the person in this conversation.]` }, ...message.content] };
+}
+
+/**
+ * Whether `message` is a request — a user message that starts a piece of work, rather than one continuing
+ * the work before it (a `followup` resubmit, which is wholly `origin: 'robo'`). A person's message is one,
+ * and so is a robo-submit.
+ */
+export function isRequest(message: Message): boolean {
+  return message.role === 'user' && (!message.content.every(c => c.origin === 'robo') || isRoboSubmit(message));
+}
+
+/** Whether `session` has activity after the point it was last read to. Never-tracked sessions read as
+ *  read (see `Session.readAt`). */
+export function isUnread(session: Session): boolean {
+  return session.readAt !== undefined && lastActivityAt(session) > session.readAt;
+}
+
+/** The {@link SessionIndicator} for `session`, given the runner's live report on it (absent where no
+ *  runner holds the session's turns — a background job's process). */
+export function sessionIndicator(
+  session: Session, live?: { busy: boolean; prompting: boolean },
+): SessionIndicator | undefined {
+  if (live?.prompting === true) return 'prompting';
+  if (live?.busy      === true) return 'running';
+  return isUnread(session) ? 'unread' : undefined;
 }
 
 /**

@@ -231,8 +231,11 @@ export async function appendFor(
   if (appender === undefined) throw new Error('This matbot cannot append to sessions.');
   const target = sessionId ?? job.session;
   if (target === undefined) throw new Error('This job reports to no conversation, so name the session to append to.');
+  // A robo-submit also says who is asking, for the model that answers it — named here, not by the job.
+  const from = `background job "${job.name ?? job.id}"`;
   const labelled = messages.map(m => ({
     ...m, metadata: { job: { id: job.id, ...(job.name !== undefined ? { name: job.name } : {}) } },
+    ...(m.role === 'user' ? { from } : {}),
   }));
   const append = () => appender.append(target, labelled);
   return job.principal !== undefined ? runAs(job.principal, append) : append();

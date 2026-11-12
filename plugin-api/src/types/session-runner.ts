@@ -95,6 +95,44 @@ export interface SubmitOpenOpts extends OpenOpts {
   /** Interactive prompt implementation for this submission's turn. The frontend owns delivery —
    *  it must target the frontend's per-session client connections, not a single request. */
   prompt?:      PromptFn;
+  /** Stamped on the user message this submission persists as. For an in-process submitter saying what
+   *  the message is — a robo-submit (`ROBO_SUBMIT`), the job that sent it — never a wire field: a frontend
+   *  does not pass a client's metadata through. Merged into one turn by `concatQueue`, only the first
+   *  submission's is kept. */
+  metadata?:    Record<string, unknown>;
+}
+
+/**
+ * Where a turn nobody submitted from a frontend asks its questions — a robo-submit's
+ * (`SessionAppender`). A frontend hands a `prompt` with each submission it makes, so a turn started
+ * anywhere else has none, and every permission it needs would fall to its non-interactive default. A
+ * frontend registers this to say: questions for this session's turns can be put to whoever views it
+ * here, whenever they next do — where a person who submitted would have been asked, the session waits,
+ * showing as `prompting`, until someone answers.
+ *
+ * One registered at a time (a registry service). Absent, or answering `undefined`, ⇒ the turn has no one to
+ * ask, as before.
+ */
+export interface SessionPrompter {
+  /** A prompt for the turn `traceId` of `sessionId`, called once as that turn is submitted. */
+  promptFor(sessionId: string, traceId: string): PromptFn | undefined;
+}
+
+/** A session's live state, as {@link SessionRunner.status} reports it. Nothing here is stored: a restart
+ *  ends every turn and drops every queue, so all of it is false or zero afterwards. */
+export interface SessionStatusReport {
+  /** Any of the three below, or a parallel reply still to be placed. */
+  busy:      boolean;
+  /** A turn is running, or the pump is still settling the one that ran. */
+  running:   boolean;
+  /** Submissions waiting behind the running turn. */
+  queued:    number;
+  /** `parallel` turns in flight beside it. */
+  parallel:  number;
+  /** A turn of this session has asked its submitter's prompt a question nobody has answered yet — the
+   *  session is waiting on a person. Counted by the runner over every submission's `prompt`, so it says
+   *  the same thing whichever frontend draws the question. */
+  prompting: boolean;
 }
 
 /**
@@ -126,9 +164,8 @@ export interface SessionRunner {
    *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
    *  `abort`, which also clears the queue. A no-op if nothing is running. */
   cancelTurn(sessionId: string): void;
-  /** Snapshot of a session's live state: whether a turn is running, how many submissions wait behind
-   *  it, and how many `parallel` turns are in flight beside it. `busy` is any of the three. */
-  status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number };
+  /** Snapshot of a session's live state. See {@link SessionStatusReport}. */
+  status(sessionId: string): SessionStatusReport;
   /**
    * Write session `sessionId` from outside its turns — an append, a rename, an edit of its history.
    *

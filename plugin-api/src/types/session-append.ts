@@ -8,24 +8,42 @@
  * replayed to a provider on every later turn, so the arms that carry protocol state are excluded by
  * construction — a `tool-use` without its result, or a `thinking` block whose signature it did not
  * earn, would fail every turn after it rather than this one.
+ *
+ * **A user message is answered.** An assistant message is written into the session and nothing runs; a
+ * user message is a **robo-submit** (`ROBO_SUBMIT`): it is submitted to the session as a turn, which the
+ * conversation answers as it would a person's — beside any turn already running there (`parallel`), so it
+ * never stops one. A user message nobody answered had no use: providers fold adjacent user messages, so
+ * the model read it as part of whatever the person typed next, and a redo re-ran it instead of theirs.
+ * Its blocks are made `origin: 'robo'` whatever the caller says, being machine-authored, and it goes alone
+ * — an append holding a user message holds nothing else, since anything written beside a turn that may
+ * run in parallel has no order to it.
  */
 export interface AppendMessage {
   role:      'user' | 'assistant';
   content:   Array<{ type: 'text'; text: string; origin?: 'robo' }>;
   metadata?: Record<string, unknown>;
+  /** A robo-submit only: who is asking, in words the answering model is shown beside the message
+   *  (`background job "disk-check"`). Set by whoever knows — the scheduler that ran the job, never the job.
+   *  Absent ⇒ the model is told only that an automated process sent it. */
+  from?:     string;
 }
 
 export interface AppendResult {
   sessionId:  string;
   /** The ids the appended messages will carry — minted at acceptance, so a caller can name them before
-   *  the write has landed. */
+   *  the write has landed. Empty for a robo-submit, whose message is minted when its turn starts and is
+   *  named by {@link traceId} until then. */
   messageIds: string[];
   /** The write waits for a turn holding the session, so it has not landed yet. Absent ⇒ it has. */
   deferred?:  true;
+  /** A robo-submit's turn: the `traceId` its events carry. The caller may follow it on the runner, and
+   *  need not — the turn is the session's, and the append settles once it is submitted. */
+  traceId?:   string;
 }
 
 /**
- * Adds messages to the end of a session without running a turn.
+ * Adds messages to the end of a session. An assistant message is written and nothing runs; a user message
+ * is a robo-submit, submitted to the session as a turn (see {@link AppendMessage}).
  *
  * A running turn owns its session: the runner works on an in-memory copy and writes it back whole when
  * the turn ends, which is what keeps the stored session a set of completed turns. So an append is written

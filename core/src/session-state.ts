@@ -29,6 +29,8 @@ export interface QueuedItem {
   // turn with no new message, a steer introduces a new user message).
   injectEphemeral?: MessageContent[];
   prompt?:     PromptFn;
+  // Stamped on the user message this item persists as (`SubmitOpenOpts.metadata`).
+  metadata?:   Record<string, unknown>;
 }
 
 // A parallel turn's write-back: its submission and everything the turn produced, ready to place. Built

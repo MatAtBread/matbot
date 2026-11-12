@@ -213,6 +213,8 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
       run:        () => services.run,
       notifier:   () => services.Notifier,
       isSubAgent: () => services.isSubAgent(),
+      providers:  () => services.providers,
+      prompter:   () => services.SessionPrompter,
     }),
   };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));

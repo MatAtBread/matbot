@@ -1413,6 +1413,11 @@ caller's other markers are copied in too, because a session-scoped function is s
 sub-turn has the machine's system prompt, and a stored file attached by name would be written into the
 session's media as the turn opened; a turn with tools can open a stored file itself.
 
+**A sub-turn reports by returning, but may ask.** An assistant append from it could only be a report to a
+conversation about to get the result anyway, so its appender refuses one. A user message is a robo-submit, a
+request the calling turn does not answer (it runs beside it), so that goes to the machine's appender,
+defaulting to the calling conversation.
+
 **`messages` is opt-in per turn** (`transcript: true`). A tool result is a value in the transcript, so a direct
 call would otherwise put N whole transcripts into the conversation before the model could reduce anything.
 
@@ -1424,8 +1429,9 @@ ledger today.
 
 ## Session appends
 
-`services.SessionAppender` adds messages to a session **without running a turn** — a background job's
-report, an answer merged back from elsewhere. A running turn works on an in-memory copy of its session and
+`services.SessionAppender` adds messages to a session — a background job's report, an answer merged back
+from elsewhere. An assistant message is written and nothing runs; a **user message is a robo-submit**, run
+as a turn (below). A running turn works on an in-memory copy of its session and
 writes it back whole on exit, which is what keeps the store a set of completed turns; so an append is
 checked at once (a missing session is reported to someone who can act on it) and **written by the
 session's runner** once no turn holds that session (`SessionRunner.write`), then announced. With no turn to
@@ -1453,6 +1459,47 @@ run (`services.ephemeral`), so its own session is in a private memory store no o
 reports through the appender its runner hands tools as `ToolContext.appender` — the scheduler's, which labels
 the message with the job and points it at the job's conversation. Its framing rides in its first message,
 never the system context, which is machine-wide.
+
+### Robo-submit
+
+**An appended user message is answered.** It used to be written and left: a user message nothing answered,
+which providers fold into whatever the person types next (adjacent user messages merge on the wire), so the
+model read the two as one request, and a redo re-ran the job's message instead of theirs. No caller has a
+use for that, so the role is the switch and there is no flag: `role: 'user'` hands the message to the
+runner as a submission (`run.open`), which persists it when its turn starts and answers it, and the append
+settles on acceptance with the turn's `traceId`. It is how a job that found something asks the conversation
+what to do about it, rather than only saying so (`session_action append` with `submit: true`).
+
+Each property of it is the default that keeps a person in charge:
+- **`parallel`.** Any other mode stops or waits on the turn a person is having; parallel answers beside it.
+- **Robo-authored, run as the appender's caller** (a job's creator, whose session it is) **on the session's
+  own model** (the last message's `providerName` still configured, else the first configured). A job never
+  chooses an identity or a model. Its blocks are `origin: 'robo'` whatever the caller says.
+- **Alone.** An append holding a user message holds nothing else: anything written beside a turn that may
+  run in parallel has no order to it.
+- **Attributed to the model** (`withSenderShown`). Nothing else on the wire says who sent it, and a model
+  told nothing answers a job's question as the person's ("as you asked…"). So the outgoing copy, never the
+  store, opens it with `[Sent by <from>, …]`, `from` being `AppendMessage.from`, which whoever knows the
+  sender sets (the jobs scheduler, the sub-turn), never the job itself. Fixed per message, so cache-safe.
+- **Asked where the session is viewed** (`SessionPrompter`). A frontend hands a `prompt` with each submission
+  it makes, so a turn started elsewhere had none, and every gate it met fell to its non-interactive
+  fallback. frontend-web registers one that parks the question on the session as a submitter's would be,
+  so the session shows `prompting` until someone opens it and answers. The runner counts unanswered prompts
+  itself (`SessionStatusReport.prompting`), so that state is the same whichever frontend draws them.
+- **Bounded by a person, not a counter.** Past `UNATTENDED_ROBO_SUBMITS` in a row with no message from a
+  person between them, the runner asks before the next turn starts (`tools.robo-submit`, subject the
+  session; *for this session* is the answer for a genuinely iterative job). Nobody to ask ⇒ it stops. Asked
+  before anything is written, so a refusal leaves no unanswered message behind. A refused submission is
+  `cancelled`.
+
+**`origin: 'robo'` meant two things, and this split them.** It said who wrote a message and, implicitly,
+that it was not a new request — triggers skipped a wholly robo user message and looked past one for "the
+last genuine user message", which is right for a `followup` resubmit, which continues the turn before it. A
+robo-submit is machine-written AND a request. So the second meaning is now its own fact: the host stamps a
+robo-submit's message `metadata[ROBO_SUBMIT]` (via `SubmitOpenOpts.metadata`, an in-process field no
+frontend passes through from a client), and `isRequest(message)` — a person's message or a robo-submit —
+is what triggers and the turn counter ask. `origin` is left to presentation. The mark is on the robo-submit,
+not the resubmit, so history written before it reads exactly as it did.
 
 ## Session data (`session_data`)
 

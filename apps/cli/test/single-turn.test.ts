@@ -291,6 +291,28 @@ test('a turn cannot append to a conversation, directly or from a composed call',
   assert.deepEqual((await m.services.sessions.get(m.session.id))!.messages, []);
 });
 
+test('a turn may ask the calling conversation something: a user message is a robo-submit, not a report', { timeout: 15000 }, async t => {
+  const results: unknown[] = [];
+  const ask = tool('ask', async function* (_i, ctx) {
+    // No session named: a sub-turn's appender defaults to the conversation it was called from.
+    results.push(await ctx.appender!.append(undefined, [{ role: 'user', content: [{ type: 'text', text: 'what time is it?' }] }]));
+    yield { type: 'result', value: 1 };
+  });
+  const m: M = await machine(t, (prompt, messages) => prompt === 'what time is it?' ? says('noon') : answered(messages) ? says('done') : calls(prompt), [ask]);
+  const r = await invoke(m, m.session, acting('ask')) as SubTurnResult;
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal((results[0] as { traceId?: string }).traceId !== undefined, true, 'submitted as a turn');
+  // The robo-submit is the conversation's own turn, beside the caller: wait for it to be answered there.
+  for (let i = 0; i < 200; i++) {
+    const s = (await m.services.sessions.get(m.session.id))!;
+    if (s.messages.some(msg => msg.role === 'assistant')) break;
+    await new Promise(res => setTimeout(res, 10));
+  }
+  const stored = (await m.services.sessions.get(m.session.id))!.messages;
+  assert.deepEqual(stored.map(msg => msg.role), ['user', 'assistant']);
+  assert.deepEqual(stored[0]!.metadata?.['roboSubmit'], { from: 'a sub-turn run from this conversation' });
+});
+
 test('with nobody to ask, a turn\'s gate takes the fallback, and says so', { timeout: 15000 }, async t => {
   const decisions: Array<{ allowed: boolean; source: string }> = [];
   const gated = tool('gated', async function* (_i, ctx) {

@@ -121,7 +121,7 @@ function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
         info:   () => jobInfo(machine, job),
         append: async (sessionId, messages) => {
           const result = await appendFor(machine, job, sessionId, messages);
-          appended += result.messageIds.length;
+          appended += result.traceId !== undefined ? 1 : result.messageIds.length;   // a robo-submit is minted later
           return result;
         },
         notify: n => relay(machine, job, n),

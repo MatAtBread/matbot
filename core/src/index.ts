@@ -38,7 +38,7 @@ export { bindGate, bindPluginOps } from '@matatbread/matbot-plugin-api';
 // `POST /tools/:name` does — through every door's validation and gate, with no plugin-api dependency.
 export { invokeTool, toolResult, toolText } from '@matatbread/matbot-plugin-api';
 // Ambient security principal: the interface is a type (carried by `export type *`); these are the values.
-export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt } from '@matatbread/matbot-plugin-api';
+export { currentPrincipal, tryCurrentPrincipal, runAs, lastActivityAt, isUnread, sessionIndicator, isRequest, isRoboSubmit, withSenderShown, ROBO_SUBMIT } from '@matatbread/matbot-plugin-api';
 // Host boot assembly, from plugin-api's `/host` subpath. An embedding app gets these through core and
 // needs no direct dependency on plugin-api; a *plugin* has no business with any of them, which is why
 // they are not on the plugin-api root. Re-exported here (not `export type *`ed) so their value meaning

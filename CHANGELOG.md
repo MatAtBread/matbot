@@ -9,6 +9,77 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Breaking changes
+
+- **An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
+  `role: 'user'` message no longer just writes it. The message is submitted to the session as a turn,
+  which answers it beside any running turn (`parallel`), as the caller (a job's creator) and on the
+  session's own model. It is persisted when its turn starts, so the result's `messageIds` is empty and
+  `traceId` names the turn. A user message must be the only message in its append, and needs a principal
+  in scope. A user message nothing answered had no use: providers fold it into whatever the person types
+  next. Nothing in matbot appended one before this. A downstream caller that did now starts a turn, so
+  check for `role: 'user'` appends.
+
+### API gaps filled
+
+- **`ROBO_SUBMIT`, `isRoboSubmit(message)` and `isRequest(message)`.** A robo-submit's message carries
+  `metadata[ROBO_SUBMIT]`. `isRequest` is true for a person's message or a robo-submit, and false for a
+  `followup` resubmit, which continues the turn before it. It replaces "not wholly `origin: 'robo'`" as the
+  test for a new request, leaving `origin` to presentation.
+- **`SubmitOpenOpts.metadata`** stamps the user message a submission persists as. It is in-process only:
+  no frontend passes a client's metadata through.
+- **`SessionPrompter`** (`services.SessionPrompter`, optional): where a turn no frontend submitted asks its
+  questions. A robo-submit's turn uses it, so its permission prompts reach whoever views the session
+  instead of falling to their non-interactive default.
+- **The runner asks before a run of robo-submits continues.** Past `UNATTENDED_ROBO_SUBMITS` (3) in a row
+  with no message from a person, the next robo-submit's turn asks first (`tools.robo-submit`, subject the
+  session id). Nobody to ask means it stops. A refusal is reported as `cancelled`, and nothing of the
+  submission is written. `trailingRoboSubmits(session)` counts the run.
+- **`AppendResult.traceId`**: the robo-submit's turn.
+- **A model is told who sent a robo-submit.** `origin` and metadata never reach the provider, so a model
+  answered a job's question as if the person had asked it. On the outgoing copy only, a robo-submit now
+  starts with `[Sent by <from>, not by the person in this conversation.]` (`withSenderShown`). `<from>` is
+  `AppendMessage.from`, set by whoever knows who is asking: background jobs set `background job "<name>"`
+  and a sub-turn sets `a sub-turn run from this conversation`. Without it, the line says an automated
+  process sent the message. It is never stored, and is the same text every round, so it costs no prompt
+  cache.
+- **A `single_turn` sub-turn may robo-submit.** Its appender refused everything, on the grounds that a
+  sub-turn reports by returning. That still holds for an assistant append, which is refused. A user message
+  is a request the calling turn does not answer, so it goes to the machine's appender. It defaults to the
+  calling conversation, so a sub-turn does not have to look up its own session id.
+
+- **`SessionRunner.status()` reports `prompting`**: a turn of the session has asked its submitter's
+  `prompt` a question nobody has answered. The runner counts this across every submission's `prompt`, so
+  it means the same whichever frontend draws the question. The return type is now named
+  `SessionStatusReport`.
+- **`Session.readAt`** records how far a session has been read, and `isUnread(session)` reports whether
+  it has activity since. A session written before the field existed reads as read. `createSession` sets
+  it, so a new session starts read.
+- **`SessionIndicator`** (`'prompting' | 'running' | 'unread'`) and `sessionIndicator(session, live)`: the
+  one thing a session list shows beside a session, most urgent first.
+
+### Optional
+
+- **sessions**: each `session_action` `list`/`query` row carries `state`, a `SessionIndicator`.
+  `get` takes `markRead: true`, which records that the returned session has been shown to its reader.
+  It marks only what it returned, so a mark that waits behind a running turn never marks that turn's
+  reply as read. It never moves `readAt` backwards.
+- **sessions**: `session_action append` takes `submit: true`, which posts `text` as a robo-submit (a request
+  the conversation answers) rather than as a message from the caller. The result carries the turn's
+  `traceId`.
+- **triggers**: robo-submits are judged like a person's message. Every test for "a genuine user turn" is
+  now `isRequest`, so `followup` resubmits are still skipped.
+- **background-jobs-node**: a job may append a user message, a robo-submit, over its channel. Its blocks
+  are still forced to `origin: 'robo'`, and anything but assistant or user text is refused. Both job
+  plugins count a robo-submit as having reported, so its reply is not posted a second time.
+- **frontend-web**: registers `SessionPrompter`. A robo-submit's questions park on its session as a
+  submitter's do, and a busy tracker is armed for its turn.
+- **frontend-web**: the sidebar's unread dot is now the server's, so it survives a reload, is the same on
+  every device, and lights for messages appended to a session (a background job's report) as well as
+  for a turn that ended. A session is marked read when it is on screen in a page that is visible.
+
 ## 0.5.0
 
 ### Repository layout

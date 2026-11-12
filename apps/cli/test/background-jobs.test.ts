@@ -39,12 +39,16 @@ test('a job reaches its parent over the real IPC channel, and exits by itself', 
   const code = await new Promise<number | null>(r => child.once('close', c => r(c)));
 
   assert.equal(code, 0, 'the job exited on its own — an unreleased channel would have kept it alive');
-  const result = JSON.parse(out) as { job: { id: string }; sent: unknown; refused: string };
+  const result = JSON.parse(out) as { job: { id: string }; sent: unknown; asked: unknown; refused: string };
   assert.equal(result.job.id, 'job-1');
   assert.deepEqual(result.sent, { sessionId: 's1', messageIds: ['m1'] });
-  assert.deepEqual(appended, [[{ role: 'assistant', content: [{ type: 'text', text: 'hello from job-1', origin: 'robo' }] }]],
-    'what arrives is assistant text the parent can trust the shape of');
-  assert.match(result.refused, /only assistant messages/, 'a job cannot speak as the user');
+  assert.deepEqual(appended, [
+    [{ role: 'assistant', content: [{ type: 'text', text: 'hello from job-1', origin: 'robo' }] }],
+    // A user message is a robo-submit — a request the parent's appender runs as a turn — and still robo:
+    // a job asks the conversation something, it never speaks as the person.
+    [{ role: 'user', content: [{ type: 'text', text: 'what now?', origin: 'robo' }] }],
+  ], 'what arrives is robo-authored text the parent can trust the shape of');
+  assert.match(result.refused, /only assistant or user messages/, 'nothing else crosses');
   assert.equal(notified.length, 1, 'a posted announcement was flushed before the job exited');
 });
 

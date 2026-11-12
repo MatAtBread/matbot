@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION, subTurnDepth } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, subTurnDepth, isRequest } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
 import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
@@ -121,7 +121,7 @@ export function invalidInvocationReport(messages: readonly Message[], from: numb
   const lines: string[] = [];
   for (let i = from - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) break;
+    if (isRequest(m)) break;
     for (const c of m.content) {
       if (c.type !== 'marker' || c.creator !== 'triggers') continue;
       const d = c.data as { triggerId?: unknown; tool?: unknown; error?: unknown; code?: unknown };
@@ -177,11 +177,11 @@ function silentFiredMarker(surface: TriggerSurface, triggers: FiredSource[]): Me
 }
 
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
-// (non-robo) user message — i.e. this user message was already processed on the original attempt, so
+// user message (a request: see isRequest) — i.e. this user message was already processed on the original attempt, so
 // user-phase (ephemeral/contextual) triggers and their side effects already fired. Re-firing them on the
 // redo is the duplicate-side-effect bug; skip them.
 function isRetractRedo(messages: Message[]): boolean {
-  const lastUser = messages.findLastIndex(m => m.role === 'user' && !m.content.every(c => c.origin === 'robo'));
+  const lastUser = messages.findLastIndex(m => isRequest(m));
   if (lastUser < 0) return false;
   return messages.slice(lastUser + 1).some(m => m.content.some(c => c.type === 'marker' && c.creator === RETRACTION_CREATOR));
 }
@@ -195,7 +195,7 @@ function isRetractRedo(messages: Message[]): boolean {
 // well-behaved rule self-terminates and never lands here.
 function retractActiveLastTurn(messages: Message[]): Set<string> {
   const userIdxs: number[] = [];
-  messages.forEach((m, i) => { if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) userIdxs.push(i); });
+  messages.forEach((m, i) => { if (isRequest(m)) userIdxs.push(i); });
   const cur = userIdxs.at(-1);
   if (cur === undefined) return new Set();
   const prev = userIdxs.at(-2) ?? -1;
@@ -230,7 +230,7 @@ interface FireHistory {
   since:    Map<string, number>;
 }
 
-// One backward scan of the message tail, counting genuine (non-robo) user messages as turn boundaries.
+// One backward scan of the message tail, counting genuine user messages (requests) as turn boundaries.
 // Deliberately counts only fires, NOT cool-down suppressions: a quiet period is a fixed window that must
 // expire on its own, unlike the retract convergence guard (which re-arms on suppression precisely so a
 // still-matching rule stays held off indefinitely).
@@ -240,7 +240,7 @@ function fireHistory(messages: Message[]): FireHistory {
   let turnsBack  = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) { turnsBack++; continue; }
+    if (isRequest(m)) { turnsBack++; continue; }
     for (const c of m.content) {
       if (c.type !== 'marker' || c.creator !== 'triggers') continue;
       const d = c.data as { event?: unknown; triggers?: unknown };
@@ -306,7 +306,8 @@ function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
 }
 
-const isGenuineUser = (m: Message): boolean => m.role === 'user' && !m.content.every(c => c.origin === 'robo');
+// A person's message, or a robo-submit — not a followup resubmit, which continues the turn before it.
+const isGenuineUser = isRequest;
 
 function fileLabel(c: MessageContent): string | undefined {
   switch (c.type) {
@@ -470,8 +471,9 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // prompt is another model's and its answer goes back to that model, whose own reply is judged here.
       if (subTurnDepth(ctx.session.messages) > 0) return;
       const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
-      // Skip our own agent-phase robo resubmissions — they are not real user turns.
-      if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
+      // Skip agent-phase robo resubmissions — they continue a turn rather than start one. A robo-submit (a
+      // job asking something of the conversation) is a request, and is judged like a person's.
+      if (!lastUser || !isRequest(lastUser)) return;
 
       // Guard: a retract-redo re-runs this same user turn. The user-phase triggers already fired — and
       // their side effects (e.g. remember_fact's store write) already happened — on the original

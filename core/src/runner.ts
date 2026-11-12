@@ -9,7 +9,7 @@ import type { ToolPresenter, SessionAppender, TurnToolSource } from '@matatbread
 import { recordSpan, recordUsage, withUsageSite, scopeIterable, callFrame, callFramesOf } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt, failureOf } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt, failureOf, isRoboSubmit, withSenderShown } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
 import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia, withAttachmentsShown } from './media.js';
 
@@ -418,9 +418,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
     const hasRefs = session.messages.some(m => m.content.some(c => c.type === 'file-ref'));
-    const history = foldIdx >= 0 || attachments.size > 0 || hasRefs
+    const hasRobo = session.messages.some(isRoboSubmit);
+    const history = foldIdx >= 0 || attachments.size > 0 || hasRefs || hasRobo
       ? session.messages.flatMap((m, i) => {
-          const inlined = withAttachmentsShown(m, sessionMedia.get(m.id));
+          const inlined = withAttachmentsShown(withSenderShown(m), sessionMedia.get(m.id));
           const folded  = i === foldIdx ? { ...inlined, content: [...inlined.content, ...ephemeral] } : inlined;
           const media   = attachments.get(m.id);
           return media ? [folded, media] : [folded];

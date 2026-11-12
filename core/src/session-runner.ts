@@ -2,18 +2,18 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, MediaStore, UserContent, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, SubmittedView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision, PermissionGate,
+  SteeringPolicy, SteeringDecision, PermissionGate, FormField, SessionStatusReport,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter, SessionAppender, SessionWrite } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { failureOf, withFailure, foldOntoUserTurn, lastUserIndex, runAs, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
-import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
+import { failureOf, withFailure, foldOntoUserTurn, lastUserIndex, runAs, tryCurrentPrincipal, isRequest, isRoboSubmit } from '@matatbread/matbot-plugin-api';
+import { machineBusy, withUsageScope, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
 import { runSession, errorText } from './runner.js';
 import { ingestMedia } from './media.js';
 import { MemoryStore } from './storage-base/memory-store.js';
-import { createSink, emit, notify, aheadOf, type ParallelReply, type SessionState } from './session-state.js';
+import { createSink, emit, notify, aheadOf, type ParallelReply, type QueuedItem, type SessionState } from './session-state.js';
 import {
   WRITE_ATTEMPTS, parallelFraming, closedSpan, flushUsage, drainMerges, drainWrites, interjectInto, rewrite, placeNow,
 } from './session-merges.js';
@@ -60,6 +60,23 @@ export interface SessionRunnerDeps {
 }
 
 const MAX_RESUBMIT_DEPTH = 8;
+
+// How many robo-submits a session takes in a row, with no message from a person between them, before the
+// next asks whether to go on. Followup resubmits do not count — they continue a turn rather than start one,
+// and MAX_RESUBMIT_DEPTH bounds them — nor do they break the run.
+export const UNATTENDED_ROBO_SUBMITS = 3;
+
+/** How many robo-submits end `session`, counting back to the last message a person sent. */
+export function trailingRoboSubmits(session: Session): number {
+  let n = 0;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i]!;
+    if (m.role !== 'user') continue;
+    if (isRoboSubmit(m)) { n++; continue; }
+    if (isRequest(m)) break;
+  }
+  return n;
+}
 
 // Disposition for a `mode: 'auto'` mid-turn submission when no SteeringPolicy is registered (or it
 // declares no `classify`). Interrupt-by-default: a message sent while the agent works stops the
@@ -111,6 +128,35 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       states.set(id, s);
     }
     return s;
+  };
+
+  // Questions a session's turns have asked and nobody has answered yet, by session. Kept beside `states`,
+  // not in it: an entry there is dropped once a session idles, and a question asked without being awaited
+  // (a `fetch` nobody awaits, inside a body) can outlive the turn that asked it.
+  const asking = new Map<string, number>();
+  const counted = (id: string, ask: PromptFn): PromptFn => {
+    const asked = ask as (p: string | FormField, defaultValue?: string) => Promise<string>;
+    return ((p: string | FormField, defaultValue?: string): Promise<string> => {
+      asking.set(id, (asking.get(id) ?? 0) + 1);
+      const settle = (): void => { const n = (asking.get(id) ?? 1) - 1; if (n > 0) asking.set(id, n); else asking.delete(id); };
+      return asked(p, defaultValue).finally(settle);
+    }) as PromptFn;
+  };
+
+  // Before a robo-submit's turn: past UNATTENDED_ROBO_SUBMITS in a row, a person decides whether it goes on
+  // — asked through the turn's own prompt, so the session shows as waiting on them. Nobody to ask ⇒ it
+  // stops, a loop being the one thing that must not run on unattended.
+  const mayContinue = async (id: string, session: Session, head: QueuedItem): Promise<boolean> => {
+    const n = trailingRoboSubmits(session);
+    if (n < UNATTENDED_ROBO_SUBMITS) return true;
+    const decision = await runAs(head.principal, () => (deps.permissionGate?.() ?? askPermissionGate).decide({
+      gate:     'tools.robo-submit',
+      subject:  id,
+      label:    `This conversation has been continued ${n} times in a row without you — the last by "${textOf({ content: head.content } as Message).slice(0, 120)}". Let it continue?`,
+      fallback: false,
+    }, head.prompt, { session: id }));
+    if (!decision.allowed) console.warn(`[matbot] robo-submit to session "${id}" not run: ${n} in a row, and continuing was not allowed (${decision.source}).`);
+    return decision.allowed;
   };
 
   const maybeCleanup = (id: string, s: SessionState): void => {
@@ -184,7 +230,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // minted here, so its id is known before the read below, and persisted after it; a redo's is the
           // message its retraction kept.
           const userMsg = head.redo === undefined
-            ? createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider })
+            ? createMessage({
+                role: 'user', content, traceId: head.traceId, providerName: head.provider,
+                ...(head.metadata !== undefined ? { metadata: head.metadata } : {}),
+              })
             : undefined;
           s.turnHead = userMsg !== undefined ? { id: userMsg.id, request: textOf(userMsg) } : head.redo?.head;
           // In the same synchronous step that takes the item off the queue, so there is no moment at which a
@@ -255,6 +304,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               // A failed write here — a session shared in read-only, a store that could not be reached —
               // drops this submission with the turn's error: nothing of it was written, unless the store
               // lost its answer to a write that landed, which only the store's error can say.
+              // A robo-submit following others with nobody in between is a loop until a person says it is
+              // not: asked before anything of it is written, so a refusal leaves no unanswered message.
+              if (isRoboSubmit(userMsg) && !await mayContinue(id, session, head)) {
+                emit(s, { type: 'cancelled', sessionId: id, traceId: head.traceId });
+                continue;
+              }
+
               session = appendMessage(session, userMsg);
               await deps.store.set(session.id, session);
             }
@@ -540,7 +596,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const runParallel = async (
     id: string, s: SessionState, rec: { replay: PipelineEvent[]; stop: AbortController },
     p: { traceId: string; content: MessageContent[]; provider: string; principal: Principal; prompt?: PromptFn;
-         head: { id: string; request: string } | undefined; interjected: Message[] },
+         metadata?: Record<string, unknown>; head: { id: string; request: string } | undefined; interjected: Message[] },
   ): Promise<void> => {
     const forward = (ev: PipelineEvent): void => {
       rec.replay.push(ev);
@@ -578,7 +634,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         await sub.open({
           sessionId: id, signal: tapAc.signal, traceId: p.traceId, provider: p.provider, principal: p.principal,
           content: [...asSubmitted(p.content), ...(running ? [parallelFraming(running)] : [])],
-          ...(p.prompt !== undefined ? { prompt: p.prompt } : {}),
+          ...(p.prompt   !== undefined ? { prompt:   p.prompt   } : {}),
+          ...(p.metadata !== undefined ? { metadata: p.metadata } : {}),
         });
         // Again, now that there is something to stop: a stop landing while the submission was on its way in
         // (its media boundary is an await) reached a runner with nothing queued, and the listener has fired.
@@ -738,6 +795,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     let ahead = 0;
     const { provider, principal } = opts;
     const mode = opts.mode ?? 'queue';
+    const prompt = opts.prompt !== undefined ? counted(opts.sessionId, opts.prompt) : undefined;
 
     // Which turn a steer is FOR is fixed here, before the first await, and checked again before the
     // abort. `s.running` alone cannot answer it: it is true across the pump's whole queue, so it
@@ -799,7 +857,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           concatQueue:     false,
           resubmitDepth:   0,
           injectEphemeral: nudge,
-          ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+          ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
         });
         // Announce the steer before aborting so a subscriber places the new bubble and reads the
         // imminent `aborted` (reason 'steer') as a yield, not a dead-end.
@@ -822,7 +881,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           traceId, content, provider, principal,
           head:        s.turnHead,
           interjected: s.interjected.flatMap(r => r.messages),
-          ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+          ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
         });
         handled = true;
       }
@@ -838,7 +898,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         principal,
         concatQueue,
         resubmitDepth: 0,
-        ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
+        ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
       });
       // Announce the submission on the stream as part of the live delta, before its turn's events.
       // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
@@ -884,12 +945,12 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       s.ac?.abort('user-cancel');
     },
 
-    status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number } {
+    status(sessionId: string): SessionStatusReport {
       const s = states.get(sessionId);
       const running  = s?.running ?? false;
       const queued   = s?.queue.length ?? 0;
       const parallel = s?.parallel.size ?? 0;
-      return { busy: running || queued > 0 || parallel > 0 || (s?.merges.length ?? 0) > 0, running, queued, parallel };
+      return { busy: running || queued > 0 || parallel > 0 || (s?.merges.length ?? 0) > 0, running, queued, parallel, prompting: asking.has(sessionId) };
     },
 
     write(sessionId: string, attempt: () => Promise<boolean>, lost: string): SessionWrite {

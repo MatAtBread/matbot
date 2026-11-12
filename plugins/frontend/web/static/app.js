@@ -22,7 +22,6 @@ let composerReadOnly = false; // true while viewing a session shared IN from ano
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const promptingSessions = new Set(); // busy sessions parked on a question for the user
-const unreadSessions = new Set();
 const updatedFiles   = new Set();
 // path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
 // file list in one `share`/`owner`/`*` call; empty when profiles are inactive. Gates the per-file share UI.
@@ -633,7 +632,15 @@ function refreshSessions(delay = 150) {
   return sessionsRefresh;
 }
 
-async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
+// Reading the session on screen, in a page someone can see, is showing it to them — so it is marked read.
+// A peer session read for a link, or a page in a background tab, is not.
+const shownNow = id => id === currentSessionId && document.visibilityState === 'visible';
+async function apiGetSession(id)  {
+  try { return await callTool('session_action', { action: 'get', sessionId: id, ...(shownNow(id) ? { markRead: true } : {}) }); }
+  catch { return null; }
+}
+function markShown(id) { if (shownNow(id)) void apiGetSession(id); }
+document.addEventListener('visibilitychange', () => { if (currentSessionId) markShown(currentSessionId); });
 async function apiSessionBusy(id) { return T.sessionBusy(id); }
 async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
 
@@ -2271,11 +2278,15 @@ function renderSessions(sessions) {
   for (const s of sessions) {
     const label = (s.title || s.preview || s.id.slice(0, 8)).slice(0, 44);
     const el = document.createElement('div');
+    // `state` is the server's at the time of the list; the status stream keeps busy/prompting live between
+    // lists. Unread is the server's alone: it is stored, so it holds across reloads and devices.
+    const prompting = promptingSessions.has(s.id) || s.state === 'prompting';
+    const busy      = busySessions.has(s.id) || prompting || s.state === 'running';
     el.className = 'session-item' +
       (s.id === currentSessionId ? ' active' : '') +
-      (busySessions.has(s.id) ? ' busy' : '') +
-      (promptingSessions.has(s.id) ? ' prompting' : '') +
-      (!busySessions.has(s.id) && s.id !== currentSessionId && unreadSessions.has(s.id) ? ' unread' : '');
+      (busy ? ' busy' : '') +
+      (prompting ? ' prompting' : '') +
+      (!busy && s.id !== currentSessionId && s.state === 'unread' ? ' unread' : '');
     el.dataset.sid = s.id;
 
     const labelEl = document.createElement('span');
@@ -3278,7 +3289,6 @@ async function openSession(id, scrollTarget) {
   currentSessionId = id;
   const ownerOf = sessionOwner(id);
   void refreshShareState(id, ownerOf);
-  unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = sessionHash(id);
   void refreshSessions();
@@ -4645,16 +4655,13 @@ async function init() {
       item?.classList.toggle('prompting', !!prompting);
       if (busy) {
         busySessions.add(sessionId);
-        unreadSessions.delete(sessionId);
         if (item) { item.classList.add('busy'); item.classList.remove('unread'); }
       } else {
         busySessions.delete(sessionId);
-        if (sessionId !== currentSessionId) {
-          unreadSessions.add(sessionId);
-          if (item) { item.classList.remove('busy'); item.classList.add('unread'); }
-        } else {
-          if (item) item.classList.remove('busy');
-        }
+        // Shown at once; the list the turn's write refreshes then says whether it is still unread.
+        if (sessionId !== currentSessionId) item?.classList.add('unread');
+        else markShown(sessionId);
+        item?.classList.remove('busy');
       }
       // Drive the Stop button + the busy flag for the session currently in view.
       if (sessionId === currentSessionId) setBusyState(busy);

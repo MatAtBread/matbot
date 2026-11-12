@@ -33,7 +33,7 @@ export function inProcessRunner(machine: MatbotMachine): JobRunner | undefined {
         ...(job.session !== undefined ? { defaultSessionId: job.session } : {}),
         async append(sessionId: string | undefined, messages: readonly AppendMessage[]) {
           const result = await appendFor(machine, job, sessionId, messages);
-          appended += result.messageIds.length;
+          appended += result.traceId !== undefined ? 1 : result.messageIds.length;   // a robo-submit is minted later
           return result;
         },
       };

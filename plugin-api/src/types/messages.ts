@@ -247,4 +247,15 @@ export interface Session {
   messages:  Message[];
   createdAt: ISODate;
   updatedAt: ISODate;
+  /** How far the session has been read: the `createdAt` of the last message a reader was shown, set by
+   *  whoever showed it (`session_action get` with `markRead`). A session is unread while it has activity
+   *  after this (see `isUnread`). Absent ⇒ never tracked — a session from before the field existed —
+   *  which reads as read rather than marking every old conversation at once. One per session, not per
+   *  principal: a shared session read by one reader is read for all of them. */
+  readAt?:   ISODate;
 }
+
+/** What a session list shows beside a session, most urgent first: a turn is waiting on a person
+ *  (`prompting`), a turn is running or queued (`running`), or there is activity nobody has been shown
+ *  (`unread`). Absent ⇒ none of these. */
+export type SessionIndicator = 'prompting' | 'running' | 'unread';

@@ -18,13 +18,25 @@ export interface SubTurnWork {
 }
 export interface SubTurnFailure { ok: false; error: string }
 
-// It reports by returning. An append from a sub-turn could only be a report to a conversation that is about
-// to get the result anyway, and pretending to accept one would tell the model it had been delivered.
-const NOWHERE: SessionAppender = {
-  async append() {
-    throw new Error('A sub-turn reports by returning its result, so nothing it says is appended to a conversation.');
-  },
-};
+// It reports by returning. An assistant append from a sub-turn could only be a report to a conversation that
+// is about to get the result anyway, and pretending to accept one would tell the model it had been delivered.
+// A user message is not a report but a request (a robo-submit): the calling turn does not answer it — it runs
+// as a turn of its own beside that one — so it goes to the machine's appender, and by default to the calling
+// conversation, whose id this run has.
+function reportsByReturning(machine: MatbotMachine, sessionId: string): SessionAppender {
+  return {
+    defaultSessionId: sessionId,
+    async append(target, messages) {
+      if (!messages.some(m => m.role === 'user')) {
+        throw new Error('A sub-turn reports by returning its result, so nothing it says is appended to a conversation. ' +
+          'To ask a conversation something it should answer, submit it as a request.');
+      }
+      const appender = machine.SessionAppender;
+      if (appender === undefined) throw new Error('This matbot cannot submit to a conversation.');
+      return appender.append(target ?? sessionId, messages.map(m => ({ from: 'a sub-turn run from this conversation', ...m })));
+    },
+  };
+}
 
 function reduce(messages: readonly Message[], transcript: boolean): SubTurnWork {
   const results = new Map<string, boolean>();
@@ -107,7 +119,7 @@ export async function runSubTurn(
   if (signal.aborted) return { ok: false, error: 'Cancelled before it started.' };
   try {
     const seeded = new Set(seed.map(m => m.id));
-    const { session, failure } = await drainEphemeralTurn(machine.ephemeral!({ appender: NOWHERE }), {
+    const { session, failure } = await drainEphemeralTurn(machine.ephemeral!({ appender: reportsByReturning(machine, ctx.session.id) }), {
       sessionId: ctx.session.id, signal, principal, provider: turn.provider,
       // Only a real channel. Handed on as one, a stand-in would answer this turn's gates itself, or throw:
       // "nobody is here" has to reach them as no channel at all, so that each site's fallback answers.
