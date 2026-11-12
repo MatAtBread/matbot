@@ -76,6 +76,11 @@ churn and less likely to affect a consumer who doesn't use them.
   plugins count a robo-submit as having reported, so its reply is not posted a second time.
 - **frontend-web**: registers `SessionPrompter`. A robo-submit's questions park on its session as a
   submitter's do, and a busy tracker is armed for its turn.
+- **function-runner-node**: a failure a function body leaves unhandled no longer ends the process. This
+  covers a throw in a timer it scheduled, a rejection nothing awaits, and a tool call refused because the
+  body had already returned. Each is logged as contained. Node reports these in the async context they
+  came from, so they are recognised by the body's span, including a rejection with no stack. Any other
+  unhandled failure ends the process exactly as before.
 - **frontend-web**: if the sessions plugin refuses `markRead` (one without read tracking), the session is
   read without it rather than failing to open.
 - **frontend-web**: the sidebar's unread dot is now the server's, so it survives a reload, is the same on

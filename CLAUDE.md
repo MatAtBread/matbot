@@ -1137,6 +1137,17 @@ itself reads nothing a body can replace (primordials captured at load; `Error`'s
 descriptor), and fails closed: a body that makes the stack unreadable is refused, and so is everyone else
 until a restart.
 
+**A failure a body leaves behind is contained, not the process's.** A body can schedule work that outlives
+it (`setTimeout`) and fail there: a throw, a rejection nothing awaits, or a tool call refused because the body
+has already settled (#114), awaited in an `async` timer callback. Node's default for an unhandled rejection or
+an uncaught exception is to exit, so any body could end every session at once. The node runner listens for
+both and decides by the body's span (`host-only.ts`), not by a stack: node reports each in the async context
+it came from, so a rejection with no stack (`Promise.reject(1)`) is told apart as surely as one with a stack.
+A body's is logged and goes no further. Anything else is handed back to node unchanged, because listening at
+all turns the default off: a rejection is rethrown, and an uncaught exception is rethrown on the next tick
+with the listener removed, which is node's own crash. When something else listens too (a host's own
+policy, a test runner), that is left to decide. Without the runner nothing is contained, as nothing else is.
+
 **What this is not.** A body shares this process's built-ins, so it can still REWRITE them —
 `Object.prototype`, `JSON`, `Headers.prototype` — and whatever reads them later reads what it wrote. That
 is deliberate interference, and no in-process runner can stop it: `--frozen-intrinsics` and

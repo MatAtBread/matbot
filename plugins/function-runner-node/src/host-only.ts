@@ -179,5 +179,37 @@ function install(): Shared {
     },
     writable: true, configurable: true, enumerable: true,
   });
+  contain(span);
   return { span, ownFiles: [] };
+}
+
+// A failure a body left unhandled — a rejection in a timer it scheduled, a throw in a callback — was the
+// whole process's: node's default for an unhandled rejection or an uncaught exception is to exit, taking
+// every session with it, and any body can cause one (`setTimeout(async () => { throw 1 })`). So a failure
+// raised inside a body's span is logged and goes no further. Node reports both events in the async context
+// they came from, so the span decides, with no stack to read — a rejection carrying no stack (`Promise.reject(1)`)
+// is told apart as surely as one that does.
+//
+// Everything else ends the process exactly as before. Listening at all turns node's default off, so a failure
+// that is not a body's is handed back to it: a rejection is rethrown, which makes it an uncaught exception, and
+// an uncaught exception is rethrown on the next tick with this listener gone, which is node's own crash. When
+// something else is listening too (a host's own policy, a test runner), that is left to decide.
+function contain(span: AsyncLocalStorage<true>): void {
+  const isBody = (): boolean => apply(SPAN_STORE, span, []) === true;
+  const report = (what: string, failure: unknown): void => {
+    console.error(`[function-runner-node] A function body left ${what} that nothing handled. It was contained, and the process goes on:`, failure);
+  };
+  const onRejection = (reason: unknown): void => {
+    if (isBody()) { report('a rejected promise', reason); return; }
+    if (process.listenerCount('unhandledRejection') > 1) return;
+    throw reason;
+  };
+  const onException = (error: unknown): void => {
+    if (isBody()) { report('an exception', error); return; }
+    if (process.listenerCount('uncaughtException') > 1) return;
+    process.off('uncaughtException', onException);
+    process.nextTick(() => { throw error; });
+  };
+  process.on('unhandledRejection', onRejection);
+  process.on('uncaughtException', onException);
 }
