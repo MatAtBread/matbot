@@ -38,6 +38,9 @@ churn and less likely to affect a consumer who doesn't use them.
   session id). Nobody to ask means it stops. A refusal is reported as `cancelled`, and nothing of the
   submission is written. `trailingRoboSubmits(session)` counts the run.
 - **`AppendResult.traceId`**: the robo-submit's turn.
+- **`makeToolBox` returns `stopInFlight(reason?)`**, which aborts the calls the box has running at that
+  moment and nothing started afterwards. The box stays usable, so work its caller scheduled for later
+  still runs.
 - **A model is told who sent a robo-submit.** `origin` and metadata never reach the provider, so a model
   answered a job's question as if the person had asked it. On the outgoing copy only, a robo-submit now
   starts with `[Sent by <from>, not by the person in this conversation.]` (`withSenderShown`). `<from>` is
@@ -76,6 +79,13 @@ churn and less likely to affect a consumer who doesn't use them.
   plugins count a robo-submit as having reported, so its reply is not posted a second time.
 - **frontend-web**: registers `SessionPrompter`. A robo-submit's questions park on its session as a
   submitter's do, and a busy tracker is armed for its turn.
+- **function-tools**: a tool call a body makes after it has returned now runs (narrowing #114). When the
+  body settles, only the calls it left running are stopped. That is the case #114 was for: a
+  `Promise.race` loser, the sibling of a rejection in `Promise.all`, a call left at an early return. A call
+  started later, from a timer the body set, was refused. That stopped the tool call but not the timer, so
+  it bounded nothing, and it made an ordinary `setTimeout` fail at run time, after the body had reported
+  success. A body whose caller stops reading before it settles has been abandoned, and its calls are
+  still refused from then on.
 - **function-runner-node**: a failure a function body leaves unhandled no longer ends the process. This
   covers a throw in a timer it scheduled, a rejection nothing awaits, and a tool call refused because the
   body had already returned. Each is logged as contained. Node reports these in the async context they

@@ -356,13 +356,18 @@ export async function* runFunction(
   const emit = (ev: ToolEvent): void => { queue.push(ev); const w = wake; wake = null; w?.(); };
 
   const runner = machine.FunctionRunner;
-  // The body's own lifetime, inside the turn's: aborted when the body settles, so a call it started and
-  // did not wait for — a `Promise.race` loser, a sibling of a rejection in `Promise.all`, a call left
-  // behind by an early return — stops with it rather than running on, possibly as a whole agent turn, for
-  // a result nothing will read. Work meant to outlive the call is a `background_job`.
+  // When the body settles, the calls it left running are stopped (`stopInFlight`): a `Promise.race` loser,
+  // a sibling of a rejection in `Promise.all`, a call left behind by an early return — each would otherwise
+  // run on, possibly as a whole agent turn, for a result nothing will read (#114). A call the body makes
+  // AFTER settling is a different thing: work it scheduled for later (a timer), which runs as written, as it
+  // would in any JavaScript. Refusing it bounded nothing — the timer itself ran on regardless — and only made
+  // one use of an ordinary `setTimeout` fail, after the body had reported success.
+  //
+  // `lifetime` is for the other way a body ends: its caller stops reading before it settles (an abandoned
+  // call). Then nothing it does from that point on is anyone's, and every call it starts is refused.
   const lifetime = new AbortController();
   const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
-  const { tool, toolInContext, inFlight } = makeToolBox(machine, {
+  const { tool, toolInContext, inFlight, stopInFlight } = makeToolBox(machine, {
     session: ctx.session,
     signal,
     prompt:  ctx.prompt,
@@ -430,7 +435,7 @@ export async function* runFunction(
       // Counted only when this is what stops them: after the turn's abort, or the caller abandoning the
       // call, they were stopped already.
       const left = signal.aborted ? 0 : inFlight();
-      lifetime.abort();
+      stopInFlight();
       // Said in the log because the caller cannot be told: its result is already settled. A body that
       // meant the work to finish would otherwise lose it with no trace.
       if (left > 0) console.warn(`[function-tools] ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}) settled with ${left} tool call${left === 1 ? '' : 's'} still running; ${left === 1 ? 'it was' : 'they were'} stopped.`);

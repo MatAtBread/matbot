@@ -282,7 +282,7 @@ This list exists so the risk can be assessed. It isn't a ruling that each gap is
 | A link swapped between the last check and the kernel's walk of the path. A path check cannot close this | Inherent. Bounding the process is the answer |
 | A hard link made outside matbot is a second name for a file, which a path check sees as a different file | Inherent to answers that name paths |
 | A descriptor's `fs-access` question names the path it was opened on, which a rename since may have changed | Accepted: it is the same file |
-| Code after a body's first `await` has no time bound, and timers can outlive the call | Documented in the runner. Once the body settles, a tool call from such code is refused (#114), but an `import(…)` or a network call is still put to the gate. **Risk not assessed** |
+| Code after a body's first `await` has no time bound, and timers can outlive the call | Documented in the runner. When the body settles, the tool calls it left running are stopped (#114). A call such code starts later runs as written, being work the body scheduled, as do an `import(…)` or a network call, each still put to the gate. A failure it leaves unhandled is contained by the node runner rather than ending the process. **Risk not assessed** |
 
 **By design, listed for completeness:** a granted package gets the raw module; another granted builtin that does IO or loads modules isn't path-gated; a body can call any registered tool, such as `bash`; a write grant over the stored gate answers lets a body change them. *A default setup for function bodies*, under *Deploying*, shows how to configure against the last three.
 

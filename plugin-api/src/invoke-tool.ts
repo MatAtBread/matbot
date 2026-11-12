@@ -293,7 +293,9 @@ export type ToolBox = (call?: Pick<InvokeToolOptions, 'provider'> & { signal?: A
  * its owner must pass on for the callee's record to be kept; omit it for a silent surface. `hostCall` is
  * a `FunctionRunner`'s, for a box whose caller is a body that runner runs: each call's params are
  * copied and the call made through it. `inFlight()` is how many calls the box has started that have not
- * settled, for a caller that stops them and wants to say so. Built on {@link invokeTool}/{@link toolResult},
+ * settled, for a caller that stops them and wants to say so; `stopInFlight()` aborts exactly those, and
+ * nothing started after it — the box itself stays usable, so work its caller scheduled for later (a timer
+ * that calls a tool after the caller returned) runs as it was written to. Built on {@link invokeTool}/{@link toolResult},
  * which remain the low-level, dynamic-name seam.
  *
  * A call's promise is marked handled as it is made, so a rejection the caller never looks at is not an
@@ -304,10 +306,11 @@ export function makeToolBox(
   machine:     MatbotMachine,
   defaultCall: InvokeToolOptions,
   opts?:       { onEvent?: (event: ToolEvent) => void; hostCall?: <T>(fn: () => T) => T },
-): { tool: ToolProxy; toolInContext: ToolBox; inFlight: () => number } {
+): { tool: ToolProxy; toolInContext: ToolBox; inFlight: () => number; stopInFlight: (reason?: unknown) => void } {
   const host = opts?.hostCall;
-  let inFlight = 0;
-  const settled = (): void => { inFlight--; };
+  // Each running call's own stop, so the calls running at one moment can be stopped without refusing the
+  // ones made after it.
+  const running = new Set<AbortController>();
   const build = (call: InvokeToolOptions): ToolProxy =>
     new Proxy({}, {
       get(_target, prop) {
@@ -315,8 +318,10 @@ export function makeToolBox(
         // thenable and awaiting/returning it would try to invoke a tool named `then`.
         if (typeof prop !== 'string' || prop === 'then') return undefined;
         return (params?: unknown): Promise<unknown> => {
-          inFlight++;
-          const made = callOne(prop, params, call);
+          const stop = new AbortController();
+          running.add(stop);
+          const made = callOne(prop, params, { ...call, signal: AbortSignal.any([call.signal, stop.signal]) });
+          const settled = (): void => { running.delete(stop); };
           made.then(settled, settled);
           return made;
         };
@@ -358,5 +363,9 @@ export function makeToolBox(
       ...(signal !== undefined ? { signal: AbortSignal.any([defaultCall.signal, signal]) } : {}),
     });
   };
-  return { tool: build(defaultCall), toolInContext, inFlight: () => inFlight };
+  return {
+    tool: build(defaultCall), toolInContext,
+    inFlight:     () => running.size,
+    stopInFlight: reason => { for (const stop of [...running]) stop.abort(reason); },
+  };
 }

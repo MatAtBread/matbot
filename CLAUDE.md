@@ -1137,9 +1137,17 @@ itself reads nothing a body can replace (primordials captured at load; `Error`'s
 descriptor), and fails closed: a body that makes the stack unreadable is refused, and so is everyone else
 until a restart.
 
+**When a body settles, the tool calls it left running stop; a call it makes later runs** (#114,
+`makeToolBox`'s `stopInFlight`). A `Promise.race` loser, the siblings of a rejection in `Promise.all`, a call
+left at an early return: each would run on, possibly as a whole agent turn, for a result nothing will read. A
+call started after the body settled (a timer it set) is work it scheduled, and runs as it would in any
+JavaScript. Refusing those was tried and removed: it stopped the tool call and not the timer, so it bounded
+nothing and only made one use of an ordinary `setTimeout` fail at run time, after the body had reported
+success. A body whose CALLER stops reading before it settles has been abandoned instead, and every call it
+starts from then on is refused.
+
 **A failure a body leaves behind is contained, not the process's.** A body can schedule work that outlives
-it (`setTimeout`) and fail there: a throw, a rejection nothing awaits, or a tool call refused because the body
-has already settled (#114), awaited in an `async` timer callback. Node's default for an unhandled rejection or
+it (`setTimeout`) and fail there: a throw, or a rejection nothing awaits. Node's default for an unhandled rejection or
 an uncaught exception is to exit, so any body could end every session at once. The node runner listens for
 both and decides by the body's span (`host-only.ts`), not by a stack: node reports each in the async context
 it came from, so a rejection with no stack (`Promise.reject(1)`) is told apart as surely as one with a stack.

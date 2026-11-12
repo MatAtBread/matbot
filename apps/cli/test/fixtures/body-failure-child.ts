@@ -8,18 +8,24 @@ import type { MatbotMachine, Tool, ToolContext } from '../../../../plugin-api/sr
 const runner = createVmFunctionRunner(200);
 const late: Tool = {
   name: 'late', description: '', inputSchema: { type: 'object' },
-  executor: { async *execute() { yield { type: 'result', value: 'late' }; } },
+  executor: { async *execute() { process.stdout.write('late ran\n'); yield { type: 'result', value: 'late' }; } },
 };
-const machine = { tools: { list: () => [late], resolve: (n: string) => n === 'late' ? late : null } } as unknown as MatbotMachine;
+const fails: Tool = {
+  name: 'fails', description: '', inputSchema: { type: 'object' },
+  executor: { async *execute() { throw new Error('the late call failed'); } },
+};
+const tools = new Map([[late.name, late], [fails.name, fails]]);
+const machine = { tools: { list: () => [...tools.values()], resolve: (n: string) => tools.get(n) ?? null } } as unknown as MatbotMachine;
 const ctx = { callId: 'c1', session: { id: 's1' }, signal: new AbortController().signal, prompt: () => Promise.reject(new Error('no')) } as unknown as ToolContext;
 
 switch (process.argv[2]) {
   case 'body': {
-    // Every way a body can leave a failure behind it: a late tool call awaited in a timer (refused, since the
-    // body has settled), a throw in a timer, a bare rejection, a rejection with no stack.
+    // Every way a body can leave a failure behind it: a late tool call that fails, awaited in a timer; a
+    // throw in a timer; a bare rejection; a rejection with no stack. And a late call that succeeds, which runs.
     const fn = await buildAsyncFn({ TypeScriptStripper: { strip: (s: string) => stripTypeScriptTypes(s) }, FunctionRunner: runner },
       `(args: {}): Promise<string> {
         setTimeout(async () => { await tool.late({}); }, 5);
+        setTimeout(async () => { await tool.fails({}); }, 5);
         setTimeout(() => { throw new Error('thrown in a timer'); }, 5);
         Promise.reject(new Error('rejected at once'));
         Promise.reject(1);

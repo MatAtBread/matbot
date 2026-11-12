@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // A failure a tool_function body left unhandled ended the process: a body that scheduled
-// `setTimeout(async () => { await tool.x() })` and returned had its late call refused (#114), the refusal
-// rejected the timer's promise, nothing handled it, and node's default exited — every session with it.
+// `setTimeout(async () => { await tool.x() })` and returned had its late call refused (as #114 then did), the
+// refusal rejected the timer's promise, nothing handled it, and node's default exited — every session with it.
 // The node FunctionRunner now contains what fails in a body's span, and hands everything else back to node.
 // Each case runs in a process of its own: the test runner listens for these events itself, which would hide
 // whether a host failure still ends the process.
@@ -28,7 +28,8 @@ test('what a body leaves failing is contained, and the process goes on', { timeo
   assert.equal(code, 0, err);
   assert.match(out, /result:done/);
   assert.match(out, /alive/, 'still running after every failure the body left');
-  assert.match(err, /was not started: the call was cancelled/, 'the late tool call, refused and contained');
+  assert.match(out, /late ran/, 'a call the body scheduled for after it returned ran');
+  assert.match(err, /the late call failed/, 'a late call that failed, contained');
   assert.match(err, /thrown in a timer/);
   assert.match(err, /rejected at once/);
   assert.equal(err.match(/It was contained/g)?.length, 4, 'each one reported, the stackless rejection included');

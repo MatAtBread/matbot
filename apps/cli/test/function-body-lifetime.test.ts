@@ -137,11 +137,37 @@ test('the tool box counts calls in flight, and a failed call left alone is handl
   await assert.rejects(proxy['fail']!({}), /failed/, 'a caller that awaits still sees the rejection');
 });
 
-test('a timer left by a body cannot start a tool call once the body has settled', async () => {
-  const wait = waiter();
-  const fn = await lambda("(args: {}): Promise<string> { setTimeout(() => { void tool.wait({}); }, 10); return 'done'; }");
-  assert.deepEqual(await last(runFunction(machineWith([wait]), ctxFor(new AbortController().signal), fn, [{}])),
+test('a call a timer makes after the body has settled runs: it was scheduled, not abandoned', async () => {
+  // It was refused, which stopped the tool call and not the timer — bounding nothing, and failing one use of
+  // an ordinary setTimeout at run time, after the body had reported success.
+  const fn = await lambda("(args: {}): Promise<string> { setTimeout(() => { void tool.quick({}); }, 10); return 'done'; }");
+  let ran = 0;
+  const counted: Tool = { ...quick, executor: { async *execute() { ran++; yield { type: 'result', value: 'quick' }; } } };
+  assert.deepEqual(await last(runFunction(machineWith([counted]), ctxFor(new AbortController().signal), fn, [{}])),
                    { type: 'result', value: 'done' });
   await new Promise(r => setTimeout(r, 40));
-  assert.equal(wait.started(), 0, 'refused before the tool started');
+  assert.equal(ran, 1, 'the late call ran');
+});
+
+test('a call already running when the body settles is still stopped, though one made later runs', async (t) => {
+  t.mock.method(console, 'warn', () => { /* captured */ });
+  const wait = waiter();
+  let ran = 0;
+  const counted: Tool = { ...quick, executor: { async *execute() { ran++; yield { type: 'result', value: 'quick' }; } } };
+  const fn = await lambda("(args: {}): Promise<string> { void tool.wait({}); setTimeout(() => { void tool.quick({}); }, 10); return 'done'; }");
+  await last(runFunction(machineWith([wait, counted]), ctxFor(new AbortController().signal), fn, [{}]));
+  await within(wait.stopped, 1000, 'the call left running was stopped at return');
+  await new Promise(r => setTimeout(r, 40));
+  assert.equal(ran, 1, 'and the later one still ran');
+});
+
+test('a body whose caller stopped reading before it settled starts nothing more', async () => {
+  let ran = 0;
+  const counted: Tool = { ...quick, executor: { async *execute() { ran++; yield { type: 'result', value: 'quick' }; } } };
+  const fn = await lambda("(args: {}): Promise<string> { context.progress(10); await new Promise(r => setTimeout(r, 20)); await tool.quick({}).catch(() => {}); return 'late'; }");
+  const events = runFunction(machineWith([counted]), ctxFor(new AbortController().signal), fn, [{}])[Symbol.asyncIterator]();
+  assert.equal((await events.next()).value?.type, 'progress');
+  await events.return?.(undefined);   // the caller abandons the call while the body is still waiting
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(ran, 0, 'refused: the body was abandoned, not settled');
 });
