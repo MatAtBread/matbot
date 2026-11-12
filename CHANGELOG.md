@@ -9,94 +9,6 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
-
-### Breaking changes
-
-- **An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
-  `role: 'user'` message no longer just writes it. The message is submitted to the session as a turn,
-  which answers it beside any running turn (`parallel`), as the caller (a job's creator) and on the
-  session's own model. It is persisted when its turn starts, so the result's `messageIds` is empty and
-  `traceId` names the turn. A user message must be the only message in its append, and needs a principal
-  in scope. A user message nothing answered had no use: providers fold it into whatever the person types
-  next. Nothing in matbot appended one before this. A downstream caller that did now starts a turn, so
-  check for `role: 'user'` appends.
-
-### API gaps filled
-
-- **`ROBO_SUBMIT`, `isRoboSubmit(message)` and `isRequest(message)`.** A robo-submit's message carries
-  `metadata[ROBO_SUBMIT]`. `isRequest` is true for a person's message or a robo-submit, and false for a
-  `followup` resubmit, which continues the turn before it. It replaces "not wholly `origin: 'robo'`" as the
-  test for a new request, leaving `origin` to presentation.
-- **`SubmitOpenOpts.metadata`** stamps the user message a submission persists as. It is in-process only:
-  no frontend passes a client's metadata through.
-- **`SessionPrompter`** (`services.SessionPrompter`, optional): where a turn no frontend submitted asks its
-  questions. A robo-submit's turn uses it, so its permission prompts reach whoever views the session
-  instead of falling to their non-interactive default.
-- **The runner asks before a run of robo-submits continues.** Past `UNATTENDED_ROBO_SUBMITS` (3) in a row
-  with no message from a person, the next robo-submit's turn asks first (`tools.robo-submit`, subject the
-  session id). Nobody to ask means it stops. A refusal is reported as `cancelled`, and nothing of the
-  submission is written. `trailingRoboSubmits(session)` counts the run.
-- **`AppendResult.traceId`**: the robo-submit's turn.
-- **`makeToolBox` returns `stopInFlight(reason?)`**, which aborts the calls the box has running at that
-  moment and nothing started afterwards. The box stays usable, so work its caller scheduled for later
-  still runs.
-- **A model is told who sent a robo-submit.** `origin` and metadata never reach the provider, so a model
-  answered a job's question as if the person had asked it. On the outgoing copy only, a robo-submit now
-  starts with `[Sent by <from>, not by the person in this conversation.]` (`withSenderShown`). `<from>` is
-  `AppendMessage.from`, set by whoever knows who is asking: background jobs set `background job "<name>"`
-  and a sub-turn sets `a sub-turn run from this conversation`. Without it, the line says an automated
-  process sent the message. It is never stored, and is the same text every round, so it costs no prompt
-  cache.
-- **A `single_turn` sub-turn may append.** Its appender refused everything, on the grounds that a sub-turn
-  reports by returning. Returning a value and writing to a conversation are different acts, so it now
-  appends as any turn does, to any session it names. An append naming no session goes to the calling
-  conversation, and a robo-submit says it came from a sub-turn.
-
-- **`SessionRunner.status()` reports `prompting`**: a turn of the session has asked its submitter's
-  `prompt` a question nobody has answered. The runner counts this across every submission's `prompt`, so
-  it means the same whichever frontend draws the question. The return type is now named
-  `SessionStatusReport`.
-
-### Optional
-
-- **sessions**: read tracking belongs to this plugin, not core. It adds `Session.readAt` by augmentation:
-  how far a session has been read. It exports `isUnread(session)`, and `SessionIndicator`
-  (`'prompting' | 'running' | 'unread'`) with `sessionIndicator(session, live)`. A session that has never
-  been shown to a reader has no `readAt` and reads as read, so nothing lights up at once. Tracking starts
-  the first time a frontend marks it read.
-- **sessions**: each `session_action` `list`/`query` row carries `state`, a `SessionIndicator`.
-  `get` takes `markRead: true`, which records that the returned session has been shown to its reader.
-  It marks only what it returned, so a mark that waits behind a running turn never marks that turn's
-  reply as read. It never moves `readAt` backwards.
-- **sessions**: `session_action append` takes `submit: true`, which posts `text` as a robo-submit (a request
-  the conversation answers) rather than as a message from the caller. The result carries the turn's
-  `traceId`.
-- **triggers**: robo-submits are judged like a person's message. Every test for "a genuine user turn" is
-  now `isRequest`, so `followup` resubmits are still skipped.
-- **background-jobs-node**: a job may append a user message, a robo-submit, over its channel. Its blocks
-  are still forced to `origin: 'robo'`, and anything but assistant or user text is refused. Both job
-  plugins count a robo-submit as having reported, so its reply is not posted a second time.
-- **frontend-web**: registers `SessionPrompter`. A robo-submit's questions park on its session as a
-  submitter's do, and a busy tracker is armed for its turn.
-- **function-tools**: a tool call a body makes after it has returned now runs (narrowing #114). When the
-  body settles, only the calls it left running are stopped. That is the case #114 was for: a
-  `Promise.race` loser, the sibling of a rejection in `Promise.all`, a call left at an early return. A call
-  started later, from a timer the body set, was refused. That stopped the tool call but not the timer, so
-  it bounded nothing, and it made an ordinary `setTimeout` fail at run time, after the body had reported
-  success. A body whose caller stops reading before it settles has been abandoned, and its calls are
-  still refused from then on.
-- **function-runner-node**: a failure a function body leaves unhandled no longer ends the process. This
-  covers a throw in a timer it scheduled, a rejection nothing awaits, and a tool call refused because the
-  body had already returned. Each is logged as contained. Node reports these in the async context they
-  came from, so they are recognised by the body's span, including a rejection with no stack. Any other
-  unhandled failure ends the process exactly as before.
-- **frontend-web**: if the sessions plugin refuses `markRead` (one without read tracking), the session is
-  read without it rather than failing to open.
-- **frontend-web**: the sidebar's unread dot is now the server's, so it survives a reload, is the same on
-  every device, and lights for messages appended to a session (a background job's report) as well as
-  for a turn that ended. A session is marked read when it is on screen in a page that is visible.
-
 ## 0.5.0
 
 ### Repository layout
@@ -260,6 +172,14 @@ a second host's needs.
   submission paid a store round trip before its turn could start. Now `open()` awaits nothing after
   queueing, so if it throws, nothing was queued. A submission to a session that does not exist no longer
   throws: it is an `error` on the submission's `events`, with `failure: 'invalid'`.
+- **An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
+  `role: 'user'` message no longer just writes it. The message is submitted to the session as a turn,
+  which answers it beside any running turn (`parallel`), as the caller (a job's creator) and on the
+  session's own model. It is persisted when its turn starts, so the result's `messageIds` is empty and
+  `traceId` names the turn. A user message must be the only message in its append, and needs a principal
+  in scope. A user message nothing answered had no use: providers fold it into whatever the person types
+  next. Nothing in matbot appended one before this. A downstream caller that did now starts a turn, so
+  check for `role: 'user'` appends.
 
 ### API gaps filled
 
@@ -278,9 +198,10 @@ a second host's needs.
 
 - **`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
   turn within the calling session: it has the session's id, principal, tools and gate answers, sees none of
-  its conversation and adds nothing to it, and returns its text with the tool calls it made. `turns: [...]`
+  its conversation, does not add its working to it, and returns its text with the tool calls it made. `turns: [...]`
   runs several, with tools or without, at the same time, and returns their results in order; one failing
-  does not stop the others (`ok: false` beside the rest). At most 4 of a call's turns run at once, and turns
+  does not stop the others (`ok: false` beside the rest). A turn may still append to a conversation, as any
+  turn can (an append naming no session goes to the calling one). At most 4 of a call's turns run at once, and turns
   with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
   `messages`. A field beside `turns` (`tools: true`, a shared `context`) applies to every turn. A turn with
   tools has its spend recorded on the calling turn. The one-turn form is unchanged, and its result gains
@@ -362,9 +283,37 @@ a second host's needs.
   choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
   marked `submit` is drawn as the buttons that send the answer.
   `options` stays the answer for a frontend that ignores it, in the same encoding.
-- **`makeToolBox` returns `inFlight()`**, the number of calls it has started that have not settled. Each
-  call's promise is marked handled as it is made, so a call the caller never awaits no longer becomes an
-  unhandled rejection (which ends a Node process) when it fails; a caller that awaits still sees the error.
+- **`makeToolBox` returns `inFlight()` and `stopInFlight(reason?)`**: the number of calls it has started
+  that have not settled, and a way to abort those calls and nothing started afterwards. The box stays
+  usable, so work its caller scheduled for later still runs. Each call's promise is marked handled as it
+  is made, so a call the caller never awaits no longer becomes an unhandled rejection (which ends a Node
+  process) when it fails; a caller that awaits still sees the error.
+
+- **`ROBO_SUBMIT`, `isRoboSubmit(message)` and `isRequest(message)`.** A robo-submit's message carries
+  `metadata[ROBO_SUBMIT]`. `isRequest` is true for a person's message or a robo-submit, and false for a
+  `followup` resubmit, which continues the turn before it. It replaces "not wholly `origin: 'robo'`" as the
+  test for a new request, leaving `origin` to presentation.
+- **`SubmitOpenOpts.metadata`** stamps the user message a submission persists as. It is in-process only:
+  no frontend passes a client's metadata through.
+- **`AppendResult.traceId`**: the robo-submit's turn.
+- **`SessionPrompter`** (`services.SessionPrompter`, optional): where a turn no frontend submitted asks its
+  questions. A robo-submit's turn uses it, so its permission prompts reach whoever views the session
+  instead of falling to their non-interactive default.
+- **The runner asks before a run of robo-submits continues.** Past `UNATTENDED_ROBO_SUBMITS` (3) in a row
+  with no message from a person, the next robo-submit's turn asks first (`tools.robo-submit`, subject the
+  session id). Nobody to ask means it stops. A refusal is reported as `cancelled`, and nothing of the
+  submission is written. `trailingRoboSubmits(session)` counts the run.
+- **A model is told who sent a robo-submit.** `origin` and metadata never reach the provider, so a model
+  answered a job's question as if the person had asked it. On the outgoing copy only, a robo-submit
+  starts with `[Sent by <from>, not by the person in this conversation.]` (`withSenderShown`). `<from>` is
+  `AppendMessage.from`, set by whoever knows who is asking: background jobs set `background job "<name>"`
+  and a `single_turn` sub-turn sets `a sub-turn run from this conversation`. Without it, the line says an
+  automated process sent the message. It is never stored, and is the same text every round, so it costs
+  no prompt cache.
+- **`SessionRunner.status()` reports `prompting`**: a turn of the session has asked its submitter's
+  `prompt` a question nobody has answered. The runner counts this across every submission's `prompt`, so
+  it means the same whichever frontend draws the question. The return type is now named
+  `SessionStatusReport`.
 
 - **`FailureClass`: a failure says whether trying again could help.** matbot does not retry on a caller's
   behalf; it reports, and the caller decides, which needs more than a message. `failure?: 'unavailable' |
@@ -427,12 +376,20 @@ a second host's needs.
 - **`frontend-web`** — a permission prompt reads as a phrase: what, and for how long, as dropdowns, then
   Allow and Deny as the buttons that answer (an axis marked `submit`). `POST /tools/:name` runs its tool in the fixed session `#http`, which an
   installation configures that door's unattended answers against.
-- **`function-tools`** — a body's tool calls stop when the body settles (#114). They were handed the
-  calling turn's signal, so a `Promise.race` loser, a sibling of a rejected call in `Promise.all`, or a call
-  left running by an early return, a throw or the runner's time bound ran on until the turn ended — with
-  `single_turn`'s `tools: true`, as a whole agent turn. Each invocation now has its own signal inside the
-  turn's (also `context.signal`), aborted as the body settles or its caller stops reading; a warning names
-  the function when that stops calls still running. Work meant to outlive the call is a `background_job`.
+- **`function-tools`** — the tool calls a body leaves running stop when it settles (#114). They were handed
+  the calling turn's signal, so a `Promise.race` loser, a sibling of a rejected call in `Promise.all`, or a
+  call left running by an early return, a throw or the runner's time bound ran on until the turn ended —
+  with `single_turn`'s `tools: true`, as a whole agent turn. Each invocation now has its own signal inside
+  the turn's (also `context.signal`), aborted as the body settles or its caller stops reading; a warning
+  names the function when that stops calls still running. A call the body starts after it has returned
+  (from a timer it set) runs, as it would in any JavaScript. A body whose caller stops reading before it
+  settles has been abandoned, and every call it starts from then on is refused. Work meant to outlive the
+  call is a `background_job`.
+- **`function-runner-node`** — a failure a function body leaves unhandled no longer ends the process. This
+  covers a throw in a timer it scheduled, a rejection nothing awaits, and a tool call refused because its
+  caller abandoned the body. Each is logged as contained. Node reports these in the async context they
+  came from, so they are recognised by the body's span, including a rejection with no stack. Any other
+  unhandled failure ends the process exactly as before.
 - **`function-tools`** — keeping a function's grants across an edit (`tool_function.edit`) is remembered
   for this session only, a real lifetime rather than the session's id inside the subject.
 - **`function-runner-node`** — `permit_imports` is retired, and `function_runner_config` reads and sets
@@ -667,6 +624,30 @@ a second host's needs.
 - **`frontend-web`** — `POST /tools/:name` answers a classified failure with its status (503 for
   `unavailable`, so a client knows asking again later may work) and puts `failure` in the body; the submit
   route does the same for a submission `open()` refused.
+
+- **`sessions`** — read tracking. It adds `Session.readAt` by augmentation: how far a session has been
+  read. It exports `isUnread(session)`, and `SessionIndicator` (`'prompting' | 'running' | 'unread'`) with
+  `sessionIndicator(session, live)`. A session that has never been shown to a reader has no `readAt` and
+  reads as read, so nothing lights up at once; tracking starts the first time a frontend marks it read.
+  Core carries none of it, so an install without the plugin pays nothing for it.
+- **`sessions`** — each `session_action` `list`/`query` row carries `state`, a `SessionIndicator`. `get`
+  takes `markRead: true`, which records that the returned session has been shown to its reader. It marks
+  only what it returned, so a mark that waits behind a running turn never marks that turn's reply as read.
+  It never moves `readAt` backwards.
+- **`sessions`** — `session_action append` takes `submit: true`, which posts `text` as a robo-submit (a
+  request the conversation answers) rather than as a message from the caller. The result carries the
+  turn's `traceId`.
+- **`triggers`** — robo-submits are judged like a person's message. Every test for "a genuine user turn" is
+  now `isRequest`, so `followup` resubmits are still skipped.
+- **`background-jobs-node`** — a job may append a user message, a robo-submit, over its channel. Its blocks
+  are still forced to `origin: 'robo'`, and anything but assistant or user text is refused. Both job
+  plugins count a robo-submit as having reported, so its reply is not posted a second time.
+- **`frontend-web`** — registers `SessionPrompter`. A robo-submit's questions park on its session as a
+  submitter's do, and a busy tracker is armed for its turn.
+- **`frontend-web`** — the sidebar's unread dot is now the server's, so it survives a reload, is the same
+  on every device, and lights for messages appended to a session (a background job's report) as well as
+  for a turn that ended. A session is marked read when it is on screen in a page that is visible. If the
+  sessions plugin refuses `markRead` (one without read tracking), the session opens without it.
 
 ---
 
