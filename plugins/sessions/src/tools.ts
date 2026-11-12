@@ -1,5 +1,6 @@
-import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, SessionIndicator, Store, Filter, StoreQuery, FieldPath, SessionAppender, SessionRunner } from '@matatbread/matbot-plugin-api';
-import { lastActivityAt, sessionIndicator, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, SessionAppender, SessionRunner } from '@matatbread/matbot-plugin-api';
+import { lastActivityAt, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import { sessionIndicator, type SessionIndicator } from './read-state.js';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
 declare module '@matatbread/matbot-plugin-api' {

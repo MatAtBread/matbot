@@ -21,7 +21,6 @@ export function createSession(opts: CreateSessionOpts = {}): Session {
     messages:  [],
     createdAt: now,
     updatedAt: now,
-    readAt:    now,
   };
 }
 

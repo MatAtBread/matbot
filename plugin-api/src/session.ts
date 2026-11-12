@@ -1,4 +1,4 @@
-import type { Message, MessageContent, MessageRole, Session, SessionIndicator } from './types.js';
+import type { Message, MessageContent, MessageRole, Session } from './types.js';
 
 /**
  * A `Message` with the fields every one carries minted for it — a fresh id, `createdAt` now — and the
@@ -83,22 +83,6 @@ export function withSenderShown(message: Message): Message {
  */
 export function isRequest(message: Message): boolean {
   return message.role === 'user' && (!message.content.every(c => c.origin === 'robo') || isRoboSubmit(message));
-}
-
-/** Whether `session` has activity after the point it was last read to. Never-tracked sessions read as
- *  read (see `Session.readAt`). */
-export function isUnread(session: Session): boolean {
-  return session.readAt !== undefined && lastActivityAt(session) > session.readAt;
-}
-
-/** The {@link SessionIndicator} for `session`, given the runner's live report on it (absent where no
- *  runner holds the session's turns — a background job's process). */
-export function sessionIndicator(
-  session: Session, live?: { busy: boolean; prompting: boolean },
-): SessionIndicator | undefined {
-  if (live?.prompting === true) return 'prompting';
-  if (live?.busy      === true) return 'running';
-  return isUnread(session) ? 'unread' : undefined;
 }
 
 /**

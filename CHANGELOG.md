@@ -54,14 +54,14 @@ churn and less likely to affect a consumer who doesn't use them.
   `prompt` a question nobody has answered. The runner counts this across every submission's `prompt`, so
   it means the same whichever frontend draws the question. The return type is now named
   `SessionStatusReport`.
-- **`Session.readAt`** records how far a session has been read, and `isUnread(session)` reports whether
-  it has activity since. A session written before the field existed reads as read. `createSession` sets
-  it, so a new session starts read.
-- **`SessionIndicator`** (`'prompting' | 'running' | 'unread'`) and `sessionIndicator(session, live)`: the
-  one thing a session list shows beside a session, most urgent first.
 
 ### Optional
 
+- **sessions**: read tracking belongs to this plugin, not core. It adds `Session.readAt` by augmentation:
+  how far a session has been read. It exports `isUnread(session)`, and `SessionIndicator`
+  (`'prompting' | 'running' | 'unread'`) with `sessionIndicator(session, live)`. A session that has never
+  been shown to a reader has no `readAt` and reads as read, so nothing lights up at once. Tracking starts
+  the first time a frontend marks it read.
 - **sessions**: each `session_action` `list`/`query` row carries `state`, a `SessionIndicator`.
   `get` takes `markRead: true`, which records that the returned session has been shown to its reader.
   It marks only what it returned, so a mark that waits behind a running turn never marks that turn's
@@ -76,6 +76,8 @@ churn and less likely to affect a consumer who doesn't use them.
   plugins count a robo-submit as having reported, so its reply is not posted a second time.
 - **frontend-web**: registers `SessionPrompter`. A robo-submit's questions park on its session as a
   submitter's do, and a busy tracker is armed for its turn.
+- **frontend-web**: if the sessions plugin refuses `markRead` (one without read tracking), the session is
+  read without it rather than failing to open.
 - **frontend-web**: the sidebar's unread dot is now the server's, so it survives a reload, is the same on
   every device, and lights for messages appended to a session (a background job's report) as well as
   for a turn that ended. A session is marked read when it is on screen in a page that is visible.

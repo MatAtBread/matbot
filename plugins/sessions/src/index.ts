@@ -3,6 +3,7 @@ import { PLUGIN_API_VERSION }               from '@matatbread/matbot-plugin-api'
 import { makeSessionTools }                 from './tools.js';
 
 export { makeSessionTools, type SessionSummary } from './tools.js';
+export { isUnread, sessionIndicator, type SessionIndicator } from './read-state.js';
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,

@@ -67,7 +67,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
     tool-router/   — ToolPresenter: bounded per-turn tool window + tool_search
     tool-store/    — store_action: named persistent stores with generated CRUD tools
     edit-session/  — session_edit tool (cut/fork/split/compact)
-    sessions/      — session_action: list/get/rename/hide
+    sessions/      — session_action: list/get/rename/hide/append; read state (`Session.readAt`, added by
+                     augmentation, so core carries none of it) and each session's `state` for a list
     session-data/  — session_data: intermediate results kept in a session as markers, read back by id
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence

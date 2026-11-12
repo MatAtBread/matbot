@@ -417,9 +417,10 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
-    const hasRefs = session.messages.some(m => m.content.some(c => c.type === 'file-ref'));
-    const hasRobo = session.messages.some(isRoboSubmit);
-    const history = foldIdx >= 0 || attachments.size > 0 || hasRefs || hasRobo
+    // Whether any message needs rewriting for the wire — an attachment to show, a robo-submit's sender — in one
+    // pass, since this runs before every provider call and a session with neither should cost one scan.
+    const rewrite = session.messages.some(m => isRoboSubmit(m) || m.content.some(c => c.type === 'file-ref'));
+    const history = foldIdx >= 0 || attachments.size > 0 || rewrite
       ? session.messages.flatMap((m, i) => {
           const inlined = withAttachmentsShown(withSenderShown(m), sessionMedia.get(m.id));
           const folded  = i === foldIdx ? { ...inlined, content: [...inlined.content, ...ephemeral] } : inlined;

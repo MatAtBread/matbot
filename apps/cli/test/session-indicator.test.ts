@@ -5,8 +5,7 @@ import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent, Message, Principal,
   PromptFn, SessionRunner, ToolContext,
 } from '@matatbread/matbot-core';
-import { isUnread, sessionIndicator } from '@matatbread/matbot-core';
-import { makeSessionTools, type SessionSummary } from '@matatbread/matbot-sessions';
+import { isUnread, makeSessionTools, sessionIndicator, type SessionSummary } from '@matatbread/matbot-sessions';
 import { createAlsPrincipalCarrier, createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 import { heldRunner } from './fixtures/held-runner.ts';
 
@@ -61,7 +60,17 @@ test('a session is unread while it has activity after the point it was read to',
   assert.equal(isUnread({ ...base, messages: [msg('a', 1)] }), true, 'a message since');
   assert.equal(isUnread({ ...base, messages: [msg('a', 1)], readAt: at(1) }), false, 'read to it');
   const { readAt: _r, ...legacy } = { ...base, messages: [msg('a', 1)] };
-  assert.equal(isUnread(legacy), false, 'a session from before the field reads as read, not as all unread at once');
+  assert.equal(isUnread(legacy), false, 'a session never shown to a reader reads as read, not as all unread at once');
+  assert.equal(createSession().readAt, undefined, 'core knows nothing of it: tracking starts when a reader is first shown the session');
+});
+
+test('the first mark starts tracking a session that had none', async () => {
+  const { readAt: _r, ...fresh } = { ...createSession(), createdAt: at(0), messages: [msg('u', 1)] };
+  const { store, docs } = casStore(fresh as Session);
+  const [tool] = makeSessionTools(store, { run: () => undefined });
+  await call(tool!, { action: 'get', sessionId: fresh.id, markRead: true });
+  await settle();
+  assert.equal(docs.get(fresh.id)!.readAt, at(1));
 });
 
 test('prompting outranks running, which outranks unread', () => {

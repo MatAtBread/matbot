@@ -635,8 +635,12 @@ function refreshSessions(delay = 150) {
 // Reading the session on screen, in a page someone can see, is showing it to them — so it is marked read.
 // A peer session read for a link, or a page in a background tab, is not.
 const shownNow = id => id === currentSessionId && document.visibilityState === 'visible';
+// A sessions plugin without read tracking refuses the unknown field, which must not stop the session opening.
 async function apiGetSession(id)  {
-  try { return await callTool('session_action', { action: 'get', sessionId: id, ...(shownNow(id) ? { markRead: true } : {}) }); }
+  if (shownNow(id)) {
+    try { return await callTool('session_action', { action: 'get', sessionId: id, markRead: true }); } catch { /* read plainly */ }
+  }
+  try { return await callTool('session_action', { action: 'get', sessionId: id }); }
   catch { return null; }
 }
 function markShown(id) { if (shownNow(id)) void apiGetSession(id); }
