@@ -463,9 +463,9 @@ a second host's needs.
 - **`function-tools`** — the tool calls a body leaves running stop when it settles (#114). They were handed
   the calling turn's signal, so a `Promise.race` loser, a sibling of a rejected call in `Promise.all`, or a
   call left running by an early return, a throw or the runner's time bound ran on until the turn ended —
-  with `single_turn`'s `tools: true`, as a whole agent turn. Each invocation now has its own signal inside
-  the turn's (also `context.signal`), aborted as the body settles or its caller stops reading; a warning
-  names the function when that stops calls still running. A call the body starts after it has returned
+  with `single_turn`'s `tools: true`, as a whole agent turn. Each call a body makes now has its own signal
+  inside the turn's, aborted if the call is still running when the body settles; a warning names the
+  function when that stops calls still running. A call the body starts after it has returned
   (from a timer it set) runs, as it would in any JavaScript. A body whose caller stops reading before it
   settles has been abandoned, and every call it starts from then on is refused. Work meant to outlive the
   call is a `background_job`.
