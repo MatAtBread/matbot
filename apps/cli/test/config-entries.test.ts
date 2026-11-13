@@ -130,3 +130,21 @@ test('CRLF line endings are kept', async () => {
     assert.deepEqual(parseConfig(written).plugins, ['./plugins/a', './plugins/b']);
   });
 });
+
+// A flow list is a list since the parser read flow syntax, so the editors meet one: it has no line to
+// append to or drop, and is rewritten in block form, holding what it held.
+test('a flow `plugins:` list is edited by rewriting it in block form', async () => {
+  await withConfig(`plugins: ['@x/a', ./plugins/b,
+  https://host/c.ts]   # spans two lines\n\n${PROVIDERS}`, async file => {
+    assert.deepEqual(await readPluginsList(file), ['@x/a', './plugins/b', 'https://host/c.ts']);
+    assert.equal(await addPluginEntry(file, './plugins/d'), true);
+    assert.deepEqual(await readPluginsList(file), ['@x/a', './plugins/b', 'https://host/c.ts', './plugins/d']);
+    assert.equal(await removePluginEntry(file, './plugins/b'), true);
+    assert.deepEqual(await readPluginsList(file), ['@x/a', 'https://host/c.ts', './plugins/d']);
+    assert.deepEqual(await readProviderModules(file), ['@x/provider'], 'the rest of the file is untouched');
+  });
+  await withConfig(`plugins: [./plugins/a, ./plugins/b]\n${PROVIDERS}`, async file => {
+    assert.equal(await removePluginEntry(file, './plugins/a'), true, 'a flow entry is found to remove');
+    assert.deepEqual(await readPluginsList(file), ['./plugins/b']);
+  });
+});

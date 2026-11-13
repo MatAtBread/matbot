@@ -672,7 +672,10 @@ async function linkHostSingletons(dotPlugins: string): Promise<void> {
     if (await sameDir(linkPath, dir)) continue;             // already leads to the host's copy
     await mkdir(path.dirname(linkPath), { recursive: true });
     await rm(linkPath, { recursive: true, force: true });
-    await symlink(dir, linkPath, LINK_TYPE);
+    // Two materialisations at once on a cold cache both find no link, and the second to create one finds the
+    // first's: that is the link wanted, not a failure.
+    try { await symlink(dir, linkPath, LINK_TYPE); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST' || !await sameDir(linkPath, dir)) throw e; }
   }
 }
 

@@ -7,6 +7,7 @@ import type {
   ProviderAdapterFactory,
 } from './plugin.js';
 import { PLUGIN_API_VERSION, unifyServices } from './plugin.js';
+import { copyTool } from './tool-registry.js';
 import { makePluginSettings, SETTINGS_NAMESPACE } from './settings.js';
 
 /** What a plugin may name a store: see the machine's `createStore`. */
@@ -68,9 +69,15 @@ async function resolveToolCollision(
   const decision = await (services.PermissionGate ?? askPermissionGate).decide({
     gate:     'tools.overwrite',
     subject:  toolName,
-    // The incoming OWNER rides in the label rather than in a field of its own: a single `subject`
-    // cannot also express "trust everything plugin foo registers", and no policy wants that yet.
     label,
+    // "Any tool from this plugin" is the answer that makes a RELOAD quiet: unloading a plugin that shadowed
+    // a built-in reinstates the built-in, so loading it again collides again, once per tool, after the
+    // reload itself was already agreed to. The policy offers the tool itself first, being the subject, in
+    // its own words. It is `<plugin> *` — a tool name has no space, so it cannot be mistaken for an answer
+    // about one tool — and it is no wider than it reads: the gate guards against a tool changing hands by
+    // accident, not against a plugin, which runs with the host's full access and could rewrite the
+    // registry itself.
+    standing: [{ subject: `${incomingOwner} *`, label: `any tool from "${incomingOwner}" replacing another` }],
     fallback: true,
   // No session: a registration belongs to no piece of work, so no answer can be held for one.
   }, prompt, {});
@@ -331,7 +338,7 @@ export async function setupPlugin(plugin: MatbotPlugin, services: MatbotMachine,
   // has already returned by the time a slow collision resolves, so an unload (or a setup() throw and
   // its rollback) can land first, and re-inserting the tool would revive one owned by a gone plugin.
   const registerTool = async (tool: Tool): Promise<void> => {
-    const stamped: Tool = { ...tool, pluginName: plugin.name };
+    const stamped = copyTool(tool, { pluginName: plugin.name });
     const existing = services.tools.resolve(stamped.name);
     if (existing !== null && existing.pluginName !== plugin.name) {
       const overwrite = await resolveToolCollision(services, stamped.name, existing.pluginName, plugin.name, prompt)

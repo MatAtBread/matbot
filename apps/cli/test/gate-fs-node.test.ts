@@ -731,13 +731,16 @@ test('a URL-shaped object that answers differently each time it is read is one p
 
 test('a path that is not valid UTF-8 is refused rather than asked about as some other name', async () => {
   const name = Buffer.concat([Buffer.from(`${real}${path.sep}`), Buffer.from([0xff])]);
-  realFs.symlinkSync(path.join(real, '.env'), name);
+  // APFS refuses such a name (EILSEQ). The call can still be made, and must be refused all the same.
+  let made = true;
+  try { realFs.symlinkSync(path.join(real, '.env'), name); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EILSEQ') throw e; made = false; }
   try {
     const { caller } = onlyA(r => r.subject.includes('�'));   // grants the name a lossy decode would ask about
     const { fs, fsp } = await bothSurfaces(caller);
     assert.throws(() => fs.readFileSync(name, 'utf8'), (e: NodeJS.ErrnoException) => e.code === 'EACCES' && /UTF-8/.test(e.message));
     await assert.rejects(fsp.readFile(name, 'utf8'), /UTF-8/);
-  } finally { realFs.unlinkSync(name); }
+  } finally { if (made) realFs.unlinkSync(name); }
 });
 
 test('a symlink changed while the question is open is asked about again at its new target', async () => {

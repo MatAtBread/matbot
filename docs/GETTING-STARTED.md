@@ -393,7 +393,7 @@ installation can author them up front — the same thing the *Always* options wr
 ```yaml
 default_settings:
   '@matatbread/matbot-default-gate':
-    'tools.overwrite': { '*': [bash, plugin] }   # or: { '*': true }
+    'tools.overwrite': { '*': [bash, plugin, '@acme/our-shadows *'] }   # or: { '*': true }
     'plugin.add':      { '*': ['@acme/our-tools'] }
 ```
 
@@ -407,7 +407,8 @@ about. `true` allows every subject of that gate. Anything else asks. As everywhe
 `get` lists the answers in force — nothing on a fresh install, since a gate nobody has answered is
 simply not reported; pass a `gate` to ask about one by name.
 
-The gate ids are `tools.overwrite` (subject: the tool name), `plugin.add` /
+The gate ids are `tools.overwrite` (subject: the tool name, or `<plugin> *` for any tool from that
+plugin — what spares a reload of a plugin that replaces a built-in from asking again), `plugin.add` /
 `plugin.provision-deps` / `plugin.remove` / `plugin.npm-uninstall` / `plugin.remove-provisioned` / `plugin.load`,
 `provider.add` / `provider.add-unverified` / `provider.add-unlisted` / `provider.update` /
 `provider.update-unverified` / `provider.update-unlisted` / `provider.remove`, and `mcp_action.add` / `mcp_action.remove`. A tool's ids are qualified with the

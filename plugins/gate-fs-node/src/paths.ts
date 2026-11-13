@@ -239,7 +239,10 @@ export function realResolve(p: string): string {
     tail.push(path.basename(cur));
     cur = parent;
   }
-  return abs;
+  // A cycle: still the real spelling of its directory, or `/var/…` on macOS is a different subject from the
+  // `/private/var/…` an answer names. Not followed further — a parent can be part of the cycle too.
+  try { return path.join(realpathSync.native(path.dirname(abs)), path.basename(abs)); }
+  catch { return abs; }
 }
 
 const insensitiveByDevice = new Map<number, boolean>();

@@ -19,8 +19,9 @@ export interface HookRegistrar {
 
 /** Tool CRUD is observed on the {@link Notifier}, as a `RegistryChange` with `registry: 'tools'` — this
  *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
- *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
- *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */
+ *  notification per tool (removeByPlugin announces a `removed` per matched tool, or an `added` where it
+ *  reinstates the host's built-in of that name); the registering plugin's name rides in `detail`, advisory
+ *  as ever — resolve the name for anything authoritative. */
 export interface ToolRegistry {
   /** Registers `tool` and returns — there is nothing to await. The name is free in the overwhelming
    *  case, and that path completes in the calling tick, so `setup()` can fire-and-forget. When a
@@ -32,7 +33,8 @@ export interface ToolRegistry {
   register(tool: Tool): void;
   /** Through a plugin's machine, removes only a tool that plugin registered; another's is left in
    *  place (with a warning), since remove-then-register would replace it without the collision being
-   *  decided. */
+   *  decided. A host built-in the removed tool displaced is current again, as it is when the plugin
+   *  unloads; another plugin's tool it displaced is not, having been replaced rather than suspended. */
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];

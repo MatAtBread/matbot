@@ -53,10 +53,10 @@ function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
     console.warn(`[tool-store] Store "${def.id}" is not registered (remove it with \`store_action remove\`): ${e instanceof Error ? e.message : String(e)}`);
     return;
   }
-  // Only a tool of this plugin's is replaced (the host refuses to remove another's), and a name another
-  // plugin holds goes through the host's collision decision rather than round it.
+  // Registering replaces this plugin's own earlier tool of the name, and a name another plugin holds goes
+  // through the host's collision decision rather than round it. Not remove-then-register: removing ours
+  // would reinstate a host built-in it displaced, and the registration would then collide with that.
   const tool = makeStoreTool(services.self?.name, def, store);
-  services.tools.remove(actionToolName(def.id));
   services.tools.register(isLegacy(def) ? migratedOnUse(services, def, tool) : tool);
 }
 

@@ -52,8 +52,10 @@ export async function addPluginEntry(configPath: string, specifier: string): Pro
     } else if (list.inline === '') {
       out.splice(list.keyLine + 1, 0, `  - ${item}${eol}`);
     } else {
-      // `plugins: ~` or `plugins: null`, which the parser reads as an empty list.
-      out.splice(list.keyLine, 1, `plugins:${eol}`, `  - ${item}${eol}`);
+      // `plugins: ~` or `plugins: null`, which the parser reads as an empty list, or a flow list
+      // (`plugins: [a, b]`), which has no line to append to: the block form, with what it already held.
+      out.splice(list.keyLine, list.end - list.keyLine + 1,
+        `plugins:${eol}`, ...before.map(s => `  - ${asItem(s)}${eol}`), `  - ${item}${eol}`);
     }
     return out.join('\n');
   };
@@ -76,17 +78,39 @@ export async function addPluginEntry(configPath: string, specifier: string): Pro
 export async function removePluginEntry(configPath: string, specifier: string): Promise<boolean> {
   const text   = await readFile(configPath, 'utf8');
   const before = pluginsOf(parseYaml(text));
-  const drop   = new Set((locateSequence(text, 'plugins')?.items ?? [])
-    .filter(item => item.value === specifier).map(item => item.line));
-  if (drop.size === 0) return false;
+  const list   = locateSequence(text, 'plugins');
+  const drop   = new Set((list?.items ?? []).filter(item => item.value === specifier).map(item => item.line));
+  const flow   = list !== undefined && list.inline.startsWith('[') && before.includes(specifier);
+  if (drop.size === 0 && !flow) return false;
 
-  const updated = text.split('\n').filter((_, n) => !drop.has(n)).join('\n');
+  let updated: string;
+  if (flow) {
+    // A flow list (`plugins: [a, b]`) is one line, or several that are one entry: rewritten in block form.
+    const eol  = text.includes('\r\n') ? '\r' : '';
+    const kept = before.filter(s => s !== specifier);
+    const out  = text.split('\n');
+    out.splice(list.keyLine, list.end - list.keyLine + 1, `plugins:${eol}`, ...kept.map(s => `  - ${asItem(s)}${eol}`));
+    updated = out.join('\n');
+  } else {
+    updated = text.split('\n').filter((_, n) => !drop.has(n)).join('\n');
+  }
   if (!sameList(pluginsIn(updated), before.filter(s => s !== specifier))) {
     throw new Error(`Could not remove "${specifier}" from plugins: in ${configPath} without changing how the ` +
                     'rest of the file reads. Remove it by hand.');
   }
   await writeFile(configPath, updated, 'utf8');
   return true;
+}
+
+// An entry in the form the parser reads back as `specifier`: plain where it can be, else quoted.
+function asItem(specifier: string): string {
+  for (const form of [specifier, `'${specifier}'`, `"${specifier}"`]) {
+    try {
+      const read = parseYaml(`x:\n  - ${form}\n`)['x'];
+      if (Array.isArray(read) && read.length === 1 && read[0] === specifier) return form;
+    } catch { /* the next form */ }
+  }
+  return `'${specifier}'`;
 }
 
 function pluginsIn(text: string): readonly string[] | undefined {

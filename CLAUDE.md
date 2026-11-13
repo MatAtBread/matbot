@@ -375,6 +375,14 @@ type MediaStore   = FileStore;      // session media; see Media
 
 **A plugin's unload withdraws its own registration, not the key.** The registry holds one value per key, but core remembers each plugin's registration in order, for every key. Withdrawing the current one reinstates the one it displaced; withdrawing a displaced one changes nothing; only the last one out reverts to the host (above). It was `unregister(key)`, which removed whatever was current, so where plugins stack by capturing what they displace (`ts-validation` over `json-validation`, a gate over a gate), unloading the one underneath took the one on top with it. `StorageBackend` is the exception on one side only: a displaced backend was closed by the swap, so withdrawing the live one reverts to the host's — but withdrawing a displaced one still leaves the live one alone.
 
+**Tools draw the line at the host.** A tool name holds one tool, and a plugin's tool that displaced the
+host's own (`plugin`, `provider`, a core tool — anything registered with no `pluginName`) is withdrawn back
+to it, by `remove` or the plugin's unload. A plugin's tool that displaced *another plugin's* is not: that one
+is replaced, not suspended. Plugins come and go independently — Y is installed over X, then X is removed —
+so a stack would reinstate what nobody has loaded; what the host put there lasts as long as the machine,
+which is the same line the swap-members' boot defaults draw. A tool's own fields are copied with their
+accessors (`copyTool`), so a description built when read stays live through the host's wrappers.
+
 **A reference captured from the registry is hard.** Unloading its provider changes what the registry resolves, not what a plugin already holds, so an object that outlives its plugin is that provider's to answer for — by failing with "service no longer active", not by working on half-torn-down state. Resolution through the registry is dynamic, so the removal of a dependency can only be relied on dynamically; nothing static can see it coming. A dependency that must hold is a real `package.json` import, which loads and unloads the two as a unit (*Discovery vs. direct dependency*).
 
 ### Context switch & the deferred StorageBackend swap

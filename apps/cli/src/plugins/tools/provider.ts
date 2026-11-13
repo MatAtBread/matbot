@@ -729,10 +729,76 @@ export function createProviderTool(
   pluginNameToOrigPath?: ReadonlyMap<string, string>,
   nameResolves?:         (pluginName: string) => boolean,
 ): Tool<ToolResultOf<'provider'>> {
-  // Derive the adapter list from provider plugins registered at call time. Advertise each by the
-  // exact specifier the tool would write for it (yamlSpecifierFor) — the canonical package name when
-  // it resolves, else the yaml path — so the module the LLM copies from this list is the one the
-  // loader can resolve.
+  return {
+    name:     'provider',
+    // Built when READ, not when the tool is: it is registered before any plugin loads (so a plugin can
+    // shadow it), when no adapter is loaded yet, and it names the adapters and profiles there are now —
+    // including one `plugin add` loaded since boot, and for a shadow that delegates to this description.
+    // The host's copies of a tool keep a getter a getter (`copyTool`).
+    get description() { return describeProviderTool(providers, pluginNameToOrigPath, nameResolves); },
+    inputSchema: {
+      type:       'object',
+      required:   ['action'],
+      properties: {
+        action: {
+          type:        'string',
+          enum:        ['list', 'add', 'update', 'remove', 'alias'],
+          description: 'list: show all profiles. add: create a new profile. update: change fields on an existing profile. remove: delete a profile or alias. alias: create or repoint an alias.',
+        },
+        name: {
+          type:        'string',
+          description: 'Unique profile or alias name used as the provider key (add/update/remove/alias).',
+        },
+        alias: {
+          type:        'string',
+          description: 'The profile the alias named by "name" runs on (alias only).',
+        },
+        module: {
+          type:        'string',
+          description: 'Adapter module specifier (add only — update cannot change it; remove and re-add instead).',
+        },
+        model: {
+          type:        'string',
+          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update). Checked against the models the endpoint lists, where it lists them; one it does not list needs the user to confirm it, and the refusal names the closest listed ids.',
+        },
+        endpoint: {
+          // `['string','null']`, and likewise for parameters/maxRounds below: null is update's clear
+          // signal, and inputSchema is an enforcement point (json-validation) as well as documentation.
+          type:        ['string', 'null'],
+          description: 'Base URL of the provider API. Required for openai-compat; omit to use the adapter default (add/update; null on update clears it).',
+        },
+        credentialKey: {
+          type:        'string',
+          description: 'Credential field name, default "apiKey" (add only — update never touches credentials; use "plugin store-key").',
+        },
+        credentialEnvVar: {
+          type:        'string',
+          description: 'Existing env var name to use as the credential value. If omitted the tool prompts the user (add only).',
+        },
+        parameters: {
+          type:                 ['object', 'null'],
+          additionalProperties: true,
+          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add/update). On update this REPLACES the whole object — list first and send back everything you want to keep; null clears it.',
+        },
+        maxRounds: {
+          type:        ['integer', 'null'],
+          minimum:     1,
+          description: 'Optional per-turn ceiling on agentic rounds (one model call plus its tool batch) for this profile. Omit for no ceiling. Not a generation parameter — never sent to the endpoint (add/update; null on update clears it).',
+        },
+      },
+    },
+    executor: makeExecutor(configPath, providers, pluginNameToOrigPath, nameResolves),
+  };
+}
+
+function describeProviderTool(
+  providers:             ProviderRegistry,
+  pluginNameToOrigPath?: ReadonlyMap<string, string>,
+  nameResolves?:         (pluginName: string) => boolean,
+): string {
+  // Advertise each adapter by the exact specifier the tool would write for it (yamlSpecifierFor) — the
+  // canonical package name when it resolves, else the yaml path — so the module the LLM copies from this
+  // list is the one the loader can resolve.
   const adapterPlugins = getRegisteredPlugins().filter(p => p.provider !== undefined);
   const adapterSection = adapterPlugins.length > 0
     ? adapterPlugins.map(p => {
@@ -746,9 +812,7 @@ export function createProviderTool(
     ? [...providers.values()].map(e => `"${describeProvider(e)}"`).join(', ')
     : '(none — use add to create the first one)';
 
-  return {
-    name:     'provider',
-    description: `Manage LLM provider profiles in matbot.yaml. Each profile is a named
+  return `Manage LLM provider profiles in matbot.yaml. Each profile is a named
 configuration combining an adapter module, model identifier, endpoint URL,
 API credentials, optional generation parameters, and an optional per-turn
 agentic round ceiling. Profiles are what users select when starting a
@@ -820,60 +884,5 @@ When a user asks to add a new LLM or provider, ask for:
   2. Model name — e.g. claude-sonnet-4-6, gpt-4o, deepseek-chat, llama3.2
   3. Endpoint URL — required for OpenAI-compat adapters; may be optional for others
   4. API key source — existing env var (credentialEnvVar) or enter now (blank = prompted)
-  5. Profile name — descriptive, e.g. "claude-sonnet-4-6" or "ollama-llama3"`,
-
-    inputSchema: {
-      type:       'object',
-      required:   ['action'],
-      properties: {
-        action: {
-          type:        'string',
-          enum:        ['list', 'add', 'update', 'remove', 'alias'],
-          description: 'list: show all profiles. add: create a new profile. update: change fields on an existing profile. remove: delete a profile or alias. alias: create or repoint an alias.',
-        },
-        name: {
-          type:        'string',
-          description: 'Unique profile or alias name used as the provider key (add/update/remove/alias).',
-        },
-        alias: {
-          type:        'string',
-          description: 'The profile the alias named by "name" runs on (alias only).',
-        },
-        module: {
-          type:        'string',
-          description: 'Adapter module specifier (add only — update cannot change it; remove and re-add instead).',
-        },
-        model: {
-          type:        'string',
-          description: 'Model identifier passed to the adapter, e.g. "claude-sonnet-4-6" (add/update). Checked against the models the endpoint lists, where it lists them; one it does not list needs the user to confirm it, and the refusal names the closest listed ids.',
-        },
-        endpoint: {
-          // `['string','null']`, and likewise for parameters/maxRounds below: null is update's clear
-          // signal, and inputSchema is an enforcement point (json-validation) as well as documentation.
-          type:        ['string', 'null'],
-          description: 'Base URL of the provider API. Required for openai-compat; omit to use the adapter default (add/update; null on update clears it).',
-        },
-        credentialKey: {
-          type:        'string',
-          description: 'Credential field name, default "apiKey" (add only — update never touches credentials; use "plugin store-key").',
-        },
-        credentialEnvVar: {
-          type:        'string',
-          description: 'Existing env var name to use as the credential value. If omitted the tool prompts the user (add only).',
-        },
-        parameters: {
-          type:                 ['object', 'null'],
-          additionalProperties: true,
-          description:          'Generation parameters: maxTokens, temperature, topP, thinking, etc. (add/update). On update this REPLACES the whole object — list first and send back everything you want to keep; null clears it.',
-        },
-        maxRounds: {
-          type:        ['integer', 'null'],
-          minimum:     1,
-          description: 'Optional per-turn ceiling on agentic rounds (one model call plus its tool batch) for this profile. Omit for no ceiling. Not a generation parameter — never sent to the endpoint (add/update; null on update clears it).',
-        },
-      },
-    },
-
-    executor: makeExecutor(configPath, providers, pluginNameToOrigPath, nameResolves),
-  };
+  5. Profile name — descriptive, e.g. "claude-sonnet-4-6" or "ollama-llama3"`;
 }

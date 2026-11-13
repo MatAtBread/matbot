@@ -1,16 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootWith } from './fixtures/provider-boot.ts';
+import { bootWith, FAKE_ADAPTER } from './fixtures/provider-boot.ts';
 
-// The builtin's description lists the loaded adapters, so it is built again once they have loaded.
-test('without a shadow, the builtin `provider` lists the adapters loaded through `plugins:`', async () => {
-  const { services } = await bootWith('fake-adapter', `
-    export const plugin = {
-      apiVersion: API_VERSION,
-      manifest: { description: 'the fake adapter for the boot test' },
-      provider: () => ({ name: 'fake', async health() { return { ok: true }; }, async *complete() {} }),
-    };
-  `);
+// The builtin is registered before any adapter loads, so its description is built when it is read.
+test('without a shadow, the builtin `provider` lists the adapters loaded through `plugins:`', async t => {
+  const { services } = await bootWith(t, { 'fake-adapter': FAKE_ADAPTER });
 
   const tool = services.tools.resolve('provider');
   assert.equal(tool?.pluginName, undefined);
