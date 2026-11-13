@@ -1,5 +1,5 @@
 import type { MatbotPluginSpec, MatbotMachine, ProviderConfig, Store } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isProviderAlias } from '@matatbread/matbot-plugin-api';
 
 /**
  * ⚠️  DEMONSTRATION / REFERENCE PLUGIN — NOT A USEFUL FEATURE IN ITSELF.  ⚠️
@@ -47,7 +47,7 @@ export const plugin: MatbotPluginSpec = {
     if (!doc) {
       // Seed once by cloning a configured provider (prefer the cheapest) under a distinct name, so this
       // plugin contributes a genuinely working profile without hardcoding an endpoint or secret.
-      const src = services.providers.get('haiku-4.5-azure') ?? [...services.providers.values()][0];
+      const src = services.providers.resolve('haiku-4.5-azure') ?? [...services.providers.values()].find((e): e is ProviderConfig => !isProviderAlias(e));
       if (src === undefined) {
         console.warn('[provider-store-test] no configured provider to clone; nothing to contribute.');
         return;

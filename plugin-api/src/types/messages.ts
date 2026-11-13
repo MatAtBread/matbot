@@ -9,7 +9,7 @@ export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'marker';
 export type MessageContent = (
   // ── prose and reasoning: what the model said ──
   | { type: 'text';              text: string }
-  | { type: 'thinking';          thinking: string; signature: string }
+  | { type: 'thinking';          thinking: string; signature: string; meta?: ProviderMeta }
   | { type: 'redacted-thinking'; data: string }
   | { type: 'reasoning';         reasoning: string }
   | { type: 'refusal';           text: string }

@@ -5,7 +5,7 @@ import { ProviderRegistryImpl,
          unloadPlugin as unloadPluginFn,
          getFailedPlugins, getPluginNameForSpecifier, getRegisteredPlugins,
          installPrincipalCarrier, installUsageCarrier, enterPrincipal,
-         assembleMachine, preScanStorage } from '@matatbread/matbot-core';
+         assembleMachine, preScanStorage, isProviderAlias } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import { stripTypeScriptTypes }     from 'node:module';
 import process                      from 'node:process';
@@ -101,7 +101,7 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   // A plugin with storageBackend replaces the host's filesystem stores, so it must be listed before any
   // plugin whose setup() calls createStore.
   const providers            = new ProviderRegistryImpl(config.providers);
-  const providerModules      = [...new Set([...providers.values()].map(cfg => cfg.module))];
+  const providerModules      = [...new Set([...providers.values()].flatMap(e => isProviderAlias(e) ? [] : [e.module]))];
   const resolvedProviderMods = await resolvePluginSpecifiers(providerModules, configDir);
   const resolvedPluginMods   = await resolvePluginSpecifiers(config.plugins, configDir);
   const preScanned           = await preScanStorage([...resolvedProviderMods, ...resolvedPluginMods], dotData);

@@ -1,5 +1,5 @@
 import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isProviderAlias } from '@matatbread/matbot-plugin-api';
 import { GoogleDriveStorageBackend, DRIVE_SCOPE } from './drive-backend.js';
 import { DriveAuth } from './drive-auth.js';
 import { runDriveSetup } from './drive-setup-overlay.js';
@@ -144,8 +144,14 @@ export const plugin: MatbotPluginSpec = {
     // so `${…}` credential placeholders resolve against Drive.
     const providerSet = new DriveProviderSet(backend.createStore('provider-manifest'));
     services.tools.register(createBrowserProviderTool(driveProviderAdmin(providerSet, services)));
-    for (const cfg of await providerSet.list()) {
-      services.providers.register(cfg);
+    // Profiles before aliases, since an alias needs its target in place, and the manifest keeps its
+    // entries in write order, not dependency order. An alias the live set refuses is skipped, not fatal.
+    const synced = await providerSet.list();
+    for (const cfg of synced) if (!isProviderAlias(cfg)) services.providers.register(cfg);
+    for (const cfg of synced) {
+      if (!isProviderAlias(cfg)) continue;
+      try { services.providers.register(cfg); }
+      catch (e) { console.warn(`[google-drive] skipping synced provider alias "${cfg.name}":`, e instanceof Error ? e.message : e); }
     }
     syncedProviders = { services, set: providerSet };
   },

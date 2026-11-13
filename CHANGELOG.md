@@ -181,6 +181,13 @@ a second host's needs.
   next. Nothing in matbot appended one before this. A downstream caller that did now starts a turn, so
   check for `role: 'user'` appends.
 
+- **`services.providers` holds provider aliases beside profiles.** Its values are `ProviderEntry`
+  (`ProviderConfig | ProviderAlias`), so code reading `module`, `model` or another profile field off an
+  entry narrows first (`isProviderAlias`), or asks `providers.resolve(name)` for the profile a name runs on.
+  `has`, `get` and the keys answer for an alias as for a profile, so code that only checks or passes a name
+  is unchanged. `register` throws for an alias whose target is not a profile, and `remove` for a profile an
+  alias points at.
+
 ### API gaps filled
 
 - **A tool's marker records the calls that produced it (`Marker.by`, `CallFrame`).** The host stamps each
@@ -328,6 +335,21 @@ a second host's needs.
   non-ok answer: its status and body in the message, its class from the status.
 - **A turn's `error`, and a tool's thrown error, include the error's `cause`** (`TypeError: fetch failed
   (SocketError: other side closed)`), which is usually the half that says what happened.
+
+- **Provider aliases.** A provider entry may be `alias: <profile>` and nothing else: a stable name for a
+  role (`text_classifier`) that code, pinned settings and stored functions can name, and that keeps
+  working when the profile behind it changes. What is kept is the name chosen: a message's `providerName`
+  and a pinned setting record the alias, and it is resolved only where a provider is called, in
+  `complete()` and at the start of a turn. A usage entry records the profile that ran, since an alias
+  moves and the rates are the model's. One hop: an alias points at a profile, never at another alias. The
+  `provider` tool's `alias` action creates or repoints one (gated, `provider.alias`); `remove` takes either;
+  `update` refuses an alias; `list` reports them apart from the profiles, under `aliases`, so a picker
+  reading `providers` shows none. An alias left without its target (by a plugin's unload) is refused at
+  the call, naming the target (`invalid`). plugin-api exports `isProviderAlias`, `aliasProblem`,
+  `removalProblem`, `aliasesOf`, `describeProvider` and `describeProviders`; `single_turn`'s
+  unknown-provider error lists aliases as `alias → profile`.
+- **A thinking block carries `meta?: ProviderMeta`**, on the stored `thinking` content and the
+  `thinking-block` event, as a tool call already did, for an adapter's round-trip state about the block.
 
 ### Bug fixes
 
@@ -648,6 +670,18 @@ a second host's needs.
   on every device, and lights for messages appended to a session (a background job's report) as well as
   for a turn that ended. A session is marked read when it is on screen in a page that is visible. If the
   sessions plugin refuses `markRead` (one without read tracking), the session opens without it.
+
+- **`provider-google`, `provider-openai-compat`** — a Gemini thought signature records the model that
+  minted it (`meta.google.model`), and is replayed only to that model. A message's provider name no longer
+  says which model that was, an alias keeping its name while its profile changes. History from before
+  falls back to the old rule (the same profile name); the OpenAI-compatible gemini mode, which checked
+  nothing, now drops a signature another model minted.
+- **`storage-google-drive`, the browser `provider` tool** — aliases are persisted and replayed with
+  profiles (profiles first; an alias whose target is gone is skipped with a warning), and the browser
+  tool has the `alias` action. The web bundle skips a stored alias whose target this build dropped rather
+  than failing to boot, and a bundle's `matbot.web.json` may declare aliases.
+- **`frontend-telegram`** — with no provider saved, a chat starts on the first configured profile, never an
+  alias.
 
 ---
 

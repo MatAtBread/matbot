@@ -90,7 +90,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
     const body: Record<string, unknown> = {
       model:    config.model,
       [tokenLimitParam(config)]: config.parameters?.maxTokens ?? DEFAULT_MAX_TOKENS,
-      messages:       toOAIMessages(messages, cache, geminiMode),
+      messages:       toOAIMessages(messages, cache, geminiMode, config.model),
       stream:         true,
       stream_options: { include_usage: true },
     };
@@ -224,7 +224,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
         for (const [, call] of toolAccum) {
           try {
             yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
-            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
+            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig, model: config.model } } } : {}) };
           } catch {
             yield { type: 'tool-call', id: call.id, name: call.name, input: {},
               truncated: { bytes: call.args.length, stopReason: choice.finish_reason } };
@@ -248,7 +248,7 @@ export class OpenAICompatAdapter implements ProviderAdapter {
       for (const [, call] of toolAccum) {
         try {
           yield { type: 'tool-call', id: call.id, name: call.name, input: JSON.parse(call.args || '{}'),
-            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig } } } : {}) };
+            ...(call.sig ? { meta: { google: { thoughtSignature: call.sig, model: config.model } } } : {}) };
         } catch {
           cutOff = true;
           yield { type: 'tool-call', id: call.id, name: call.name, input: {},

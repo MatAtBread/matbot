@@ -2,7 +2,7 @@ import type {
   MatbotPluginSpec, MatbotMachine, Principal, Session, FileHandle, Message, Marker, SessionRunner, SessionWrite,
   ToolExecutor, ToolContract, ToolContext, NoParams, ToolResultOf, UserContent, MimeType,
 } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isMediaRejectedError, encodeBase64, SessionAppendKind, lastActivityAt, refusalMessage, describeProviders, isProviderAlias } from '@matatbread/matbot-plugin-api';
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
@@ -314,7 +314,7 @@ export const plugin: MatbotPluginSpec = {
             if (!act.provider) { yield { type: 'error' as const, message: "'set' requires a provider name." }; return; }
 
             if (!svc.providers.has(act.provider)) {
-              const available = [...svc.providers.keys()].join(', ') || '(none configured)';
+              const available = describeProviders(svc.providers) || '(none configured)';
               yield { type: 'error' as const, message: `Unknown provider "${act.provider}". Configured: ${available}.` };
               return;
             }
@@ -481,10 +481,11 @@ export const plugin: MatbotPluginSpec = {
       if (user !== undefined) chatUsers.set(id, user);
     }
 
-    // Restore a previously persisted provider, or fall back to the first configured one.
+    // Restore a previously persisted provider, or fall back to the first configured profile (not an
+    // alias: a role name is something code chooses, and nobody chose one here).
     const savedName    = await settings.get<string>(SETTINGS_KEY_PROVIDER);
     const fallbackName: string = (
-      [...services.providers.keys()][0] ??
+      [...services.providers].find(([, e]) => !isProviderAlias(e))?.[0] ??
       (() => { throw new Error('frontend-telegram: no providers configured'); })()
     );
     const initialName = savedName !== undefined && services.providers.has(savedName)

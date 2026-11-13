@@ -205,6 +205,35 @@ providers:
 - Credentials never in source code
 - Built-in `provider` tool adds/removes profiles live
 
+**Aliases name a role, not a configuration.** An entry may be `alias: <profile>` and nothing else
+(`ProviderAlias`): a stable name by *function* (`text_classifier`) that code, a pinned setting or a
+stored function can hard-code, because the alternative is hard-coding a profile and breaking when it is
+renamed or replaced. A `tool_function` run outside any turn has no provider to inherit and no settings of
+its own, so a name is the only thing it can hold. It is not the reference the rule above rejects: an
+alias carries no fields, so there is nothing to inherit or merge — `parameters` beside `alias:` is
+refused at parse, and a per-call override is `req.parameters`.
+
+- **One hop.** The target is a profile, never an alias, so a cycle cannot be written and resolving is one
+  lookup. Every writer asks `aliasProblem`; the registry enforces it (`register` and `remove` throw).
+  `revert` does not, since a plugin's unload must complete, so an alias can still be left without its
+  target; `resolve` then fails the call naming it.
+- **Resolved at the bottom, persisted as chosen.** `providers.resolve` is called where a provider is
+  called — `complete()` and the session runner's per-turn `resolveProvider` — and nowhere above. A
+  message's `providerName`, a turn's `RunConfig.provider`, `ToolContext.provider` and every pinned setting
+  keep the name that was chosen, so they follow the alias when it moves. What is a fact about the CALL
+  records the profile: a usage entry (rates are the model's), and the config an adapter is handed.
+- **An adapter that trusts round-trip state by provider identity records the model** in its own
+  `ProviderMeta` slice, because `providerName` no longer says which model produced a message: an alias
+  keeps its name while its profile changes. Google's thought signatures do (`meta.google.model`, on tool
+  calls and thinking blocks), falling back to the profile name for history written before.
+- **Pickers show profiles.** `provider list` reports aliases under `aliases`, apart from `providers`, so
+  a frontend offering what a person runs on shows no role names, and code reading a profile's fields off
+  a row needs no narrowing. A list a MODEL reads (an unknown-provider error) shows them as
+  `alias → profile` (`describeProviders`), so it learns the role names exist.
+- **No plugin defaults to a well-known alias name.** That is the `skills-classifier` pattern triggers
+  retired in 0.5.0: a magic name that changed behaviour by existing. An alias works only where a call
+  site names it.
+
 **Provider round-trip metadata (`ProviderMeta`).** Some providers require an opaque token to be echoed back verbatim when a tool-call is replayed in history — e.g. Gemini 3 "thought signatures", mandatory on every historical `functionCall` or the request 400s. This rides on a tool-call's `meta?: ProviderMeta` (on both `CompletionEvent` and `MessageContent`). `ProviderMeta` is an empty, **augmentable** interface (same idiom as `MatbotServices`/`MarkerData`): a provider package declares its own namespaced slice from its own module (`interface ProviderMeta { google?: { thoughtSignature?: string } }`), so core carries `meta` opaquely — stores, renders, or elides it — and **never changes when a provider adds round-trip state**. It's interface augmentation, not a generic parameter, because one session interleaves tool-calls from many providers. An adapter replays a token only when the message that produced it came from the *current* provider (a foreign token is elided/degraded, never posted into a slot it doesn't belong in).
 
 ---

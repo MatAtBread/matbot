@@ -181,6 +181,8 @@ async function main() {
 
   const providers = {};
   for (const [pname, cfg] of Object.entries(config.providers ?? {})) {
+    // An alias names another entry and loads nothing; the registry checks its target at boot.
+    if (cfg.alias !== undefined) { providers[pname] = { alias: cfg.alias }; continue; }
     const { id, name, runtimes, version } = await entryForPath(cfg.module);
     rootIds.push(id);
     const spec = SYN(id);
@@ -259,7 +261,7 @@ async function main() {
   // NAME (the durable form the wizard now writes) fails to resolve at import time. Same rationale as the
   // bundled plugins beside them.
   const packageEntries = { ...usedNames };
-  for (const spec of [...pluginSpecs, ...bundledSpecs, ...availableProviderSpecs, ...Object.values(providers).map(p => p.module)]) {
+  for (const spec of [...pluginSpecs, ...bundledSpecs, ...availableProviderSpecs, ...Object.values(providers).flatMap(p => p.module !== undefined ? [p.module] : [])]) {
     const id = spec.slice('mbmod:'.length);
     const name = specNames[spec];
     if (name) packageEntries[name] = id;

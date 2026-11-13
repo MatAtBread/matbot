@@ -1,13 +1,13 @@
-import type { Store, MatbotMachine, ProviderConfig, ProviderPatch } from '@matatbread/matbot-plugin-api';
-import { applyProviderPatch, movedCredentialKeys } from '@matatbread/matbot-plugin-api';
-import type { ProviderDraft, ProviderSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
+import type { Store, MatbotMachine, ProviderConfig, ProviderEntry, ProviderPatch } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, isProviderAlias, movedCredentialKeys } from '@matatbread/matbot-plugin-api';
+import type { ProviderDraft, ProviderSummary, ProviderAliasSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
 
 interface ManifestDoc {
   id:        string;
   version:   string;
-  providers: ProviderConfig[];
+  providers: ProviderEntry[];
 }
 
 /**
@@ -24,11 +24,11 @@ export class DriveProviderSet {
     this.store = store;
   }
 
-  async list(): Promise<ProviderConfig[]> {
+  async list(): Promise<ProviderEntry[]> {
     return (await this.store.get(DOC_ID))?.providers ?? [];
   }
 
-  async add(config: ProviderConfig): Promise<void> {
+  async add(config: ProviderEntry): Promise<void> {
     const cur = (await this.list()).filter(p => p.name !== config.name);
     await this.store.set(DOC_ID, { id: DOC_ID, version: crypto.randomUUID(), providers: [...cur, config] });
   }
@@ -48,7 +48,8 @@ function credentialVar(name: string): string {
   return `MATBOT_API_KEY_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
 }
 
-function toRow(p: ProviderConfig): ProviderSummary {
+function toRow(p: ProviderEntry): ProviderSummary | ProviderAliasSummary {
+  if (isProviderAlias(p)) return { name: p.name, alias: p.alias };
   return {
     name:   p.name,
     module: p.module,
@@ -95,16 +96,23 @@ export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotM
     // does not name — unless the endpoint moves origin, when the vault is asked only for a fresh key name.
     async update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined> {
       const cur = services.providers.get(name);
-      if (cur === undefined) return undefined;
+      if (cur === undefined || isProviderAlias(cur)) return undefined;
       const next = applyProviderPatch(cur, patch, services.Vault);
       await driveSet.add(next);
       services.providers.register(next);
       return movedCredentialKeys(cur, next);
     },
+    // The registry first: it refuses a profile an alias points at, and the manifest must not lose what
+    // the live set kept.
     async remove(name: string): Promise<boolean> {
+      const removed = services.providers.remove(name);
       await driveSet.remove(name);
-      return services.providers.remove(name);
+      return removed;
     },
-    get: name => services.providers.get(name),
+    async alias(name: string, target: string): Promise<void> {
+      services.providers.register({ name, alias: target });
+      await driveSet.add({ name, alias: target });
+    },
+    get: name => { const e = services.providers.get(name); return e === undefined || isProviderAlias(e) ? undefined : e; },
   };
 }

@@ -1,9 +1,9 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
-              ProviderSummary, AvailableProvider,
+              ProviderSummary, ProviderAliasSummary, AvailableProvider,
               ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, movedCredentialNote } from '@matatbread/matbot-plugin-api';
 
-export type { AvailableProvider, ProviderSummary };
+export type { AvailableProvider, ProviderSummary, ProviderAliasSummary };
 
 /** Everything the user supplies for one provider — the browser equivalent of the CLI setup wizard. */
 export interface ProviderDraft {
@@ -27,13 +27,18 @@ export interface ProviderDraft {
  */
 export interface ProviderAdmin {
   available: AvailableProvider[];
-  list(): ProviderSummary[];
+  list(): (ProviderSummary | ProviderAliasSummary)[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
   /** Apply a patch to an existing profile with `applyProviderPatch`, and say which vault keys its credential
    *  is now read from where the endpoint moved origin and the credential did not follow (empty otherwise).
    *  `undefined` ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
   update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined>;
+  /** Throws, with a message for the caller, when the provider registry refuses it — a profile an alias
+   *  points at, which would leave the alias failing at every call. */
   remove(name: string): Promise<boolean>;
+  /** Create or repoint the alias `name` so it runs on the profile `target`, and persist it. Throws, with a
+   *  message for the caller, when the registry refuses the alias (see `aliasProblem`). */
+  alias(name: string, target: string): Promise<void>;
   /** The stored profile, credential placeholders and all — what `update` checks its model against before
    *  applying. Absent, an update's model is not checked. */
   get?(name: string): ProviderConfig | undefined;
@@ -43,7 +48,8 @@ type ProviderInput =
   | { action: 'list' }
   | { action: 'add'; name: string; module: string; endpoint?: string; model?: string; parameters?: ModelParameters }
   | ({ action: 'update'; name: string } & ProviderPatch)
-  | { action: 'remove'; name: string };
+  | { action: 'remove'; name: string }
+  | { action: 'alias'; name: string; alias: string };
 
 /**
  * Browser `provider` tool. The portable analogue of the node provider tool: it manages the same
@@ -93,7 +99,12 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       const act = input as ProviderInput;
 
       if (act.action === 'list') {
-        yield { type: 'result', value: { providers: admin.list(), adapters: admin.available } };
+        const rows = admin.list();
+        yield { type: 'result', value: {
+          providers: rows.filter((r): r is ProviderSummary => !('alias' in r)),
+          aliases:   rows.filter((r): r is ProviderAliasSummary => 'alias' in r),
+          adapters:  admin.available,
+        } };
         return;
       }
 
@@ -164,6 +175,11 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       if (act.action === 'update') {
         const { action: _a, name, ...patch } = act;
         if (!name) { yield { type: 'error', message: 'update requires a "name".' }; return; }
+        const aliased = admin.list().find(r => r.name === name);
+        if (aliased !== undefined && 'alias' in aliased) {
+          yield { type: 'error', message: `"${name}" is an alias of "${aliased.alias}", and has no fields of its own to update. Use action "alias" to point it at another profile, or update "${aliased.alias}" itself.` };
+          return;
+        }
 
         const supplied = (['model', 'endpoint', 'parameters', 'maxRounds'] as const).filter(f => patch[f] !== undefined);
         if (supplied.length === 0) {
@@ -208,18 +224,40 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
           return;
         }
 
-        const rows = admin.list();
-        if (!rows.some(r => r.name === act.name)) {
+        const rows  = admin.list();
+        const entry = rows.find(r => r.name === act.name);
+        if (entry === undefined) {
           yield { type: 'result', value: { message: `No provider named "${act.name}".` } };
           return;
         }
-        if (rows.length <= 1) {
+        // Counted in profiles: aliases run nothing of their own, so they are no replacement for the last.
+        if (!('alias' in entry) && rows.filter(r => !('alias' in r)).length <= 1) {
           yield { type: 'result', value: { message: `Cannot remove "${act.name}" — it is the only configured provider. Add a replacement profile first.` } };
           return;
         }
 
-        const ok = await admin.remove(act.name);
-        yield { type: 'result', value: { message: ok ? `Provider "${act.name}" removed.` : `No provider named "${act.name}".` } };
+        let ok: boolean;
+        try { ok = await admin.remove(act.name); }
+        catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
+        yield { type: 'result', value: { message: ok ? `${'alias' in entry ? 'Alias' : 'Provider'} "${act.name}" removed.` : `No provider named "${act.name}".` } };
+        return;
+      }
+
+      if (act.action === 'alias') {
+        const { name, alias: target } = act;
+        if (!name || !target) { yield { type: 'error', message: 'alias requires "name" (the alias) and "alias" (the profile it runs on).' }; return; }
+        const cur = admin.list().find(r => r.name === name);
+        if (cur !== undefined && !('alias' in cur)) {
+          yield { type: 'error', message: `"${name}" is a provider profile, not an alias. Choose another name, or remove the profile first.` };
+          return;
+        }
+        if (cur !== undefined && cur.alias === target) {
+          yield { type: 'result', value: { message: `"${name}" is already an alias of "${target}".` } };
+          return;
+        }
+        try { await admin.alias(name, target); }
+        catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
+        yield { type: 'result', value: { message: `"${name}" now runs on "${target}", from the next call that uses it.` } };
         return;
       }
 
@@ -241,8 +279,12 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'to see them — each carries `endpointHint`/`modelHint` and whether it is `selfContained`). A ' +
       '`selfContained` adapter (e.g. a local demo LLM) needs no endpoint, model, or key at all — omit ' +
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
-      'configured profile or the one powering the current turn — add a replacement first or switch ' +
-      'providers.\n\n' +
+      'configured profile, the one powering the current turn, or one an alias points at — add a ' +
+      'replacement first or switch providers.\n\n' +
+      'ALIAS creates or repoints an alias: `name` is a stable name for a ROLE (e.g. "text_classifier") and ' +
+      '`alias` the profile it runs on. Name the alias wherever a provider name is fixed (a pinned setting, ' +
+      'a function run outside any turn) and point it elsewhere later without touching those. Its target ' +
+      'must be a profile, never another alias; `list` reports aliases apart from profiles, under `aliases`.\n\n' +
       'UPDATE changes `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile: supply ' +
       'the name plus only the fields to change, an explicit `null` to clear one (not `model` — a ' +
       'profile must keep one). `parameters` is replaced WHOLESALE, not merged, so `list` first and send ' +
@@ -258,8 +300,9 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       type:     'object',
       required: ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'add', 'update', 'remove'] },
-        name:     { type: 'string', description: 'Profile name (add/update/remove).' },
+        action:   { type: 'string', enum: ['list', 'add', 'update', 'remove', 'alias'] },
+        name:     { type: 'string', description: 'Profile or alias name (add/update/remove/alias).' },
+        alias:    { type: 'string', description: 'The profile the alias named by `name` runs on (alias only).' },
         module:   { type: 'string', description: 'Adapter type — label, module, or index from `list` (add only; update cannot change it).' },
         // `['string','null']` here and below: null is update's clear signal, and inputSchema is an
         // enforcement point (json-validation) as well as documentation.

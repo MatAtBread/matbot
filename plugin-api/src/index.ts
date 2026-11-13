@@ -18,6 +18,7 @@ export * from './errors.js';
 export * from './vault.js';
 export * from './provider-patch.js';
 export * from './provider-models.js';
+export * from './provider-alias.js';
 export * from './session.js';
 export * from './invoke-tool.js';
 export * from './fetch-origin.js';

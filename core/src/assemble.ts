@@ -7,7 +7,7 @@ import {
   HookRegistry,
 } from '@matatbread/matbot-plugin-api/host';
 import type { SwapFn } from '@matatbread/matbot-plugin-api/host';
-import { notifyingStore, createMessage } from '@matatbread/matbot-plugin-api';
+import { notifyingStore, createMessage, describeProviders } from '@matatbread/matbot-plugin-api';
 import { mediumGuard } from './storage-base/medium-guard.js';
 import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
@@ -312,8 +312,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     registerFrontend() { /* bound per plugin in setupPlugin's scope */ },
 
     async complete(req) {
-      const raw = providers.get(req.provider);
-      if (raw === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${[...providers.keys()].join(', ')}`);
+      // An alias is resolved here, where the call is made, and nowhere above.
+      const raw = providers.resolve(req.provider);
+      if (raw === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${describeProviders(providers)}`);
       const resolved = await resolveConfig({
         ...raw,
         // Per-call overrides shallow-merged over the config's own parameters (request wins).
@@ -334,8 +335,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
         if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Into the ambient usage sink, so a tool running this completion has its spend attributed to the
-      // site in force. Measured here because this is where the call is issued.
-      recordUsage(req.provider, usage, { startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt });
+      // site in force. Measured here because this is where the call is issued. Under the profile that ran,
+      // never an alias: the entry is priced by the model's rates, and an alias moves.
+      recordUsage(raw.name, usage, { startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt });
       return { text, usage };
     },
     async singleTurn(req) {
@@ -363,10 +365,11 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   };
   const services: MatbotMachine = unifyServices(baseServices);
 
-  // Resolved per turn, so it sees live `provider` edits. instantiateProvider force-loads an adapter that
-  // is not registered yet, and yields null rather than throwing when it cannot.
+  // Resolved per turn, so it sees live `provider` edits, and an alias here, where the turn calls it: the
+  // runner keeps the name it was given, which is what a message records. instantiateProvider force-loads
+  // an adapter that is not registered yet, and yields null rather than throwing when it cannot.
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
-    const cfg = providers.get(name);
+    const cfg = providers.resolve(name);
     if (cfg === undefined) return null;
     const config  = await resolveConfig(cfg);
     const adapter = await instantiateProvider(services, config);

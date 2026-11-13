@@ -1,6 +1,6 @@
-import type { ProviderConfig, Session, Store, SessionRunner, Vault } from '@matatbread/matbot-core';
+import type { Session, Store, SessionRunner, Vault } from '@matatbread/matbot-core';
 import { appendMessage, createMessage, createSession, currentPrincipal, teardownPlugins,
-         isMissingSecretError } from '@matatbread/matbot-core';
+         isMissingSecretError, describeProviders } from '@matatbread/matbot-core';
 import { MemoryStore }       from '@matatbread/matbot-core/storage-base';
 import { createInterface }   from 'node:readline/promises';
 import process               from 'node:process';
@@ -65,23 +65,19 @@ export async function converse(
 
   // ── Provider resolution ───────────────────────────────────────────────────────
 
+  // The name chosen is what the turn runs under and its messages record, alias or not; the profile it
+  // resolves to is read only to settle its credentials before the first turn.
   const providerName = opts.provider ?? config.defaultProvider ?? (providers.keys().next().value as string);
-  const rawConfig    = providers.get(providerName);
+  const rawConfig    = providers.resolve(providerName);
   if (!rawConfig) {
     throw new Error(
-      `Unknown provider "${providerName}". Available: ${[...providers.keys()].join(', ')}`
+      `Unknown provider "${providerName}". Available: ${describeProviders(providers)}`
     );
   }
 
-  const providerConfig: ProviderConfig = {
-    name:        rawConfig.name,
-    module:      rawConfig.module,
-    model:       rawConfig.model,
-    ...(rawConfig.credentials !== undefined ? { credentials: await resolveCredentialsInteractive(rawConfig.credentials, vault) } : {}),
-    ...(rawConfig.endpoint    !== undefined ? { endpoint: await vault.resolve(rawConfig.endpoint) } : {}),
-    ...(rawConfig.parameters  !== undefined ? { parameters: rawConfig.parameters } : {}),
-    ...(rawConfig.maxRounds   !== undefined ? { maxRounds:  rawConfig.maxRounds  } : {}),
-  };
+  // Asked for now, before a session or turn exists, so a missing key is a prompt here and not a failed turn.
+  if (rawConfig.credentials !== undefined) await resolveCredentialsInteractive(rawConfig.credentials, vault);
+  if (rawConfig.endpoint    !== undefined) await vault.resolve(rawConfig.endpoint);
 
   // ── Session ───────────────────────────────────────────────────────────────────
 
@@ -136,7 +132,7 @@ export async function converse(
   // ── Single-turn ──────────────────────────────────────────────────────────────
   if (prompt !== undefined) {
     try {
-      await runTurn(session, prompt, cliRun, providerConfig.name, principal, turnPrompt);
+      await runTurn(session, prompt, cliRun, providerName, principal, turnPrompt);
     } finally {
       rl.close();
       await teardownPlugins();
@@ -158,7 +154,7 @@ export async function converse(
       endInput();
       if (!line.trim()) continue;
       process.stderr.write(cyanErr('assistant: '));
-      session = await runTurn(session, line, cliRun, providerConfig.name, principal, turnPrompt);
+      session = await runTurn(session, line, cliRun, providerName, principal, turnPrompt);
     }
   } finally {
     rl.close();

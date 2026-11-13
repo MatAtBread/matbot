@@ -70,7 +70,7 @@ export class GoogleAdapter implements ProviderAdapter {
     if (config.parameters?.['thinking']) generationConfig['thinkingConfig'] = { includeThoughts: true };
 
     const body: Record<string, unknown> = {
-      contents:         toGeminiContents(messages, config.name),
+      contents:         toGeminiContents(messages, { name: config.name, model: config.model }),
       generationConfig,
     };
     const system = toGeminiSystem(messages);
@@ -119,7 +119,7 @@ export class GoogleAdapter implements ProviderAdapter {
             id:    part.functionCall.id ?? `call_${crypto.randomUUID()}`,
             name:  part.functionCall.name,
             input: part.functionCall.args ?? {},
-            ...(sig !== undefined ? { meta: { google: { thoughtSignature: sig } } } : {}),
+            ...(sig !== undefined ? { meta: { google: { thoughtSignature: sig, model: config.model } } } : {}),
           };
         } else if (part.thought === true && part.text) {
           sawAny = true;
@@ -133,7 +133,7 @@ export class GoogleAdapter implements ProviderAdapter {
       }
     }
 
-    if (thinkingAcc) yield { type: 'thinking-block', thinking: thinkingAcc, signature: thinkingSig };
+    if (thinkingAcc) yield { type: 'thinking-block', thinking: thinkingAcc, signature: thinkingSig, meta: { google: { model: config.model } } };
 
     if (lastUsage) {
       const prompt = lastUsage.promptTokenCount ?? 0;

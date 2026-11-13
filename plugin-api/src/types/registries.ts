@@ -1,6 +1,6 @@
 import type { Hook, ToolInputError } from './hooks.js';
 import type { Session } from './messages.js';
-import type { ProviderConfig } from './provider.js';
+import type { ProviderConfig, ProviderEntry } from './provider.js';
 import type { Tool } from './tools.js';
 
 // ── Registries ────────────────────────────────────────────────────────────────
@@ -76,11 +76,23 @@ export interface ToolPresenter {
  * *contribute* profiles live — a storage backend replaying provider definitions it captured in its own
  * medium, or the built-in `provider` tool — exactly as a plugin contributes tools via {@link ToolRegistry}.
  * Keyed by `config.name`; `register` upserts.
+ *
+ * A value is a profile or a {@link ProviderAlias} of one, so a reader of a profile's fields
+ * (`module`, `model`) narrows first (`isProviderAlias`); `has` is true for both, since an alias is a
+ * name a caller may use anywhere a profile's is. `resolve` is the one way from a name to the profile
+ * that runs.
  */
-export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
-  register(config: ProviderConfig): void;
-  /** Explicit delete (the `provider` tool's `remove`) — removes the profile outright. */
+export interface ProviderRegistry extends ReadonlyMap<string, ProviderEntry> {
+  /** Throws if the entry would break the one-hop rule: an alias whose target is not a profile, or a
+   *  name that aliases point at being turned into an alias itself. */
+  register(entry: ProviderEntry): void;
+  /** Explicit delete (the `provider` tool's `remove`) — removes the entry outright. Throws if it is a
+   *  profile an alias points at: the alias would go on being accepted and then fail at every call. */
   remove(name: string): boolean;
+  /** The profile `name` runs on: itself, or its alias's target. `undefined` when the name is not
+   *  configured; throws (`invalid`) when it is an alias whose target is not, which `revert` or a
+   *  hand-edited store can leave behind. */
+  resolve(name: string): ProviderConfig | undefined;
   /**
    * Undo a contribution: restore the boot-baseline profile for `name` if one existed (a plugin-supplied
    * profile that shadowed a configured one), otherwise delete it. A plugin that registers providers

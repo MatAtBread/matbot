@@ -444,7 +444,7 @@ interface MatbotRuntime {
 
   readonly TypeScriptStripper: TypeScriptStripper;   // host-provided, per-platform TS type-stripper
   readonly mounted:         Mounted;                 // react to a registry service (re)mounting / unloading
-  readonly providers:       ProviderRegistry;        // named provider profiles (a writable ReadonlyMap)
+  readonly providers:       ProviderRegistry;        // named provider profiles and aliases (a writable ReadonlyMap)
   readonly sessions?:       Store<Session>;
   readonly run?:            SessionRunner;            // per-session turn serialiser
   readonly self?:           PluginSelf;               // the calling plugin's loader-stamped identity
@@ -946,7 +946,11 @@ export const plugin: MatbotPluginSpec = {
 ```
 
 A provider is selected by name in `matbot.yaml` (each named block sets `module`, `endpoint`,
-`model`, and `credentials`); the `module` resolves to the package exporting this spec.
+`model`, and `credentials`); the `module` resolves to the package exporting this spec. A block holding
+only `alias: <profile>` is a stable name for a role that runs on that profile: your adapter is handed the
+profile's config, while the messages it produces record the alias. So an adapter that trusts round-trip
+state only from "the same provider" records the model in its own `ProviderMeta` slice and compares that
+(the Google adapter's thought signatures do), since an alias keeps its name when its profile changes.
 
 **Classify your failures.** Throw `await responseError('MyProvider', res)`
 (`@matatbread/matbot-core/providers-base`) for a non-ok response: it keeps the status and body in the
@@ -963,7 +967,7 @@ from the endpoint's own word for it with `withFailure`, as the Anthropic adapter
 | `tool-call` | `id, name, input`, `meta?: ProviderMeta`, `truncated?: { bytes, stopReason? }` |
 | `tool-result` | `id, result` |
 | `thinking` | `delta: string` |
-| `thinking-block` | `thinking, signature` |
+| `thinking-block` | `thinking, signature`, `meta?: ProviderMeta` |
 | `redacted-thinking` | `data: string` |
 | `reasoning-block` | `reasoning: string` |
 | `refusal` | `text: string` |

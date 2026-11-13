@@ -1,7 +1,7 @@
 import type {
   Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
-import { collectBytes, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { collectBytes, describeProviders, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import { withCallFrames } from '@matatbread/matbot-plugin-api/host';
 import { withFailureNote } from './runner.js';
 // The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
@@ -223,7 +223,7 @@ export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<
         const provider = turn.provider ?? ctx.provider;
         if (!provider) { yield { type: 'error', message: `${where} needs a "provider": none was given and there is no current turn provider to fall back to.` }; return; }
         if (!machine.providers.has(provider)) {
-          const known = [...machine.providers.keys()].join(', ') || '(none configured)';
+          const known = describeProviders(machine.providers) || '(none configured)';
           yield { type: 'error', message: `${where} names an unknown provider "${provider}". Configured providers: ${known}.` };
           return;
         }

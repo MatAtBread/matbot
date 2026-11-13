@@ -1,10 +1,10 @@
-import type { ModelParameters, Principal, ProviderConfig } from '@matatbread/matbot-core';
+import type { ModelParameters, Principal, ProviderConfig, ProviderEntry } from '@matatbread/matbot-core';
 import { parseYaml, type YamlMap, type YamlValue } from './yaml.js';
 
 export interface MatbotConfig {
   /** Ordered list of plugin specifiers to load at startup (npm names or URL paths) */
   plugins:    readonly string[];
-  providers:  Map<string, ProviderConfig>;
+  providers:  Map<string, ProviderEntry>;
   /** If set, run this prompt as a single non-interactive turn then exit. */
   prompt?:           string;
   /** If true, do not persist the session. */
@@ -44,6 +44,18 @@ function toModelParameters(raw: YamlMap): ModelParameters {
     params[k] = v as ModelParameters[string];
   }
   return params;
+}
+
+// An alias carries its target and nothing else, so a stray key beside it is refused rather than ignored:
+// `alias:` with `parameters:` reads like an override, and an alias that silently dropped it would run
+// with neither. Whether the target exists is the registry's to check, once every entry is read.
+function toProviderEntry(name: string, raw: YamlMap): ProviderEntry {
+  if (raw['alias'] === undefined) return toProviderConfig(name, raw);
+  const extra = Object.keys(raw).filter(k => k !== 'alias');
+  if (extra.length > 0) {
+    throw new Error(`Config: "providers.${name}" is an alias, which takes nothing but "alias"; remove ${extra.map(k => `"${k}"`).join(', ')}`);
+  }
+  return { name, alias: asString(raw['alias'], `providers.${name}.alias`) };
 }
 
 function toProviderConfig(name: string, raw: YamlMap): ProviderConfig {
@@ -117,12 +129,12 @@ export function parseConfig(
   }
 
   const providersRaw = doc['providers'];
-  const providers    = new Map<string, ProviderConfig>();
+  const providers    = new Map<string, ProviderEntry>();
 
   if (providersRaw !== undefined && providersRaw !== null) {
     const providersMap = asRecord(providersRaw, 'providers');
     for (const [name, raw] of Object.entries(providersMap)) {
-      providers.set(name, toProviderConfig(name, asRecord(raw, `providers.${name}`)));
+      providers.set(name, toProviderEntry(name, asRecord(raw, `providers.${name}`)));
     }
   }
 

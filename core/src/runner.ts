@@ -401,7 +401,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       const u = turnUsage;
       if (u === undefined) return;
       turnUsage = undefined;
-      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u, {
+      // Under the profile that ran, never an alias of it (`config.provider` may be one): an entry is priced
+      // by the model's rates, and an alias moves.
+      withUsageSite({ kind: 'round', round }, () => recordUsage(providerConfig.name, u, {
         startedAt:  new Date(roundStartedAt).toISOString(),
         durationMs: Date.now() - roundStartedAt,
       }));
@@ -467,7 +469,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             yield { type: 'progress', pct: ev.pct, ...(ev.message !== undefined ? { message: ev.message } : {}), traceId };
             break;
           case 'thinking-block':
-            assistantParts.push({ type: 'thinking', thinking: ev.thinking, signature: ev.signature });
+            assistantParts.push({ type: 'thinking', thinking: ev.thinking, signature: ev.signature, ...(ev.meta !== undefined ? { meta: ev.meta } : {}) });
             break;
           case 'redacted-thinking':
             assistantParts.push({ type: 'redacted-thinking', data: ev.data });

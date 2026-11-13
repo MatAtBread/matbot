@@ -1,7 +1,8 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ProviderRegistry, MatbotPlugin,
-              ProviderPatch, ProviderConfig } from '@matatbread/matbot-core';
+              ProviderPatch, ProviderConfig, ProviderEntry } from '@matatbread/matbot-core';
 
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-core';
+import { aliasProblem, describeProvider, describeProviders, isProviderAlias, removalProblem } from '@matatbread/matbot-core';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -24,7 +25,8 @@ type ProviderInput =
       maxRounds?:        number;
     }
   | ({ action: 'update'; name: string } & ProviderPatch)
-  | { action: 'remove'; name: string };
+  | { action: 'remove'; name: string }
+  | { action: 'alias'; name: string; alias: string };
 
 // ── YAML helpers (read/write only — runtime state comes from liveProviders) ───
 
@@ -142,6 +144,10 @@ function buildProviderBlock(opts: {
   return lines.join('\n') + '\n';
 }
 
+function buildAliasBlock(name: string, target: string): string {
+  return `  ${name}:\n    alias: ${target}\n`;
+}
+
 /**
  * Why this config cannot be written to matbot.yaml and read back as itself — `undefined` when it can.
  * The `unstorableKey` idiom: return the rule, for whoever must now pick another value.
@@ -181,9 +187,9 @@ function unrepresentableYamlValue(cfg: ProviderConfig): string | undefined {
  * lost, and the block moves to the end of `providers:`. That is the accepted cost of not carrying a
  * round-tripping YAML editor; every other block in the file is untouched.
  */
-export async function writeProviderBlock(configPath: string, cfg: ProviderConfig): Promise<boolean> {
+export async function writeProviderBlock(configPath: string, cfg: ProviderEntry): Promise<boolean> {
   if (!await removeProviderFromConfig(configPath, cfg.name)) return false;
-  await addProviderToConfig(configPath, buildProviderBlock({
+  await addProviderToConfig(configPath, isProviderAlias(cfg) ? buildAliasBlock(cfg.name, cfg.alias) : buildProviderBlock({
     name:   cfg.name,
     module: cfg.module,
     model:  cfg.model,
@@ -324,7 +330,7 @@ function makeExecutor(
         yield {
           type:  'result',
           value: {
-            providers: [...providers.values()].map(cfg => ({
+            providers: [...providers.values()].filter((e): e is ProviderConfig => !isProviderAlias(e)).map(cfg => ({
               name:           cfg.name,
               module:         cfg.module,
               model:          cfg.model,
@@ -333,6 +339,7 @@ function makeExecutor(
               ...(cfg.parameters !== undefined ? { parameters: cfg.parameters } : {}),
               ...(cfg.maxRounds  !== undefined ? { maxRounds:  cfg.maxRounds  } : {}),
             })),
+            aliases: [...providers.values()].flatMap(e => isProviderAlias(e) ? [{ name: e.name, alias: e.alias }] : []),
           },
         };
         return;
@@ -490,17 +497,22 @@ function makeExecutor(
       if (action === 'update') {
         const { name, ...patch } = input as Extract<ProviderInput, { action: 'update' }>;
 
-        const cur = providers.get(name);
-        if (cur === undefined) {
+        const entry = providers.get(name);
+        if (entry === undefined) {
           // An error, not a result: naming a profile that does not exist is a failed update, and a
           // programmatic caller (a trigger, `invokeTool`, `POST /tools/provider`) has no way to tell a
           // prose "no profile named…" apart from a successful one.
           yield {
             type:    'error',
-            message: `No profile named "${name}" found. Configured profiles: ${[...providers.keys()].map(n => `"${n}"`).join(', ')}.`,
+            message: `No profile named "${name}" found. Configured profiles: ${[...providers.values()].map(e => `"${describeProvider(e)}"`).join(', ')}.`,
           };
           return;
         }
+        if (isProviderAlias(entry)) {
+          yield { type: 'error', message: `"${name}" is an alias of "${entry.alias}", and has no fields of its own to update. Use action "alias" to point it at another profile, or update "${entry.alias}" itself.` };
+          return;
+        }
+        const cur = entry;
 
         const supplied = patchedFields(patch);
         if (supplied.length === 0) {
@@ -585,7 +597,9 @@ function makeExecutor(
         // Deliberately not refused when it is the profile powering this turn: the resolution that
         // produced the running adapter already happened, so nothing about the current turn changes and
         // there is nothing to be inconsistent with. Say when it takes effect rather than saying no.
-        const isCurrent = currentProviderName(ctx) === name;
+        const running   = currentProviderName(ctx);
+        const runningAs = running === undefined ? undefined : providers.get(running);
+        const isCurrent = running === name || (runningAs !== undefined && isProviderAlias(runningAs) && runningAs.alias === name);
         yield {
           type:  'result',
           value: {
@@ -610,11 +624,18 @@ function makeExecutor(
           return;
         }
 
-        if (!providers.has(name)) {
+        const entry = providers.get(name);
+        if (entry === undefined) {
           yield { type: 'result', value: { message: `No profile named "${name}" found.` } };
           return;
         }
-        if (providers.size <= 1) {
+        const blocked = removalProblem(providers, name);
+        if (blocked !== undefined) {
+          yield { type: 'error', message: blocked };
+          return;
+        }
+        // Counted in profiles: aliases run nothing of their own, so they are no replacement for the last.
+        if (!isProviderAlias(entry) && [...providers.values()].filter(e => !isProviderAlias(e)).length <= 1) {
           yield {
             type:  'result',
             value: { message: `Cannot remove "${name}" — it is the only configured provider. Add a replacement profile first.` },
@@ -623,7 +644,9 @@ function makeExecutor(
         }
 
         const permit = await ctx.gate({ gate: 'remove', subject: name, fallback: false,
-                                        label: `Remove provider profile **"${name}"**?` });
+                                        label: isProviderAlias(entry)
+                                          ? `Remove provider alias **"${name}"** (of "${entry.alias}")?`
+                                          : `Remove provider profile **"${name}"**?` });
         if (!permit.allowed) {
           yield { type: 'result', value: { message: refusalMessage(permit) } };
           return;
@@ -636,7 +659,57 @@ function makeExecutor(
         }
 
         providers.remove(name);
-        yield { type: 'result', value: { message: `Profile "${name}" removed.` } };
+        yield { type: 'result', value: { message: `${isProviderAlias(entry) ? 'Alias' : 'Profile'} "${name}" removed.` } };
+        return;
+      }
+
+      // ── alias ──────────────────────────────────────────────────────────────
+      if (action === 'alias') {
+        const { name, alias: target } = input as Extract<ProviderInput, { action: 'alias' }>;
+        if (!name || !target) {
+          yield { type: 'error', message: 'alias requires "name" (the alias) and "alias" (the profile it runs on).' };
+          return;
+        }
+
+        const cur = providers.get(name);
+        if (cur !== undefined && !isProviderAlias(cur)) {
+          yield { type: 'error', message: `"${name}" is a provider profile, not an alias. Choose another name, or remove the profile first.` };
+          return;
+        }
+        if (cur?.alias === target) {
+          yield { type: 'result', value: { message: `"${name}" is already an alias of "${target}".` } };
+          return;
+        }
+        const problem = aliasProblem(providers, { name, alias: target });
+        if (problem !== undefined) {
+          yield { type: 'error', message: `${problem} Configured: ${describeProviders(providers)}.` };
+          return;
+        }
+
+        // Gated even though nothing new is configured: retargeting a role name sends everything that uses
+        // it — every message a pinned classifier judges, say — to another model and endpoint.
+        const runsOn = providers.get(target);
+        const via    = runsOn !== undefined && !isProviderAlias(runsOn) ? ` (${runsOn.model} via ${runsOn.module})` : '';
+        const permit = await ctx.gate({ gate: 'alias', subject: name, fallback: false,
+                                        label: cur !== undefined
+                                          ? `Point provider alias **"${name}"** at **"${target}"**${via}, instead of "${cur.alias}"?`
+                                          : `Add provider alias **"${name}"** for **"${target}"**${via}?` });
+        if (!permit.allowed) {
+          yield { type: 'result', value: { message: refusalMessage(permit) } };
+          return;
+        }
+
+        const next = { name, alias: target };
+        if (cur === undefined) await addProviderToConfig(configPath, buildAliasBlock(name, target));
+        else if (!await writeProviderBlock(configPath, next)) {
+          yield {
+            type:    'error',
+            message: `Alias "${name}" is not defined in ${path.basename(configPath)} — it was contributed at runtime, so its definition lives elsewhere and cannot be edited here.`,
+          };
+          return;
+        }
+        providers.register(next);
+        yield { type: 'result', value: { message: `"${name}" now runs on "${target}"${via}, from the next call that uses it.` } };
       }
     },
   };
@@ -666,7 +739,7 @@ export function createProviderTool(
     : '  (no provider adapter plugins loaded — check matbot.yaml plugins list)';
 
   const profileList = providers.size > 0
-    ? [...providers.keys()].map(n => `"${n}"`).join(', ')
+    ? [...providers.values()].map(e => `"${describeProvider(e)}"`).join(', ')
     : '(none — use add to create the first one)';
 
   return {
@@ -683,8 +756,11 @@ ACTIONS
            out-of-band for security and never stored in session history.
   update — Change model, endpoint, parameters or maxRounds on an existing
            profile, leaving its credentials untouched. See UPDATE below.
-  remove — Delete a profile by name. Refuses if it is the only profile or
-           the one powering the current turn.
+  remove — Delete a profile or an alias by name. Refuses if it is the only
+           profile, the one powering the current turn, or one an alias
+           points at.
+  alias  — Create an alias, or point an existing one at another profile:
+           name is the alias, alias is the profile it runs on. See ALIASES.
 
 UPDATE  (for a renamed model, a moved endpoint, a parameter change)
   Supply the profile name plus only the fields to change. An omitted field is
@@ -704,6 +780,13 @@ UPDATE  (for a renamed model, a moved endpoint, a parameter change)
 
   Takes effect on the next turn. The profile's block in matbot.yaml is
   regenerated, so comments inside that one block are not preserved.
+
+ALIASES  (a stable name for a ROLE, e.g. "text_classifier")
+  An alias stands for one profile and carries nothing else. Name a role's
+  alias wherever a provider name is fixed — a pinned setting, a function that
+  runs outside any turn — and point it elsewhere later without touching those.
+  Its target must be a profile, never another alias. "list" reports aliases
+  apart from the profiles, under "aliases".
 
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}
@@ -741,12 +824,16 @@ When a user asks to add a new LLM or provider, ask for:
       properties: {
         action: {
           type:        'string',
-          enum:        ['list', 'add', 'update', 'remove'],
-          description: 'list: show all profiles. add: create a new profile. update: change fields on an existing profile. remove: delete a profile.',
+          enum:        ['list', 'add', 'update', 'remove', 'alias'],
+          description: 'list: show all profiles. add: create a new profile. update: change fields on an existing profile. remove: delete a profile or alias. alias: create or repoint an alias.',
         },
         name: {
           type:        'string',
-          description: 'Unique profile name used as the provider key (add/update/remove).',
+          description: 'Unique profile or alias name used as the provider key (add/update/remove/alias).',
+        },
+        alias: {
+          type:        'string',
+          description: 'The profile the alias named by "name" runs on (alias only).',
         },
         module: {
           type:        'string',

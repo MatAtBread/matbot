@@ -157,6 +157,12 @@ export interface ProviderSummary {
   maxRounds?:     number;
 }
 
+/** A provider alias as reported by `provider list`: a role name and the profile it runs on. */
+export interface ProviderAliasSummary {
+  name:  string;
+  alias: string;
+}
+
 /** An adapter a `provider add` could name, offered by runtimes that can enumerate them. */
 export interface AvailableProvider {
   label:          string;
@@ -170,6 +176,9 @@ export interface AvailableProvider {
 
 export interface ProviderListResult {
   providers: ProviderSummary[];
+  /** Beside the profiles rather than among them, so code reading a profile's fields off `providers` needs
+   *  no narrowing, and a picker listing what a person can run on shows no role names. */
+  aliases:   ProviderAliasSummary[];
   /** The adapters this runtime can offer. Present in the browser, where the set was baked into the
    *  artifact and is therefore knowable; absent on node, which discovers adapters through
    *  `plugin discover_local` instead of enumerating them here. */
@@ -214,7 +223,8 @@ export interface ProviderPatch {
  * node's vault should hold the secret, and the browser (which prompts and stores under its own key)
  * ignores them.
  *
- * `update` carries no credential of any kind — see {@link ProviderPatch}.
+ * `update` carries no credential of any kind — see {@link ProviderPatch}. It refuses an alias, whose one
+ * field is its target and is set by `alias`; `remove` takes either.
  */
 export type ProviderToolContract =
   | ToolContract<ProviderListResult,   { action: 'list' }>
@@ -230,7 +240,9 @@ export type ProviderToolContract =
       maxRounds?:        number;
     }>
   | ToolContract<ProviderActionResult, { action: 'update'; name: string } & ProviderPatch>
-  | ToolContract<ProviderActionResult, { action: 'remove'; name: string }>;
+  | ToolContract<ProviderActionResult, { action: 'remove'; name: string }>
+  /** Create the alias `name`, or point it at another profile: `alias` names the profile it runs on. */
+  | ToolContract<ProviderActionResult, { action: 'alias'; name: string; alias: string }>;
 
 declare module './tools.js' {
   interface ToolContracts {
