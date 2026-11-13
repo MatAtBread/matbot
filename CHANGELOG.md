@@ -11,6 +11,54 @@ churn and less likely to affect a consumer who doesn't use them.
 
 ## 0.5.0
 
+Matbot v0.5.0 is a significant release that removes old, deprecated features and introduces some new ones.
+Upgrade the CLI and every plugin together: a 0.4.x plugin will not install beside 0.5.0
+([why](#plugin-api-0-5)).
+
+**New**
+
+- [Provider aliases](#provider-aliases): a provider name that stays stable even if the model or
+  provider behind it changes.
+- [Tool-generated user prompts](#robo-submit) that can continue a session in your absence. A background
+  job or a tool can post a message that the conversation answers. After three in a row with no message
+  from a person, matbot asks before going on.
+- [`single_turn` with tools](#single-turn-tools): hand a full agent turn, or several at once, to a
+  sub-turn and get back what each one said.
+- [Permissions for this session](#permission-lifetimes): a prompt can be answered for this time, for this
+  session or always. [The most specific standing answer wins](#most-specific-wins), so a narrow allow
+  can sit inside a broad denial and the reverse.
+- [`gate-fs-node`](#gate-fs-node): each path a `tool_function` body reads or writes is put to the
+  permission gate.
+- [`session-data`](#session-data): keep a tool's output in a conversation and pass it to a later tool
+  without the model reading it.
+- [Failure classes](#failure-class): a failure says whether trying again could help (`unavailable`,
+  `denied` or `invalid`).
+- [Embedding](#repository-layout): core no longer assumes the CLI's config file or layout, and
+  [`host-node`](#host-node) holds what a Node application needs to stand up a machine of its own.
+- [Unread tracking](#sessions-read-tracking) for sessions, kept on the server.
+
+**Removed or changed**
+
+- Packages no longer published: [`tool-background`](#tool-background-removed) (use `background-jobs`),
+  [`frontend-dom`](#frontend-dom-removed), [`skills-node`](#skills-node-removed) and
+  [`files-node`](#files-node-removed). [`default-gate`](#default-gate-moved) moved into core and
+  [`tool-plugin`](#tool-plugin-moved) into the CLI.
+- The [`ToolCallValidator` service](#toolcallvalidator-removed) is replaced by `validate` hooks, and
+  [`permit_imports`](#permit-imports-removed) by standing denials in the permission gate.
+- A plugin must [declare `matbotRuntime`](#matbotruntime-required) in its `package.json`.
+- [`configPath` is gone](#configpath-removed); a plugin reads `projectDir` or `dataDir` instead.
+- The default gate's [standing answers are scoped](#scoped-answers), and `default_settings:` must use
+  the new shape.
+- No plugin can open the [`settings` store](#settings-store-closed), and `tool-store`'s
+  [`expose` is removed](#tool-store-expose).
+- [Migrations of very old stored data](#old-migrations-removed) are removed. A database from before 0.4.4
+  must be opened once by 0.4.x first.
+
+**Fixed**
+
+- A failure in detached work no longer ends the process: neither [a store failure in the turn
+  pump](#pump-failures) (#115) nor [one a function body leaves behind](#body-failures-contained).
+
 ### Repository layout
 
 0.5.0 redraws the line between the library and its hosts. In 0.4, core read the CLI's config file,
@@ -52,7 +100,7 @@ a second host's needs.
 
 ### Breaking changes
 
-- **`PLUGIN_API_VERSION` is `0.5`, and every published package is 0.5.0.** plugin-api removes exports
+- <a id="plugin-api-0-5"></a>**`PLUGIN_API_VERSION` is `0.5`, and every published package is 0.5.0.** plugin-api removes exports
   (`importPermitted`, `configPath`) and changes signatures (`PermissionGate.decide`/`snapshot`,
   `ToolTypeIndex.check`, `bindGate`), so a 0.4.x plugin that uses one of those fails: at link time for a
   removed export, at its first call for a changed signature. One that uses none of them still loads, since
@@ -60,13 +108,13 @@ a second host's needs.
   plugin peer-depends on `plugin-api` with a caret range, and on 0.x `^0.4.x` excludes 0.5.0 (`ERESOLVE`).
   Plugins with no change of their own are republished at 0.5.0 for that reason; upgrade them together
   with the CLI.
-- **`FunctionRunSettings.permittedImports` and `importPermitted` are removed from `plugin-api`.** What a
+- <a id="permit-imports-removed"></a>**`FunctionRunSettings.permittedImports` and `importPermitted` are removed from `plugin-api`.** What a
   `tool_function` body may import is the permission gate's alone: a module refused outright is a standing
   denial (`deny:tool_function.import`, e.g. `{ '*': ['* node:child_process'] }` for every function), not a list the
   runner carries in front of the gate. `FunctionRunSettings` declares nothing now; a runner's own fields
   (the node runner's time bound) ride on it as before. A runner that set `permittedImports` should drop
   it — nothing reads it.
-- **A plugin cannot open the `settings` store, and removes only what it registered.** `settings` holds every
+- <a id="settings-store-closed"></a>**A plugin cannot open the `settings` store, and removes only what it registered.** `settings` holds every
   plugin's settings, the default gate's standing answers among them, so a plugin able to open it could
   grant itself anything, and tool-store's `expose` let a model do exactly that. A plugin reaches its own
   through `services.settings()`; `createStore('settings')` on its machine now throws, in any case, and a
@@ -75,13 +123,13 @@ a second host's needs.
   another plugin's or the host's tool in place, with a warning: removing it and registering into the gap
   replaced it without the `tools.overwrite` collision ever being decided. `tools`, `hooks` and
   `systemContext.removeByPlugin` likewise act only on the calling plugin's own name.
-- **The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
+- <a id="toolcallvalidator-removed"></a>**The `ToolCallValidator` service is removed**, as announced in 0.4.21. Register a `validate` hook
   instead: several co-exist and every one is asked, where the service key held one validator and a second
   had to capture and delegate to the first. A plugin still registering the key is no longer consulted.
 - **`turnActivity` / `usageEntries` / `usageByProvider` no longer read the pre-0.4.3 usage shapes** — an
   assistant message's own `usage`, and a `tool-result`'s `usage` array. Sessions written before 0.4.3
   report no usage for those turns.
-- **`matbotRuntime` is required: it is what makes a package a plugin.** The loader refuses a package whose
+- <a id="matbotruntime-required"></a>**`matbotRuntime` is required: it is what makes a package a plugin.** The loader refuses a package whose
   `package.json` declares no runtimes (or an empty list) before importing it — a `NotAPluginError` for an
   explicit load, a skip recorded in `plugin list`'s `failed` at boot — where it used to import it on
   trust. A third-party plugin without the field must add it, e.g. `"matbotRuntime": ["node", "browser"]`.
@@ -93,12 +141,12 @@ a second host's needs.
   to `'@matatbread/matbot-default-gate': { 'tools.overwrite': … }` in 0.4.14) and the CLI's top-level
   `function_timeout_ms` / `function_imports` (moved to `@matatbread/matbot-function-runner-node`'s
   `timeout_ms` / `permit_imports` in 0.4.20) were already unread; they are now unread silently.
-- **The default permission policy is core's, and `@matatbread/matbot-default-gate` is no longer
+- <a id="default-gate-moved"></a>**The default permission policy is core's, and `@matatbread/matbot-default-gate` is no longer
   published.** `defaultGate`, `createDefaultGate`, `makeGateActionTool`, `createGateTools`, `denyKey`,
   `toStandingAnswer` and `DEFAULT_GATE_SETTINGS_NS` are exported from `@matatbread/matbot-core`; import them
   from there. Behaviour is unchanged, and so is the settings namespace, `@matatbread/matbot-default-gate`:
   stored answers and `default_settings:` keyed by it keep working.
-- **`@matatbread/matbot-tool-plugin` is no longer published; its code is the CLI's** (`apps/cli/src/plugins`).
+- <a id="tool-plugin-moved"></a>**`@matatbread/matbot-tool-plugin` is no longer published; its code is the CLI's** (`apps/cli/src/plugins`).
   Both halves were CLI conventions rather than something another host could reuse: the `plugin` and
   `provider` tools edit `matbot.yaml`, and acquisition fetches into `.plugins/` and installs with npm beside
   it. Nothing changes for a CLI user. An application that imported it builds its own against its own
@@ -108,7 +156,7 @@ a second host's needs.
   core takes what a host hands `assembleMachine` rather than reading a format of its own. A host that
   parsed `matbot.yaml` with them parses its own configuration; `installSettingsDefaults` stays in core,
   taking a map.
-- **`configPath` is gone from `MatbotMachine` and `ToolContext`; a host supplies `projectDir` and `dataDir`
+- <a id="configpath-removed"></a>**`configPath` is gone from `MatbotMachine` and `ToolContext`; a host supplies `projectDir` and `dataDir`
   instead.** A plugin was handed the path of the CLI's config file and derived what it actually needed from
   it — `.data` beside it for storage, its directory for where packages are installed — so it worked only
   under the CLI's layout. `projectDir` is where the host resolves packages and relative plugin specifiers
@@ -117,7 +165,7 @@ a second host's needs.
   without a config path. The CLI sets them to the config file's directory and `.data` beside it, so nothing
   changes for a CLI user; `nodePluginMembers` reports its base directory as `projectDir`. A plugin that read
   `configPath` reads whichever of the two it meant.
-- **`@matatbread/matbot-skills-node` is no longer published.** Its `.md` import and directory watch added
+- <a id="skills-node-removed"></a>**`@matatbread/matbot-skills-node` is no longer published.** Its `.md` import and directory watch added
   nothing `skills` and its tool do not, and the directory it watched is not one anything else writes to.
   Load `@matatbread/matbot-skills` in its place.
 - **`PermissionGate` gains `snapshot()`, and `ToolContext` gains `gateSnapshot()`.** A snapshot is what the
@@ -148,12 +196,12 @@ a second host's needs.
   requires one: the runner passes the turn's session, `invokeTool` `opts.session`, a registration none, and
   `POST /tools/:name` `HTTP_TOOL_SESSION`. Not a request field, which a tool writes and could use to borrow
   another session's answers. A replacement gate that delegates passes it on.
-- **The default gate's standing answers are scoped, and the format before 0.5.0 is not read.** A gate's
+- <a id="scoped-answers"></a>**The default gate's standing answers are scoped, and the format before 0.5.0 is not read.** A gate's
   value is a map from scope to answer — `{ '*': [bash, plugin] }`, `'*'` being everywhere, a session's id
   that session, `#http` the HTTP tool door — and `default_settings:` must use it. A stored answer in the old
   shape (a bare list or `true`) is migrated once, from the stored document alone so no configured default
   is copied into it; one in `default_settings:` is ignored, with a warning naming the key.
-- **The most specific standing answer wins, not every denial.** Ranked by how near the act it lies (an
+- <a id="most-specific-wins"></a>**The most specific standing answer wins, not every denial.** Ranked by how near the act it lies (an
   exact match, then the deeper prefix, where subjects nest), then the narrowest subject the call site
   offered, then this session's answer over one held everywhere, then a denial on a tie. So an allow of
   `* node:fs` beside a denial of `* node:` admits `node:fs` and no other builtin, where every builtin was
@@ -172,7 +220,7 @@ a second host's needs.
   submission paid a store round trip before its turn could start. Now `open()` awaits nothing after
   queueing, so if it throws, nothing was queued. A submission to a session that does not exist no longer
   throws: it is an `error` on the submission's `events`, with `failure: 'invalid'`.
-- **An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
+- <a id="robo-submit"></a>**An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
   `role: 'user'` message no longer just writes it. The message is submitted to the session as a turn,
   which answers it beside any running turn (`parallel`), as the caller (a job's creator) and on the
   session's own model. It is persisted when its turn starts, so the result's `messageIds` is empty and
@@ -216,7 +264,7 @@ a second host's needs.
   made for no session (a global function) sees it empty. `session_data` uses it to type a read by the
   entry's id.
 
-- **`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
+- <a id="single-turn-tools"></a>**`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
   turn within the calling session: it has the session's id, principal, tools and gate answers, sees none of
   its conversation, does not add its working to it, and returns its text with the tool calls it made. `turns: [...]`
   runs several, with tools or without, at the same time, and returns their results in order; one failing
@@ -247,7 +295,7 @@ a second host's needs.
   and a `ToolTypeIndex` declares no types for a refused module and reports a literal `import(…)` of one as
   `IMPORT-GATE`. "Nobody decided" is not a refusal — that is asked at the call — so it is typed.
 
-- **`@matatbread/matbot-host-node`** (new) — what a Node application needs to embed matbot that core
+- <a id="host-node"></a>**`@matatbread/matbot-host-node`** (new) — what a Node application needs to embed matbot that core
   cannot hold, being Node-only, until now inside the CLI: the `AsyncLocalStorage` principal and usage
   carriers (so a server authenticating its own users can set a principal per request), `nodePluginMembers`
   (`loadPlugin`/`unloadPlugin`/`resolver` for plugins already on disk; nothing fetched or installed), and
@@ -285,7 +333,7 @@ a second host's needs.
   and the report's new `parameters` gives each one's parameters (`ToolCheckParameter`: name, optional, and
   the JSON Schema its resolved type projects to), read from the program the check just ran. An index that
   cannot resolve types (the browser) omits it.
-- **Permission lifetimes: an answer for this session.** The default gate asks allow or deny, *this time*,
+- <a id="permission-lifetimes"></a>**Permission lifetimes: an answer for this session.** The default gate asks allow or deny, *this time*,
   *for this session* or *always*, and for which of the subjects the call site offers — "this work needs my
   photos directory" without granting it for ever or answering a prompt per file. `PermissionLifetime`
   (open, like a gate id), `PermissionRequest.lifetimes` (what a call site permits remembering an act for),
@@ -335,7 +383,7 @@ a second host's needs.
   it means the same whichever frontend draws the question. The return type is now named
   `SessionStatusReport`.
 
-- **`FailureClass`: a failure says whether trying again could help.** matbot does not retry on a caller's
+- <a id="failure-class"></a>**`FailureClass`: a failure says whether trying again could help.** matbot does not retry on a caller's
   behalf; it reports, and the caller decides, which needs more than a message. `failure?: 'unavailable' |
   'denied' | 'invalid'` (may work later / not allowed / the request is wrong) is a property on a thrown
   error and a field on both `error` events (a turn's and a tool's); absent means whoever failed did not say.
@@ -349,7 +397,7 @@ a second host's needs.
 - **A turn's `error`, and a tool's thrown error, include the error's `cause`** (`TypeError: fetch failed
   (SocketError: other side closed)`), which is usually the half that says what happened.
 
-- **Provider aliases.** A provider entry may be `alias: <profile>` and nothing else: a stable name for a
+- <a id="provider-aliases"></a>**Provider aliases.** A provider entry may be `alias: <profile>` and nothing else: a stable name for a
   role (`text_classifier`) that code, pinned settings and stored functions can name, and that keeps
   working when the profile behind it changes. What is kept is the name chosen: a message's `providerName`
   and a pinned setting record the alias, and it is resolved only where a provider is called, in
@@ -381,7 +429,7 @@ a second host's needs.
   `EnvFileVault` now reads its own file (`EnvFileVault.open`), quotes a value the reader would otherwise
   reinterpret, and refuses one containing a line break rather than writing it broken.
 
-- **A store failure in the turn pump no longer exits the process (#115).** The pump runs detached, and a
+- <a id="pump-failures"></a>**A store failure in the turn pump no longer exits the process (#115).** The pump runs detached, and a
   failed store read or write at a turn's start, a failure resolving its provider or its tool types, a
   failed usage flush, or a failed write of a settled parallel reply rejected its promise with nothing
   awaiting it — an unhandled rejection, which ends a Node process and every turn in it. The turn just
@@ -396,7 +444,7 @@ a second host's needs.
 
 ### Optional
 
-- **`session-data`** (new) — `session_data` keeps a JSON value in a conversation and reads it back by a
+- <a id="session-data"></a>**`session-data`** (new) — `session_data` keeps a JSON value in a conversation and reads it back by a
   short id: a tool's output written from a `tool_function` body (`write { description, data }`) and handed
   to another tool turns later (`read { id }`), without the model reading it. Entries are markers, so they
   are private to the session, shared when it is, carried by fork and compaction, and never sent to a model;
@@ -421,7 +469,7 @@ a second host's needs.
   (from a timer it set) runs, as it would in any JavaScript. A body whose caller stops reading before it
   settles has been abandoned, and every call it starts from then on is refused. Work meant to outlive the
   call is a `background_job`.
-- **`function-runner-node`** — a failure a function body leaves unhandled no longer ends the process. This
+- <a id="body-failures-contained"></a>**`function-runner-node`** — a failure a function body leaves unhandled no longer ends the process. This
   covers a throw in a timer it scheduled, a rejection nothing awaits, and a tool call refused because its
   caller abandoned the body. Each is logged as contained. Node reports these in the async context they
   came from, so they are recognised by the body's span, including a rejection with no stack. Any other
@@ -456,7 +504,7 @@ a second host's needs.
   body would reach by walking a prototype read as a stand-in to the body and as itself to host code, by the
   same caller rule that refuses a body the function constructors. It is the runner's because only a runner knows
   what code is a body's, so a wrapper reaches it through the service rather than by importing a runner.
-- **`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
+- <a id="gate-fs-node"></a>**`gate-fs-node`** (new, node) — puts each path a body's `node:fs`/`node:fs/promises` names to the
   gate: `tool_function.fs-read`, `tool_function.fs-write`, and `tool_function.fs-access` for permissions,
   owner and timestamps (`chmod`, `chown`, `utimes`), three independent questions, keyed `<function> <realpath>`, offering the
   path and everything in its directory, each for this function or for any (a directory grant covers its
@@ -531,14 +579,14 @@ a second host's needs.
   the executor since 0.5.0, so a composition's `tool.http({ method: 'PROPFIND' })` (or `'get'`) passed the
   type-check and was then refused; it is now a type error at definition.
 
-- **Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
+- <a id="old-migrations-removed"></a>**Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):
   - `storage-sqlite` no longer renames a table named under the pre-0.4.4 scheme (`a-b` stored as
     `a_b_store`). Start a pre-0.4.4 database once with matbot >=0.4.4 <0.5.0 before upgrading; opened by
     0.5.0, an affected namespace looks empty and the old table is left in the file.
   - `storage-filesystem` and `storage-profiles` no longer read an unnamed file's sidecar written before 0.2.4 (an `id`
     field and no `dataFile`). No version rewrites these; add `"dataFile": "<id>.data"` to keep one.
-- **`tool-background` is removed** (`@matatbread/matbot-tool-background`: `background`, `every_action`),
+- <a id="tool-background-removed"></a>**`tool-background` is removed** (`@matatbread/matbot-tool-background`: `background`, `every_action`),
   superseded by `background-jobs` / `background-jobs-node` since 0.4.18. An installation still listing it
   under `plugins:` fails to load it. Its schedules, in the `schedules` store, are not run by anything.
 - **`background-jobs`** — `background_job_action` no longer lists or cancels the old plugin's schedules
@@ -575,11 +623,11 @@ a second host's needs.
   beneath it (`plugins:` followed by `providers:`) now reads as empty rather than failing boot.
 - **`provider-store-test`** is no longer published. It is a test/reference plugin nothing depends on; it
   stays in the repository, typechecked with the rest. The versions already on npm are left there.
-- **`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`
+- <a id="frontend-dom-removed"></a>**`frontend-dom` is removed** (`@matatbread/matbot-frontend-dom`), and with it the `matbot-demo.html`
   web bundle it was the frontend of (`matbot.web-demo.json`, `assemble:demo`). In the browser, use
   `frontend-web`'s browser entry, which `matbot.html` already loads. The versions already on npm are left
   there.
-- **`@matatbread/matbot-files-node` is no longer published.** Its one export, `FilesystemFileStore`, moved
+- <a id="files-node-removed"></a>**`@matatbread/matbot-files-node` is no longer published.** Its one export, `FilesystemFileStore`, moved
   into `storage-filesystem`, its only user, and is exported from `@matatbread/matbot-storage-filesystem`.
   Import it from there. The versions already on npm are left there.
 - **`triggers`** — a turn another turn started (`single_turn` with `tools: true`) is not judged on either
@@ -617,7 +665,7 @@ a second host's needs.
   (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
   line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow
   the rest of it.
-- **`tool-store`: a model creates stores of its own and cannot open anyone else's.** `expose` is removed:
+- <a id="tool-store-expose"></a>**`tool-store`: a model creates stores of its own and cannot open anyone else's.** `expose` is removed:
   it gave a model read and write over any namespace, `settings` included. `create` keeps its documents in
   a namespace of tool-store's own (`store-<name>`), so a model can no longer claim a store a plugin will
   use once it is installed. A plugin that wants its own store exposed calls `defineStore`, as cognition
@@ -661,7 +709,7 @@ a second host's needs.
   `unavailable`, so a client knows asking again later may work) and puts `failure` in the body; the submit
   route does the same for a submission `open()` refused.
 
-- **`sessions`** — read tracking. It adds `Session.readAt` by augmentation: how far a session has been
+- <a id="sessions-read-tracking"></a>**`sessions`** — read tracking. It adds `Session.readAt` by augmentation: how far a session has been
   read. It exports `isUnread(session)`, and `SessionIndicator` (`'prompting' | 'running' | 'unread'`) with
   `sessionIndicator(session, live)`. A session that has never been shown to a reader has no `readAt` and
   reads as read, so nothing lights up at once; tracking starts the first time a frontend marks it read.
