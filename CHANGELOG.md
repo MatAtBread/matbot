@@ -188,6 +188,19 @@ a second host's needs.
   is unchanged. `register` throws for an alias whose target is not a profile, and `remove` for a profile an
   alias points at.
 
+  **A plugin that implements the `provider` tool, or a `ProviderAdmin` for the browser one** (as
+  `storage-google-drive` does), has to change, for the reasons above:
+  - It narrows before reading a profile's fields off an entry, in `list`, `get` and `update`.
+    `providerRows(services.providers, summarise)` builds `list`'s rows with aliases included, and the
+    `summarise` callback is the per-profile mapping such a plugin already has.
+  - `remove` lets the registry's error through as the tool's error, since the registry now refuses to
+    remove a profile that an alias points at.
+  - If it replays profiles from storage, it registers profiles before aliases, because an alias needs its
+    target in place.
+
+  `ProviderAdmin.alias` is optional, so an admin that stores no aliases compiles without it, and the
+  tool's `alias` action reports that the runtime cannot store them.
+
 ### API gaps filled
 
 - **A tool's marker records the calls that produced it (`Marker.by`, `CallFrame`).** The host stamps each
@@ -343,10 +356,11 @@ a second host's needs.
   `complete()` and at the start of a turn. A usage entry records the profile that ran, since an alias
   moves and the rates are the model's. One hop: an alias points at a profile, never at another alias. The
   `provider` tool's `alias` action creates or repoints one (gated, `provider.alias`); `remove` takes either;
-  `update` refuses an alias; `list` reports them apart from the profiles, under `aliases`, so a picker
-  reading `providers` shows none. An alias left without its target (by a plugin's unload) is refused at
+  `add` and `update` refuse an alias's name, and an alias carrying settings of its own is refused however
+  it is written; `list` reports an alias as its profile's row under its own name, with `alias` naming the
+  profile, so every row has every field (the web UI's picker skips them). An alias left without its target (by a plugin's unload) is refused at
   the call, naming the target (`invalid`). plugin-api exports `isProviderAlias`, `aliasProblem`,
-  `removalProblem`, `aliasesOf`, `describeProvider` and `describeProviders`; `single_turn`'s
+  `removalProblem`, `aliasesOf`, `describeProvider`, `describeProviders` and `providerRows`; `single_turn`'s
   unknown-provider error lists aliases as `alias → profile`.
 - **A thinking block carries `meta?: ProviderMeta`**, on the stored `thinking` content and the
   `thinking-block` event, as a tool call already did, for an adapter's round-trip state about the block.

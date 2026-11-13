@@ -2,7 +2,7 @@ import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, Provider
               ProviderPatch, ProviderConfig, ProviderEntry } from '@matatbread/matbot-core';
 
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, credentialKeyName, movedCredentialKeys, movedCredentialNote, patchedFields, refusalMessage }  from '@matatbread/matbot-core';
-import { aliasProblem, describeProvider, describeProviders, isProviderAlias, removalProblem } from '@matatbread/matbot-core';
+import { aliasProblem, describeProvider, describeProviders, isProviderAlias, providerRows, removalProblem } from '@matatbread/matbot-core';
 import { getRegisteredPlugins, getSpecifierForPlugin }       from '@matatbread/matbot-core';
 import { readFile, writeFile }                               from 'node:fs/promises';
 import { fileURLToPath }                                     from 'node:url';
@@ -330,7 +330,7 @@ function makeExecutor(
         yield {
           type:  'result',
           value: {
-            providers: [...providers.values()].filter((e): e is ProviderConfig => !isProviderAlias(e)).map(cfg => ({
+            providers: providerRows(providers, cfg => ({
               name:           cfg.name,
               module:         cfg.module,
               model:          cfg.model,
@@ -339,7 +339,6 @@ function makeExecutor(
               ...(cfg.parameters !== undefined ? { parameters: cfg.parameters } : {}),
               ...(cfg.maxRounds  !== undefined ? { maxRounds:  cfg.maxRounds  } : {}),
             })),
-            aliases: [...providers.values()].flatMap(e => isProviderAlias(e) ? [{ name: e.name, alias: e.alias }] : []),
           },
         };
         return;
@@ -350,7 +349,12 @@ function makeExecutor(
         const { name, module: mod, model, endpoint, credentialKey, credentialEnvVar, parameters, maxRounds } =
           input as Extract<ProviderInput, { action: 'add' }>;
 
-        if (providers.has(name)) {
+        const existing = providers.get(name);
+        if (existing !== undefined && isProviderAlias(existing)) {
+          yield { type: 'error', message: `"${name}" is an alias of "${existing.alias}", which takes no settings of its own. Use action "alias" to point it at another profile, or add this profile under another name.` };
+          return;
+        }
+        if (existing !== undefined) {
           yield { type: 'result', value: { message: `Profile "${name}" already exists. Use a different name or remove it first.` } };
           return;
         }
@@ -785,8 +789,8 @@ ALIASES  (a stable name for a ROLE, e.g. "text_classifier")
   An alias stands for one profile and carries nothing else. Name a role's
   alias wherever a provider name is fixed — a pinned setting, a function that
   runs outside any turn — and point it elsewhere later without touching those.
-  Its target must be a profile, never another alias. "list" reports aliases
-  apart from the profiles, under "aliases".
+  Its target must be a profile, never another alias. "list" reports an alias
+  as its profile's row under the alias's name, with "alias" naming the profile.
 
 AVAILABLE ADAPTER MODULES  (use one of these as the module value when adding)
 ${adapterSection}

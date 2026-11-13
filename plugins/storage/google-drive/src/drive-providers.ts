@@ -1,6 +1,6 @@
 import type { Store, MatbotMachine, ProviderConfig, ProviderEntry, ProviderPatch } from '@matatbread/matbot-plugin-api';
-import { applyProviderPatch, isProviderAlias, movedCredentialKeys } from '@matatbread/matbot-plugin-api';
-import type { ProviderDraft, ProviderSummary, ProviderAliasSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
+import { applyProviderPatch, isProviderAlias, movedCredentialKeys, providerRows } from '@matatbread/matbot-plugin-api';
+import type { ProviderDraft, ProviderSummary, ProviderAdmin, AvailableProvider } from '@matatbread/matbot-browser';
 
 const DOC_ID = 'manifest';
 
@@ -48,8 +48,7 @@ function credentialVar(name: string): string {
   return `MATBOT_API_KEY_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
 }
 
-function toRow(p: ProviderEntry): ProviderSummary | ProviderAliasSummary {
-  if (isProviderAlias(p)) return { name: p.name, alias: p.alias };
+function toRow(p: ProviderConfig): ProviderSummary {
   return {
     name:   p.name,
     module: p.module,
@@ -72,7 +71,7 @@ function toRow(p: ProviderEntry): ProviderSummary | ProviderAliasSummary {
 export function driveProviderAdmin(driveSet: DriveProviderSet, services: MatbotMachine): ProviderAdmin {
   return {
     available: bakedAvailableProviders(),
-    list: () => [...services.providers.values()].map(toRow),
+    list: () => providerRows(services.providers, toRow),
     async add(draft: ProviderDraft): Promise<string> {
       let credentials: Record<string, string> | undefined;
       if (draft.apiKey) {

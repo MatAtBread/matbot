@@ -646,7 +646,7 @@ async function apiGetSession(id)  {
 function markShown(id) { if (shownNow(id)) void apiGetSession(id); }
 document.addEventListener('visibilitychange', () => { if (currentSessionId) markShown(currentSessionId); });
 async function apiSessionBusy(id) { return T.sessionBusy(id); }
-async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
+async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.filter(p => p.alias === undefined).map(p => p.name); } catch { return []; } }
 
 async function refreshProviderSelect() {
   const current  = providerSel.value;

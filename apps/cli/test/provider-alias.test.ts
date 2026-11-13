@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assembleMachine, ProviderRegistryImpl, installPrincipalCarrier, createConstantPrincipalCarrier, installUsageCarrier,
-  createMessage, createSession, usageEntries, bindGate, failureOf, CONFIRM_YES,
+  createMessage, createSession, usageEntries, bindGate, failureOf, CONFIRM_YES, providerRows,
 } from '@matatbread/matbot-core';
 import type {
   CompletionEvent, FormField, MatbotPlugin, Message, ProviderAdapter, ProviderConfig, PromptFn, ToolContext, ToolEvent,
@@ -39,6 +39,13 @@ test('an alias must point at a profile that exists, and never at another alias o
   assert.equal(r.resolve('missing'), undefined);
 });
 
+test('an alias carrying settings of its own is refused, however it arrives', () => {
+  const r = new ProviderRegistryImpl([['real', profile('real')]]);
+  const withSettings = { name: 'role', alias: 'real', parameters: { maxTokens: 10 } } as unknown as ProviderConfig;
+  assert.throws(() => r.register(withSettings), /"role" is an alias, which takes nothing but "alias"; remove "parameters", or set it on "real"/);
+  assert.throws(() => new ProviderRegistryImpl([['real', profile('real')], ['role', withSettings]]), /takes nothing but "alias"/);
+});
+
 test('a profile an alias points at cannot be removed, but revert never refuses and resolve says what is wrong', () => {
   const r = new ProviderRegistryImpl([['role', { name: 'role', alias: 'real' }], ['real', profile('real')]]);
   assert.throws(() => r.remove('real'), /"role" is an alias of it/);
@@ -48,6 +55,9 @@ test('a profile an alias points at cannot be removed, but revert never refuses a
   assert.equal(r.has('late'), false);
   assert.throws(() => r.resolve('late-role'), (e: Error) =>
     /alias of "late", which is not a configured provider profile/.test(e.message) && failureOf(e) === 'invalid');
+  assert.deepEqual(providerRows(r, p => ({ name: p.name, module: p.module, model: p.model, hasCredentials: false }))
+    .find(row => row.name === 'late-role'), { module: '', model: '', hasCredentials: false, name: 'late-role', alias: 'late' },
+    'a dangling alias is still listed, which is how it is found');
   assert.equal(r.remove('role'), true);
   assert.equal(r.remove('real'), true);
 });
@@ -206,16 +216,23 @@ test('provider alias: created, then repointed, in the file and the live set, eac
 });
 
 test('provider alias: refusals name what to do instead', async t => {
-  const { first, run } = await tool(t, { action: 'alias', name: 'real', alias: 'other' });
+  const { first, run, reg } = await tool(t, { action: 'alias', name: 'real', alias: 'other' });
   assert.match(JSON.stringify(first), /"real\\" is a provider profile, not an alias/);
   assert.match(JSON.stringify(await run({ action: 'alias', name: 'role', alias: 'missing' })), /no provider of that name is configured\. Configured: real, other/);
   await run({ action: 'alias', name: 'role', alias: 'real' });
   assert.match(JSON.stringify(await run({ action: 'alias', name: 'role2', alias: 'role' })), /itself an alias/);
-  assert.match(JSON.stringify(await run({ action: 'update', name: 'role', model: 'x' })), /is an alias of \\"real\\".*Use action \\"alias\\"/);
+  const update = await run({ action: 'update', name: 'role', model: 'x' });
+  assert.equal(update?.type, 'error');
+  assert.match(JSON.stringify(update), /is an alias of \\"real\\".*Use action \\"alias\\"/);
+  const add = await run({ action: 'add', name: 'role', module: '@matatbread/matbot-provider-anthropic', model: 'x' });
+  assert.equal(add?.type, 'error', 'adding over an alias would turn a role name into a profile');
+  assert.match(JSON.stringify(add), /is an alias of \\"real\\", which takes no settings of its own/);
+  assert.equal(reg.resolve('role')?.name, 'real', 'the alias is untouched');
   assert.match(JSON.stringify(await run({ action: 'remove', name: 'real' })), /"role\\" is an alias of it/);
-  const listed = await run({ action: 'list' }) as { value: { providers: { name: string }[]; aliases: unknown[] } };
-  assert.deepEqual(listed.value.aliases, [{ name: 'role', alias: 'real' }]);
-  assert.deepEqual(listed.value.providers.map(p => p.name), ['real', 'other'], 'a picker reading profiles sees no role names');
+  const listed = await run({ action: 'list' }) as { value: { providers: { name: string; model: string; alias?: string }[] } };
+  assert.deepEqual(listed.value.providers.map(p => [p.name, p.model, p.alias]),
+    [['real', 'claude-sonnet-4-6', undefined], ['other', 'claude-haiku-4-5', undefined], ['role', 'claude-sonnet-4-6', 'real']],
+    'an alias is its profile\'s row under its own name, so every row has every field');
   assert.match(JSON.stringify(await run({ action: 'remove', name: 'role' })), /Alias \\"role\\" removed/);
   assert.match(JSON.stringify(await run({ action: 'remove', name: 'real' })), /Profile \\"real\\" removed/);
   assert.match(JSON.stringify(await run({ action: 'remove', name: 'other' })), /only configured provider/);

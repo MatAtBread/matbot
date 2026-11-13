@@ -211,7 +211,8 @@ stored function can hard-code, because the alternative is hard-coding a profile 
 renamed or replaced. A `tool_function` run outside any turn has no provider to inherit and no settings of
 its own, so a name is the only thing it can hold. It is not the reference the rule above rejects: an
 alias carries no fields, so there is nothing to inherit or merge — `parameters` beside `alias:` is
-refused at parse, and a per-call override is `req.parameters`.
+refused (`aliasProblem`, so by the registry whoever writes, and at parse), `add` and `update` refuse an
+alias's name, and a per-call override is `req.parameters`.
 
 - **One hop.** The target is a profile, never an alias, so a cycle cannot be written and resolving is one
   lookup. Every writer asks `aliasProblem`; the registry enforces it (`register` and `remove` throw).
@@ -226,10 +227,12 @@ refused at parse, and a per-call override is `req.parameters`.
   `ProviderMeta` slice, because `providerName` no longer says which model produced a message: an alias
   keeps its name while its profile changes. Google's thought signatures do (`meta.google.model`, on tool
   calls and thinking blocks), falling back to the profile name for history written before.
-- **Pickers show profiles.** `provider list` reports aliases under `aliases`, apart from `providers`, so
-  a frontend offering what a person runs on shows no role names, and code reading a profile's fields off
-  a row needs no narrowing. A list a MODEL reads (an unknown-provider error) shows them as
-  `alias → profile` (`describeProviders`), so it learns the role names exist.
+- **Listed as their profile, marked.** `provider list` reports an alias as its profile's row under the
+  alias's own name, with `alias` naming the profile (`providerRows`). One shape, so code reading a field
+  off a row needs no narrowing and every callable name is in one list; the fields are information, and
+  `alias` says what the row is. A picker offering what a person runs on skips those rows. A list a MODEL
+  reads (an unknown-provider error) shows them as `alias → profile` (`describeProviders`), so it learns
+  the role names exist.
 - **No plugin defaults to a well-known alias name.** That is the `skills-classifier` pattern triggers
   retired in 0.5.0: a magic name that changed behaviour by existing. An alias works only where a call
   site names it.

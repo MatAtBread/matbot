@@ -2,7 +2,7 @@ import {
   getPluginNameForSpecifier, installPrincipalCarrier, createConstantPrincipalCarrier,
   installUsageCarrier, createSerialUsageCarrier, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, ProviderRegistryImpl, applyProviderPatch, movedCredentialKeys, assembleMachine, preScanStorage,
-  aliasProblem, isProviderAlias,
+  aliasProblem, isProviderAlias, providerRows,
 } from '@matatbread/matbot-core';
 import type {
   MatbotMachine, ProviderAlias, ProviderConfig, ProviderEntry, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
@@ -338,7 +338,7 @@ export async function boot(env: BootEnv): Promise<void> {
   // The portable `provider` tool — list/add/remove over the same persistence the wizard uses.
   services.tools.register(createBrowserProviderTool({
     available: config.availableProviders,
-    list: () => [...providers.values()].map(p => isProviderAlias(p) ? { name: p.name, alias: p.alias } : ({
+    list: () => providerRows(providers, p => ({
       name: p.name, module: p.module, model: p.model,
       ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
       ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),

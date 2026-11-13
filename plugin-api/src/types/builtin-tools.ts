@@ -155,12 +155,9 @@ export interface ProviderSummary {
   endpoint?:      string;
   parameters?:    ModelParameters;
   maxRounds?:     number;
-}
-
-/** A provider alias as reported by `provider list`: a role name and the profile it runs on. */
-export interface ProviderAliasSummary {
-  name:  string;
-  alias: string;
+  /** Present on an alias: the profile it runs on. The other fields are then that profile's, for
+   *  information — `update` changes the profile under its own name, and a picker skips these rows. */
+  alias?:         string;
 }
 
 /** An adapter a `provider add` could name, offered by runtimes that can enumerate them. */
@@ -175,10 +172,8 @@ export interface AvailableProvider {
 }
 
 export interface ProviderListResult {
+  /** Profiles and aliases, in configured order. */
   providers: ProviderSummary[];
-  /** Beside the profiles rather than among them, so code reading a profile's fields off `providers` needs
-   *  no narrowing, and a picker listing what a person can run on shows no role names. */
-  aliases:   ProviderAliasSummary[];
   /** The adapters this runtime can offer. Present in the browser, where the set was baked into the
    *  artifact and is therefore knowable; absent on node, which discovers adapters through
    *  `plugin discover_local` instead of enumerating them here. */

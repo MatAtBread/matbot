@@ -1,4 +1,5 @@
 import type { ProviderAlias, ProviderConfig, ProviderEntry } from './types/provider.js';
+import type { ProviderSummary } from './types/builtin-tools.js';
 import { withFailure } from './errors.js';
 
 export function isProviderAlias(entry: ProviderEntry): entry is ProviderAlias {
@@ -19,6 +20,10 @@ export function aliasesOf(entries: ReadonlyMap<string, ProviderEntry>, target: s
  */
 export function aliasProblem(entries: ReadonlyMap<string, ProviderEntry>, entry: ProviderEntry): string | undefined {
   if (isProviderAlias(entry)) {
+    // An alias's settings are its profile's; any of its own would be ignored, which reads as working.
+    const settings = Object.keys(entry).filter(k => k !== 'name' && k !== 'alias');
+    if (settings.length > 0)
+      return `"${entry.name}" is an alias, which takes nothing but "alias"; remove ${quoted(settings)}, or set ${settings.length === 1 ? 'it' : 'them'} on "${entry.alias}".`;
     if (entry.alias === entry.name) return `"${entry.name}" cannot be an alias of itself.`;
     const target = entries.get(entry.alias);
     if (target === undefined) return `"${entry.name}" cannot be an alias of "${entry.alias}": no provider of that name is configured.`;
@@ -61,4 +66,24 @@ export function describeProviders(entries: ReadonlyMap<string, ProviderEntry>): 
 
 function quoted(names: readonly string[]): string {
   return names.map(n => `"${n}"`).join(', ');
+}
+
+/**
+ * `provider list`'s rows, in registry order: a profile as `summarise` reports it, and an alias as its
+ * target's row under its own name, marked with `alias` — one shape, so code reading a field off a row
+ * needs no narrowing. A target that has gone (`revert` never refuses) leaves the alias listed, since
+ * listing it is how it is found and repointed, with empty fields.
+ */
+export function providerRows(
+  entries:   ReadonlyMap<string, ProviderEntry>,
+  summarise: (profile: ProviderConfig) => ProviderSummary,
+): ProviderSummary[] {
+  return [...entries.values()].map(e => {
+    if (!isProviderAlias(e)) return summarise(e);
+    const target = entries.get(e.alias);
+    const row = target === undefined || isProviderAlias(target)
+      ? { module: '', model: '', hasCredentials: false }
+      : summarise(target);
+    return { ...row, name: e.name, alias: e.alias };
+  });
 }

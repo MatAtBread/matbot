@@ -1,9 +1,9 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
-              ProviderSummary, ProviderAliasSummary, AvailableProvider,
+              ProviderSummary, AvailableProvider,
               ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, movedCredentialNote } from '@matatbread/matbot-plugin-api';
 
-export type { AvailableProvider, ProviderSummary, ProviderAliasSummary };
+export type { AvailableProvider, ProviderSummary };
 
 /** Everything the user supplies for one provider — the browser equivalent of the CLI setup wizard. */
 export interface ProviderDraft {
@@ -27,7 +27,8 @@ export interface ProviderDraft {
  */
 export interface ProviderAdmin {
   available: AvailableProvider[];
-  list(): (ProviderSummary | ProviderAliasSummary)[];
+  /** Rows as `providerRows` builds them: profiles and aliases in one shape. */
+  list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
   /** Apply a patch to an existing profile with `applyProviderPatch`, and say which vault keys its credential
    *  is now read from where the endpoint moved origin and the credential did not follow (empty otherwise).
@@ -37,8 +38,9 @@ export interface ProviderAdmin {
    *  points at, which would leave the alias failing at every call. */
   remove(name: string): Promise<boolean>;
   /** Create or repoint the alias `name` so it runs on the profile `target`, and persist it. Throws, with a
-   *  message for the caller, when the registry refuses the alias (see `aliasProblem`). */
-  alias(name: string, target: string): Promise<void>;
+   *  message for the caller, when the registry refuses the alias (see `aliasProblem`). Absent, this
+   *  runtime stores no aliases, and the tool's `alias` action says so. */
+  alias?(name: string, target: string): Promise<void>;
   /** The stored profile, credential placeholders and all — what `update` checks its model against before
    *  applying. Absent, an update's model is not checked. */
   get?(name: string): ProviderConfig | undefined;
@@ -99,10 +101,8 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       const act = input as ProviderInput;
 
       if (act.action === 'list') {
-        const rows = admin.list();
         yield { type: 'result', value: {
-          providers: rows.filter((r): r is ProviderSummary => !('alias' in r)),
-          aliases:   rows.filter((r): r is ProviderAliasSummary => 'alias' in r),
+          providers: admin.list(),
           adapters:  admin.available,
         } };
         return;
@@ -112,6 +112,12 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         const { name, module: mod, endpoint, model, parameters } = act;
         if (!name || !mod) {
           yield { type: 'error', message: 'add requires: name, module.' };
+          return;
+        }
+        // Before the key is asked for: adding over an alias would turn a role name into a profile.
+        const aliasOf = admin.list().find(r => r.name === name)?.alias;
+        if (aliasOf !== undefined) {
+          yield { type: 'error', message: `"${name}" is an alias of "${aliasOf}", which takes no settings of its own. Use action "alias" to point it at another profile, or add this profile under another name.` };
           return;
         }
         // Resolve the adapter by module spec, exact/substring label, or numeric index.
@@ -176,7 +182,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         const { action: _a, name, ...patch } = act;
         if (!name) { yield { type: 'error', message: 'update requires a "name".' }; return; }
         const aliased = admin.list().find(r => r.name === name);
-        if (aliased !== undefined && 'alias' in aliased) {
+        if (aliased?.alias !== undefined) {
           yield { type: 'error', message: `"${name}" is an alias of "${aliased.alias}", and has no fields of its own to update. Use action "alias" to point it at another profile, or update "${aliased.alias}" itself.` };
           return;
         }
@@ -246,8 +252,9 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       if (act.action === 'alias') {
         const { name, alias: target } = act;
         if (!name || !target) { yield { type: 'error', message: 'alias requires "name" (the alias) and "alias" (the profile it runs on).' }; return; }
+        if (admin.alias === undefined) { yield { type: 'error', message: 'This runtime does not store provider aliases.' }; return; }
         const cur = admin.list().find(r => r.name === name);
-        if (cur !== undefined && !('alias' in cur)) {
+        if (cur !== undefined && cur.alias === undefined) {
           yield { type: 'error', message: `"${name}" is a provider profile, not an alias. Choose another name, or remove the profile first.` };
           return;
         }
@@ -284,7 +291,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'ALIAS creates or repoints an alias: `name` is a stable name for a ROLE (e.g. "text_classifier") and ' +
       '`alias` the profile it runs on. Name the alias wherever a provider name is fixed (a pinned setting, ' +
       'a function run outside any turn) and point it elsewhere later without touching those. Its target ' +
-      'must be a profile, never another alias; `list` reports aliases apart from profiles, under `aliases`.\n\n' +
+      'must be a profile, never another alias; `list` reports an alias as the row of the profile it names, under its own name and with `alias` set.\n\n' +
       'UPDATE changes `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile: supply ' +
       'the name plus only the fields to change, an explicit `null` to clear one (not `model` — a ' +
       'profile must keep one). `parameters` is replaced WHOLESALE, not merged, so `list` first and send ' +
