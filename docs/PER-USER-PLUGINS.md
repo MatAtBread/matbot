@@ -211,9 +211,13 @@ plugin-visibility ceiling is structural.
   nested load from inside `setup()` goes through `loadPlugins → registerPlugin → setupPlugin`
   sequentially; `registerPlugin` throws on duplicate names and the global `state` mutations don't
   interleave.
-- **Shadow, not omit.** The built-in `plugin` tool is hardcoded into the CLI's `builtinTools`
-  ([apps/cli/src/boot.ts](../apps/cli/src/boot.ts)) and seeded before any config
-  plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
+- **Shadow, not omit.** The built-in `plugin` and `provider` tools are hardcoded into the CLI's
+  `builtinTools` ([apps/cli/src/boot.ts](../apps/cli/src/boot.ts)) and seeded before any config
+  plugin loads — you cannot exclude them, only register a same-named tool over one, capturing the
+  built-in in `setup()` if you delegate to it. (`provider`'s description lists the loaded adapters, so
+  boot builds it again once every plugin has loaded — but only while the registry still holds the
+  built-in, so a shadow is never overwritten. Before 0.5.0 it was first registered there, after every
+  plugin's setup, and silently replaced any shadow.) That triggers
   `resolveToolCollision` ([registry.ts](../core/src/registry.ts)), which declares the
   `tools.overwrite` gate with `fallback: true`: **non-interactive** (boot / HTTP installs, no
   `prompt`) → overwrites, your tool wins; **interactive** → the installation's permission policy asks

@@ -1,6 +1,6 @@
 import { loadPluginsWithDescriptions, nodePluginResolver,
          createAlsPrincipalCarrier, createAlsUsageCarrier, EnvFileVault } from '@matatbread/matbot-host-node';
-import type { PromptFn, AssembledMachine } from '@matatbread/matbot-core';
+import type { PromptFn, AssembledMachine, Tool } from '@matatbread/matbot-core';
 import { ProviderRegistryImpl,
          unloadPlugin as unloadPluginFn,
          getFailedPlugins, getPluginNameForSpecifier, getRegisteredPlugins,
@@ -117,6 +117,21 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   const bootVault = new EnvFileVault(path.join(configDir, '.env'), { ...dotEnv, ...process.env });
   withholdDotEnv(dotEnv);
 
+  // Map plugin name → the original module specifier written in matbot.yaml. Used by the provider
+  // tool as the write-back fallback for a local adapter that has no resolvable package name, and to
+  // match an LLM-supplied path against a loaded adapter. Declared before the machine, since the provider
+  // tool below is built before any plugin loads; it is filled in as they do.
+  const pluginNameToOrigPath = new Map<string, string>();
+  const recordOrigPaths = (origs: readonly string[]): void => {
+    // plugin.specifier === the original config entry, so look up the name by that entry directly.
+    for (const orig of origs) {
+      const name = getPluginNameForSpecifier(orig);
+      if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
+    }
+  };
+  const nameResolves = packageNameResolves(configDir);
+  const providerTool = (): Tool => createProviderTool(configPath, providers, pluginNameToOrigPath, nameResolves);
+
   const { services, makeRunner, loaded } = assembleMachine({
     // The same layout the filesystem storage plugin names: a directory per namespace under `.data`.
     bootBackend:     new FilesystemStorageBackend(dotData),
@@ -124,7 +139,10 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
     vault:           bootVault,
     providers,
     defaultSettings: config.defaultSettings,
-    builtinTools:    [createPluginTool(configPath)],
+    // Both management tools are in the registry BEFORE any plugin loads, so a plugin that shadows one —
+    // persisting `provider` somewhere other than matbot.yaml, say — captures the builtin in setup() and
+    // delegates to it, and nothing registered later overwrites the shadow.
+    builtinTools:    [createPluginTool(configPath), providerTool()],
     version:         selfVersion(),
     host: machine => ({
       async loadPlugin(specifier: string, prompt?: PromptFn, refresh = false) {
@@ -167,17 +185,6 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   // force-loads the adapter module on first use, and leaves each profile's `module` exactly as written,
   // so `provider list` reports the source truth.
 
-  // Map plugin name → the original module specifier written in matbot.yaml. Used by the provider
-  // tool as the write-back fallback for a local adapter that has no resolvable package name, and to
-  // match an LLM-supplied path against a loaded adapter.
-  const pluginNameToOrigPath = new Map<string, string>();
-  const recordOrigPaths = (origs: readonly string[]): void => {
-    // plugin.specifier === the original config entry, so look up the name by that entry directly.
-    for (const orig of origs) {
-      const name = getPluginNameForSpecifier(orig);
-      if (name !== undefined && !pluginNameToOrigPath.has(name)) pluginNameToOrigPath.set(name, orig);
-    }
-  };
   recordOrigPaths(providerModules);
 
   // Not awaited: digests of every configured plugin are not worth holding boot for, and the first reload
@@ -211,10 +218,12 @@ export async function bootMachine(opts: CliOpts, config: MatbotConfig, configPat
   // for every loaded adapter, not just ones already referenced by a provider profile.
   recordOrigPaths(config.plugins);
 
-  // Register the provider management tool now that all adapter plugins are loaded and
-  // their YAML specifiers are recorded — createProviderTool reads getRegisteredPlugins()
-  // and pluginNameToOrigPath to build its description.
-  services.tools.register(createProviderTool(configPath, providers, pluginNameToOrigPath, packageNameResolves(configDir)));
+  // The provider tool's description lists the adapters, which are only known now that every plugin has
+  // loaded, so build it again — but only while the registry still holds the BUILTIN. A plugin's tools are
+  // stamped with its `pluginName`; the builtin carries none. Registering over a plugin's shadow here would
+  // silently undo it: this call goes straight to the registry, past the collision check a plugin's own
+  // registration gets, which is exactly what used to happen when the tool was first registered here.
+  if (services.tools.resolve('provider')?.pluginName === undefined) services.tools.register(providerTool());
 
   return { services, makeRunner, providers };
 }
