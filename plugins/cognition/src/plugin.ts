@@ -72,6 +72,7 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
         quarantined:         number;
         duplicates?:         number;
         backlogged?:         number;
+        known?:              number;
         unassignedRemaining: number;
         judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
         enriched?:           boolean;
@@ -157,9 +158,11 @@ only weakly is deferred rather than retired, since a future pass against a chang
 differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. A fact whose
 text restates one already decided is retired as a duplicate (\`__duplicate__\`) without being ranked, and a fact
 routed weakly \`weakVerdictsBeforeBacklog\` times (default 4) moves to the backlog (\`__backlog__\`), which
-passes no longer re-rank. Each pass
+passes no longer re-rank; a weak fact whose addresses, numbers and quoted identifiers all appear in that skill
+already is retired as \`__known__\`. One pass runs at a time, across processes, by a lease in the
+\`dream_lease\` store. Each pass
 writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be invoked via the
-\`background\` tool on a schedule, never inline. One pass at a time is enforced by a process-local mutex.
+\`background\` tool on a schedule, never inline.
 
 It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, written to by remember_fact.
 The store is idempotent: a re-seed on restart keeps the existing data.

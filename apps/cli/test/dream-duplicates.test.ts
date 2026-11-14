@@ -157,3 +157,64 @@ test('a fact weak for the weakVerdictsBeforeBacklog-th time moves to the backlog
   assert.equal((await facts.get('w6'))?.dreamSkill, '__duplicate__');
   assert.deepEqual(ranked, []);
 });
+
+test('a weak fact whose anchors are all in the skill is retired as already known', async () => {
+  const { alreadyStated, anchorsOf } = await import('../../../plugins/cognition/src/dream/runOnce.ts');
+  assert.deepEqual(anchorsOf('The WAN router is at 192.168.0.1.'), ['192.168.0.1']);
+  assert.deepEqual(anchorsOf('The check runs every 10 minutes'), [], 'small numbers are not anchors');
+  assert.deepEqual(anchorsOf('Use `mosquitto_sub` on port 8088'), [], 'neither a quoted name nor a bare integer is an anchor');
+  assert.deepEqual(anchorsOf('Pinned to session `312ee8de-0932-4a66-b611-23c799dcaab5`, skill ec626cb6'),
+    ['312ee8de-0932-4a66-b611-23c799dcaab5', 'ec626cb6']);
+  assert.deepEqual(anchorsOf('The cap applies from April 2027, at 12,000'), []);
+  assert.deepEqual(anchorsOf('Fixed in 0.5.0 on 2026-11-14 at 19:49, not 1.5'), ['0.5.0', '2026-11-14', '19:49']);
+  const skill = '| `192.168.0.1` | hub | WAN router |\nThe broker websocket is on 8088.';
+  assert.ok(alreadyStated('The WAN router has IP address 192.168.0.1', skill));
+  assert.ok(!alreadyStated('The printer is at 192.168.0.22', skill));
+  assert.ok(!alreadyStated('The check runs every 10 minutes', skill), 'no anchors, never known');
+
+  const facts = new MemoryStore<RememberedFact>();
+  await facts.set('k1', fact('k1', 'The WAN router has IP address 192.168.0.1', '2026-01-01T00:00:00Z'));
+  await facts.set('k2', fact('k2', 'The printer is at 192.168.0.22', '2026-01-02T00:00:00Z'));
+  const ranker: Ranker = { async rank(fs, skills) { return fs.flatMap(f => skills.map(s => ({ factId: f.id, skill: s.name, score: 0.6, reasoning: '' }))); } };
+  const merger: Merger = { async merge() { throw new Error('unused'); } };
+  const services = {
+    settings: () => ({ get: async () => undefined }),
+    createStore: () => facts,
+    SkillManager: {
+      all: async () => [{ name: 'Net', content: skill, knowledge: { summary: 'network', entities: [], tags: [] } }],
+      get: async () => ({ name: 'Net', content: skill }), save: async () => {},
+    },
+  } as unknown as MatbotMachine;
+  const pass = runOnce(services, ranker, merger, new AbortController().signal);
+  let next = await pass.next();
+  while (!next.done) next = await pass.next();
+  assert.equal((await facts.get('k1'))?.dreamSkill, '__known__');
+  assert.equal((await facts.get('k2'))?.dreamSkill, undefined, 'a fact the skill lacks is deferred as before');
+  assert.equal(next.value.known, 1);
+});
+
+test('a skill with no metadata yet is left out of the pass, not a reason to fail it', async () => {
+  const facts = new MemoryStore<RememberedFact>();
+  await facts.set('f', fact('f', 'Something', '2026-01-01T00:00:00Z'));
+  const offered: string[][] = [];
+  const ranker: Ranker = { async rank(fs, skills) { offered.push(skills.map(s => s.name)); return []; } };
+  const services = {
+    settings: () => ({ get: async () => ({ maxEnrichmentsPerPass: 0 }) }),
+    createStore: () => facts,
+    SkillManager: {
+      all: async () => [
+        { name: 'Net', content: '#', knowledge: { summary: 'network', entities: [], tags: [] } },
+        { name: 'Fresh', content: '#' },
+      ],
+      get: async () => undefined, save: async () => {},
+    },
+  } as unknown as MatbotMachine;
+  const warn = console.warn; console.warn = () => {};
+  try {
+    const pass = runOnce(services, ranker, { async merge() { throw new Error('unused'); } }, new AbortController().signal);
+    let next = await pass.next();
+    while (!next.done) next = await pass.next();
+    assert.notEqual(next.value.outcome, 'error');
+  } finally { console.warn = warn; }
+  assert.deepEqual(offered, [['Net']]);
+});

@@ -157,6 +157,9 @@ export interface DreamRun {
   /** How many facts were moved to the backlog this pass ({@link DREAM_SKILL_BACKLOG}): weak for the
    *  `weakVerdictsBeforeBacklog`th time. Absent from runs recorded before the backlog existed. */
   backlogged?:         number;
+  /** How many facts were retired this pass as already stated ({@link DREAM_SKILL_KNOWN}). Absent from runs
+   *  recorded before that existed. */
+  known?:              number;
   /** How many facts were retired this pass as restatements of one already decided, or of one decided in this
    *  pass ({@link DREAM_SKILL_DUPLICATE}). Absent from runs recorded before duplicates were retired. */
   duplicates?:         number;
@@ -185,7 +188,7 @@ export interface DreamRun {
  * `dreamSkill` is the "processed" marker. Its presence (regardless of value) means a previous
  * pass already routed this fact TERMINALLY — no future pass will reconsider it. The value, when
  * set to a real skill name, is what we merged into; {@link DREAM_SKILL_NONE} and
- * {@link DREAM_SKILL_ERROR}, {@link DREAM_SKILL_DUPLICATE} and {@link DREAM_SKILL_BACKLOG} are sentinels for the terminal non-routes (see below). A `weak`
+ * {@link DREAM_SKILL_ERROR}, {@link DREAM_SKILL_DUPLICATE}, {@link DREAM_SKILL_BACKLOG} and {@link DREAM_SKILL_KNOWN} are sentinels for the terminal non-routes (see below). A `weak`
  * verdict deliberately does NOT set `dreamSkill` — it is not terminal, it is deferred via
  * `ignoreUntil`.
  *
@@ -238,6 +241,12 @@ export const DREAM_SKILL_DUPLICATE = '__duplicate__';
  *  chance. Unlike {@link DREAM_SKILL_NONE} it is not a verdict on the fact: it is the pool a future step
  *  clusters into new skills, and releases for one more ranking when the skills change. */
 export const DREAM_SKILL_BACKLOG = '__backlog__';
+
+/** Sentinel `dreamSkill` value for a fact routed weak to a skill whose text already contains every anchor of
+ *  it (see `alreadyStated` in runOnce.ts): an address, a number, a quoted identifier. The ranker scores a
+ *  restatement weak because it adds nothing, which is not the same as having no home; deferring it, and
+ *  then backlogging it for clustering, would only rediscover the skill that already holds it. */
+export const DREAM_SKILL_KNOWN = '__known__';
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 

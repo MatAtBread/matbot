@@ -23,7 +23,7 @@
  * touching this file.
  *
  * `runOnce` itself is a single async function rather than a class because there is no per-call
- * state worth carrying across calls. Cross-call concerns (the process-local mutex that serialises
+ * state worth carrying across calls. Cross-call concerns (the lease that serialises
  * runs, the wiring of stores, the choice of Ranker/Merger implementation) live in the caller —
  * `./service.ts` when added, or the tool executor when added — not here.
  */
@@ -45,6 +45,7 @@ import {
   DREAM_SKILL_BACKLOG,
   DREAM_SKILL_DUPLICATE,
   DREAM_SKILL_ERROR,
+  DREAM_SKILL_KNOWN,
   DREAM_SKILL_NONE,
   validateDreamSettings,
 } from './types.js';
@@ -152,16 +153,44 @@ async function fetchDecidedKeys(store: Store<RememberedFact>): Promise<Set<strin
   return keys;
 }
 
+/**
+ * The parts of a fact a paraphrase does not change, and that do not recur in a skill by coincidence:
+ * URLs, email addresses, ids (a UUID, a hex id with letters and digits) and numbers with separators five
+ * characters or longer (an address, a date, a version, a time). Not a bare integer: a year, a "191" or a
+ * "000" is in any long skill, and matched a pension fact and a garden sensor to the wrong one. Not a quoted
+ * name either: a skill about tools names `tool_search` throughout, so a new finding about it read as known.
+ */
+export function anchorsOf(text: string): string[] {
+  const found = new Set<string>();
+  for (const m of text.matchAll(/https?:\/\/[^\s)`]+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g)) found.add(m[0]);
+  for (const m of text.matchAll(/\b(?=[0-9a-f-]*\d)(?=[0-9a-f-]*[a-f])[0-9a-f]{8}(?:-[0-9a-f]{4,12})*\b/gi)) found.add(m[0]);
+  for (const m of text.matchAll(/\d+(?:[.:/-]\d+)+/g)) if (m[0].length >= 5) found.add(m[0]);
+  const all = [...found].map(a => a.toLowerCase().replace(/[.,;:!?]+$/, '')).filter(a => a !== '');
+  return all.filter(a => !all.some(b => b !== a && b.includes(a)));   // a number inside an id is the id's
+}
+
+/**
+ * Whether a fact routed weak to a skill is already in it: it has anchors, and every one appears in the
+ * skill's text. Asked only of a weak verdict — a fact the ranker scored strong is merged, so one that adds
+ * something to a known address is the merger's to place — and a fact with no anchors is never "known".
+ */
+export function alreadyStated(fact: string, skillContent: string): boolean {
+  const anchors = anchorsOf(fact);
+  if (anchors.length === 0) return false;
+  const haystack = skillContent.toLowerCase();
+  return anchors.every(a => haystack.includes(a));
+}
+
 // ── Candidate assembly ────────────────────────────────────────────────────────
 
 /**
  * Build the {@link SkillCandidate} list from the live skill manager: every skill, minus the
  * blocklist, projected down to (name, summary, entities, tags).
  *
- * Missing metadata is a hard error: skills layer is responsible for keeping `knowledge` current on
- * write, and dream-time would not be doing useful work if it ranked against blank summaries. We
- * fail with a clear, actionable message rather than silently dropping skills (which would make
- * routing decisions inscrutable).
+ * A skill with no metadata yet is left out of this pass, with a warning naming it. Ranking against a
+ * blank summary routes nothing usefully, and failing the pass instead (as this did) made every pass fail
+ * from a skill's creation until its analysis landed, which is detached and may take a while; and a skill
+ * created hidden is never analysed at all. It is offered again once it has metadata.
  */
 async function buildCandidates(
   services: MatbotMachine,
@@ -184,10 +213,7 @@ async function buildCandidates(
     candidates.push({ name: doc.name, summary: k.summary, entities: k.entities, tags: k.tags });
   }
   if (missing.length > 0) {
-    throw new Error(
-      `dream-time requires every skill to have populated metadata, but these do not: ` +
-      `${missing.join(', ')}. Run the skills metadata-population pass before invoking dream-time.`,
-    );
+    console.warn(`[dream] skill(s) with no metadata yet, not offered to the ranker this pass: ${missing.join(', ')}.`);
   }
   return candidates;
 }
@@ -383,6 +409,7 @@ export async function* runOnce(
     quarantined:    0,
     duplicates:     0,
     backlogged:     0,
+    known:          0,
     unassignedRemaining,
     judgementCalls: calls,
     ...extras,
@@ -504,23 +531,35 @@ export async function* runOnce(
     //    was edited underneath us — harmless, the next pass reconsiders it — so we skip and carry on rather
     //    than abort the whole pass. ──
     const ignoreUntil = new Date(Date.parse(startedAt) + settings.weakDeferralMs).toISOString();
-    let deferred = 0, retired = 0, backlogged = 0;
+    let deferred = 0, retired = 0, backlogged = 0, known = 0;
+    const contentOf = new Map<string, Promise<string | undefined>>();
+    const skillText = (name: string): Promise<string | undefined> => {
+      let p = contentOf.get(name);
+      if (p === undefined) { p = manager.get(name).then(d => d?.content); contentOf.set(name, p); }
+      return p;
+    };
     const defer = async (g: RememberedFact): Promise<void> => {
       try { await patchFact(facts, g.id, { ignoreUntil }); deferred++; } catch { /* raced edit */ }
     };
     for (const { fact: f, decision: d } of weak) {
       const lastVerdict = { skill: d.skill ?? '', score: d.score ?? 0, reasoning: d.reasoning };
+      const content     = d.skill !== undefined ? await skillText(d.skill) : undefined;
+      const isKnown     = content !== undefined && alreadyStated(f.fact, content);
       let applied: FactPatch | undefined;
       try {
         applied = await patchFact(facts, f.id, fresh => {
           const weakVerdicts = (fresh.weakVerdicts ?? 0) + 1;
+          if (isKnown) return { dreamSkill: DREAM_SKILL_KNOWN, weakVerdicts, lastVerdict };
           return weakVerdicts >= settings.weakVerdictsBeforeBacklog
             ? { dreamSkill: DREAM_SKILL_BACKLOG, weakVerdicts, lastVerdict }
             : { ignoreUntil, weakVerdicts, lastVerdict };
         });
       } catch { continue; /* raced edit */ }
       if (applied === undefined) continue;
-      if (applied.dreamSkill === DREAM_SKILL_BACKLOG) {
+      if (applied.dreamSkill === DREAM_SKILL_KNOWN) {
+        known++;
+        for (const g of followersOf(f)) await retireDuplicate(g);
+      } else if (applied.dreamSkill === DREAM_SKILL_BACKLOG) {
         backlogged++;
         for (const g of followersOf(f)) await retireDuplicate(g);
       } else {
@@ -602,7 +641,7 @@ export async function* runOnce(
 
     const merged    = mergedFactIds.length;
     // Over-budget strong facts and their followers, and the followers of a quarantined fact: eligible next pass.
-    const remaining = eligible.length - merged - deferred - retired - quarantined - duplicates - backlogged;
+    const remaining = eligible.length - merged - deferred - retired - quarantined - duplicates - backlogged - known;
     const outcome: DreamRunOutcome = merged > 0 ? 'merged' : 'no-match';
 
     return finish(outcome, remaining, {
@@ -620,6 +659,7 @@ export async function* runOnce(
       quarantined,
       duplicates,
       backlogged,
+      known,
       ...(enrichedIds.has(oldest.id) ? { enriched: true } : {}),
       ...(mergeErrors.length > 0 ? { errors: mergeErrors } : {}),
     });

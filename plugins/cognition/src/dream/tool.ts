@@ -10,13 +10,15 @@
  *
  * The deterministic spine lives in `./runOnce.ts`. This file is the thin tool-shaped wrapper:
  *
- *   • A process-local mutex serialises runs. Two `dream_time` calls in flight at once is a
- *     hazard (they would race on `SkillManager.save` and on per-fact CAS writes), and there is no
- *     legitimate reason to run them in parallel — one consolidation pass at a time is the design.
+ *   • A lease (`./lease.ts`) admits one pass at a time across processes. Two passes at once race on
+ *     `SkillManager.save` and on per-fact writes, and a scheduled pass runs in a job's own process
+ *     beside any started in the server, so a mutex in one process is not enough. A pass that finds
+ *     the lease held is skipped, not queued.
  *
  *   • The ranker and merger each resolve their own provider independently — `dreamRankerProvider`
  *     / `dreamMergerProvider` (cognition_config) if pinned, else `ctx.provider` (the model driving
- *     the calling turn). Unpinned, a user on a cheap model gets cheap dream-time and a user on a
+ *     the calling turn). With both pinned, a call with no turn behind it (`POST /tools/dream_time`)
+ *     runs too. Unpinned, a user on a cheap model gets cheap dream-time and a user on a
  *     thinky model gets thinky dream-time — no config needed to get started. Pinning matters most
  *     for the merger: it sees a whole skill's prose plus the fact, so a small-context provider can
  *     truncate and fail on a large skill even when the same provider ranks fine (ranking only ever
@@ -33,6 +35,7 @@ import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
 import type { DreamRun } from './types.js';
+import { acquireLease, type DreamLease } from './lease.js';
 import { DREAM_RANKER_PROVIDER_KEY, DREAM_MERGER_PROVIDER_KEY } from '../inner-voice/tool.js';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -41,39 +44,9 @@ declare module '@matatbread/matbot-plugin-api' {
   }
 }
 
-// Process-local mutex serialising passes (they'd race on SkillManager.save and per-fact CAS writes;
-// one consolidation pass at a time is the design). lock() resolves when it's this caller's turn and
-// hands back a release() — always invoked in a finally, so the chain never deadlocks. Unlike a
-// promise-wrapping serialise(), the lock is held across the whole generator DRAIN below, so progress
-// events can stream out of the executor while the pass still holds the mutex.
-let runTail: Promise<void> = Promise.resolve();
-function lock(): Promise<() => void> {
-  const prior = runTail;
-  let release!: () => void;
-  runTail = new Promise<void>(r => { release = r; });
-  return prior.then(() => release);
-}
-
 export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<'dream_time'>> {
   const executor: ToolExecutor<ToolResultOf<'dream_time'>> = {
     async *execute(_input: unknown, ctx: ToolContext) {
-      if (ctx.provider === undefined) {
-        yield {
-          type:    'error',
-          message: 'dream_time needs a provider in ToolContext (the model driving the current turn). ' +
-                   'None was present. This usually means the tool was invoked outside a normal turn.',
-        };
-        return;
-      }
-      if (!services.providers.has(ctx.provider)) {
-        yield {
-          type:    'error',
-          message: `dream_time was invoked with provider "${ctx.provider}", but no such provider is ` +
-                   `configured. Configured providers: ${[...services.providers.keys()].join(', ') || '(none)'}.`,
-        };
-        return;
-      }
-
       // Ranker and merger each resolve their own provider pin independently, falling back to the
       // calling turn's provider when unset or stale (the pinned name no longer exists). This
       // matters most for the merger, which sees a whole skill's prose plus the fact — a
@@ -83,19 +56,41 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
         services.settings().get<string>(DREAM_RANKER_PROVIDER_KEY),
         services.settings().get<string>(DREAM_MERGER_PROVIDER_KEY),
       ]);
-      const rankerProvider = (rankerPinned !== undefined && services.providers.has(rankerPinned)) ? rankerPinned : ctx.provider;
-      const mergerProvider = (mergerPinned !== undefined && services.providers.has(mergerPinned)) ? mergerPinned : ctx.provider;
+      const turn = ctx.provider !== undefined && services.providers.has(ctx.provider) ? ctx.provider : undefined;
+      const rankerProvider = (rankerPinned !== undefined && services.providers.has(rankerPinned)) ? rankerPinned : turn;
+      const mergerProvider = (mergerPinned !== undefined && services.providers.has(mergerPinned)) ? mergerPinned : turn;
+      if (rankerProvider === undefined || mergerProvider === undefined) {
+        yield {
+          type:    'error',
+          message: `dream_time has no provider for its ${rankerProvider === undefined ? 'ranker' : 'merger'}: none is pinned ` +
+                   '(cognition_config dreamRankerProvider / dreamMergerProvider) and ' +
+                   (ctx.provider === undefined ? 'there is no calling turn to borrow one from.'
+                     : `the calling turn's "${ctx.provider}" is not configured. Configured providers: ${[...services.providers.keys()].join(', ') || '(none)'}.`),
+          failure: 'invalid',
+        };
+        return;
+      }
 
       const ranker = createLlmRanker(services, rankerProvider);
       const merger = createLlmMerger(services, mergerProvider);
 
+      const lease = await acquireLease(services.createStore<DreamLease>('dream_lease'), crypto.randomUUID());
+      if (!lease.held) {
+        yield {
+          type:    'error',
+          message: `Another dream_time pass is running (it took the lease at ${lease.by.acquiredAt}; ` +
+                   `it lapses at ${lease.by.expiresAt} unless renewed), so this pass did not run.`,
+          failure: 'unavailable',
+        };
+        return;
+      }
+
       let run: DreamRun;
-      const release = await lock();
       try {
         // Drain the pipeline generator, streaming its progress out as tool progress events so a long
         // pass (a backlog of merges is many sequential LLM calls) isn't a silent wait. The generator's
         // RETURN value (step.value once done) is the fully-assembled DreamRun.
-        const gen = runOnce(services, ranker, merger, ctx.signal);
+        const gen = runOnce(services, ranker, merger, AbortSignal.any([ctx.signal, lease.lost]));
         let step = await gen.next();
         while (!step.done) {
           yield { type: 'progress', pct: step.value.pct, message: step.value.message };
@@ -109,7 +104,7 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
         yield { type: 'error', message: `dream_time failed before producing a run record: ${(e as Error).message ?? String(e)}` };
         return;
       } finally {
-        release();
+        await lease.release().catch(e => console.warn('[dream/tool] releasing the lease failed:', (e as Error).message ?? e));
       }
 
       // Persist the run record. Failures here are logged but do NOT block returning the result —
@@ -143,7 +138,9 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
       'fact, just no confident skill home yet) are deferred rather than retired — they become ' +
       'eligible again after a cooldown, since the skill landscape may change later; after ' +
       '`weakVerdictsBeforeBacklog` weak verdicts (default 4) a fact moves to the backlog (`__backlog__`) ' +
-      'and is not re-ranked, awaiting clustering into new skills. A merge that ' +
+      'and is not re-ranked, awaiting clustering into new skills — unless every address, number and ' +
+      'quoted identifier in it already appears in that skill, when it is retired as already known (`__known__`). ' +
+      'One pass runs at a time, across processes: a call made while another pass is running is skipped. A merge that ' +
       'fails outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
       'blocking the queue (needs a config fix, e.g. a provider swap, not an automatic retry) and ' +
       'the pass carries on with the other skills. A fact that restates one already merged or retired ' +

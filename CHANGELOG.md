@@ -675,6 +675,19 @@ a second host's needs.
   fact: it is what a future step clusters into new skills. Each weak verdict records `weakVerdicts` and
   `lastVerdict` (top skill, score, reasoning) on the fact, so the backlog tells a fact no skill fits from one a
   skill already states in other words. Counting starts with this release. `DreamRun` records `backlogged`.
+- **`cognition`** — a fact routed weak to a skill whose text already contains each of its anchors (URLs,
+  email addresses, ids, and numbers with separators such as addresses, dates, versions and times) is retired
+  as `__known__` rather than deferred: a restatement scores weak because it adds nothing, which is not the
+  same as having no home. A fact with no anchors is never `known`. `DreamRun` records `known`.
+- **`cognition`** — one dream-time pass runs at a time across processes, by a lease in the `dream_lease`
+  store with a ten-minute expiry renewed while the pass runs, so a crashed or restarted process holds
+  nothing once it lapses. A pass that finds the lease held is skipped (`unavailable`), not queued. The
+  in-process mutex it replaces let a scheduled pass, in a job's own process, run beside one started in the
+  server: one merged a fact while the other ranked and retired it.
+- **`cognition`** — `dream_time` runs with no calling turn (`POST /tools/dream_time`) when both
+  `dreamRankerProvider` and `dreamMergerProvider` are pinned. A skill with no metadata yet is left out of a
+  pass, with a warning, instead of failing it: a pass failed from a skill's creation until its detached
+  analysis landed.
 - **`cognition`** — the dream-time ranker sends the skill roster in its system prompt and the fact alone as
   the message, so the roster, nearly all of each call's input, is a prefix a provider's prompt cache can
   reuse across a pass; it followed the fact, which made every call unique from its first line.
