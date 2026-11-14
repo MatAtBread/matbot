@@ -154,8 +154,14 @@ export interface DreamRun {
   retired:             number;
   /** How many facts were quarantined this pass after a durable merge failure ({@link DREAM_SKILL_ERROR}). */
   quarantined:         number;
+  /** How many facts were moved to the backlog this pass ({@link DREAM_SKILL_BACKLOG}): weak for the
+   *  `weakVerdictsBeforeBacklog`th time. Absent from runs recorded before the backlog existed. */
+  backlogged?:         number;
+  /** How many facts were retired this pass as restatements of one already decided, or of one decided in this
+   *  pass ({@link DREAM_SKILL_DUPLICATE}). Absent from runs recorded before duplicates were retired. */
+  duplicates?:         number;
   /** Immediately-actionable facts left after this pass — `strong` facts that exceeded the merge
-   *  budget (or per-skill cluster cap). Deferred/retired/merged/quarantined facts are NOT counted:
+   *  budget (or per-skill cluster cap). Deferred/retired/merged/quarantined/duplicate facts are NOT counted:
    *  this is the signal a scheduler can use to decide whether to re-fire straight away. */
   unassignedRemaining: number;
   judgementCalls:      JudgementCallStat[];
@@ -179,7 +185,7 @@ export interface DreamRun {
  * `dreamSkill` is the "processed" marker. Its presence (regardless of value) means a previous
  * pass already routed this fact TERMINALLY — no future pass will reconsider it. The value, when
  * set to a real skill name, is what we merged into; {@link DREAM_SKILL_NONE} and
- * {@link DREAM_SKILL_ERROR} are sentinels for the two terminal non-routes (see below). A `weak`
+ * {@link DREAM_SKILL_ERROR}, {@link DREAM_SKILL_DUPLICATE} and {@link DREAM_SKILL_BACKLOG} are sentinels for the terminal non-routes (see below). A `weak`
  * verdict deliberately does NOT set `dreamSkill` — it is not terminal, it is deferred via
  * `ignoreUntil`.
  *
@@ -199,6 +205,13 @@ export interface RememberedFact {
   createdAt:    string;
   dreamSkill?:  string;
   ignoreUntil?: string;
+  /** How many passes have routed this fact `weak`. Counted from when the backlog was introduced, so a fact
+   *  deferred before then starts at 0. */
+  weakVerdicts?: number;
+  /** The top candidate at the fact's latest weak verdict. Kept so that a later look at the backlog can tell
+   *  a fact no skill fits (a low score everywhere) from one a skill already says in other words (a score
+   *  just under the strong threshold against a skill that covers it), without ranking it again. */
+  lastVerdict?:  { skill: string; score: number; reasoning: string };
 }
 
 /** Sentinel `dreamSkill` value for facts the pipeline triaged and durably declined to route — the
@@ -212,6 +225,19 @@ export const DREAM_SKILL_NONE = '__none__';
  *  it marks them and moves on. Distinct from {@link DREAM_SKILL_NONE} so a `dream_runs` query can
  *  tell "the ranker declined this" apart from "the merger choked on this". */
 export const DREAM_SKILL_ERROR = '__error__';
+
+/** Sentinel `dreamSkill` value for a fact retired as a restatement: its text (see `factKey` in runOnce.ts)
+ *  matches a fact that was merged, retired, or itself retired as a duplicate. No judgement call is made about
+ *  it — the decision was made about its twin — which is the point: a fact captured again and again would
+ *  otherwise be ranked again and again, and merged as often as a re-roll scored it strong. */
+export const DREAM_SKILL_DUPLICATE = '__duplicate__';
+
+/** Sentinel `dreamSkill` value for a fact routed `weak` `weakVerdictsBeforeBacklog` times: sound, but with
+ *  no confident home among the skills that existed while it was asked. Passes stop re-ranking it, since
+ *  asking the same question again only re-rolls a noisy score until one crosses the strong threshold by
+ *  chance. Unlike {@link DREAM_SKILL_NONE} it is not a verdict on the fact: it is the pool a future step
+ *  clusters into new skills, and releases for one more ranking when the skills change. */
+export const DREAM_SKILL_BACKLOG = '__backlog__';
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -247,6 +273,9 @@ export interface DreamSettings {
    *  reconsidered (and enriched) in a later pass rather than re-ranked every pass. 0 disables
    *  enrichment entirely (every first-pass `none` retires immediately). */
   maxEnrichmentsPerPass: number;
+  /** How many weak verdicts a fact gets before it moves to the backlog ({@link DREAM_SKILL_BACKLOG})
+   *  instead of being deferred again (default 4: about six days at the default deferral). */
+  weakVerdictsBeforeBacklog: number;
 }
 
 export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
@@ -257,6 +286,7 @@ export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
   weakDeferralMs:        36 * 60 * 60 * 1000,
   maxMergesPerPass:      20,
   maxEnrichmentsPerPass: 10,
+  weakVerdictsBeforeBacklog: 4,
 };
 
 /** Storage key for the persisted (partial) {@link DreamSettings} override. Shared by `runOnce`'s
@@ -290,5 +320,8 @@ export function validateDreamSettings(s: DreamSettings): void {
   }
   if (!Number.isInteger(s.maxEnrichmentsPerPass) || s.maxEnrichmentsPerPass < 0) {
     throw new Error(`maxEnrichmentsPerPass (${s.maxEnrichmentsPerPass}) must be an integer >= 0.`);
+  }
+  if (!Number.isInteger(s.weakVerdictsBeforeBacklog) || s.weakVerdictsBeforeBacklog < 1) {
+    throw new Error(`weakVerdictsBeforeBacklog (${s.weakVerdictsBeforeBacklog}) must be an integer >= 1.`);
   }
 }

@@ -70,6 +70,8 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
         deferred:            number;
         retired:             number;
         quarantined:         number;
+        duplicates?:         number;
+        backlogged?:         number;
         unassignedRemaining: number;
         judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
         enriched?:           boolean;
@@ -152,7 +154,10 @@ cognition_config, else falling back to the active turn's provider), and — if a
 threshold — splices the fact in and marks it processed (a \`dreamSkill\` field). A fact that scores too low
 ("none") gets one extra look enriched with conversation context before being retired; a fact that scores
 only weakly is deferred rather than retired, since a future pass against a changed skill set may answer
-differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. Each pass
+differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. A fact whose
+text restates one already decided is retired as a duplicate (\`__duplicate__\`) without being ranked, and a fact
+routed weakly \`weakVerdictsBeforeBacklog\` times (default 4) moves to the backlog (\`__backlog__\`), which
+passes no longer re-rank. Each pass
 writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be invoked via the
 \`background\` tool on a schedule, never inline. One pass at a time is enforced by a process-local mutex.
 
@@ -181,6 +186,8 @@ it is purely a data maintenance function.
             createdAt: string;
             dreamSkill?: string;
             ignoreUntil?: string;
+            weakVerdicts?: number;
+            lastVerdict?: { skill: string; score: number; reasoning: string };
           }`,
       });
 

@@ -663,6 +663,21 @@ a second host's needs.
   matched every run: a job every ten minutes whose prompt named three IP addresses had them remembered about
   300 times a day. `reply` judges only what the job said; `none` neither, with no classifier call. Absent is
   `all`, as before. It is applied through `TriggerFilter`, composing with any filter already registered.
+- **`cognition`** — dream-time retires a fact whose text restates one already merged or retired, without
+  ranking it, as `dreamSkill: '__duplicate__'` (the same text ignoring case, spacing and trailing
+  punctuation, and nothing looser). Of several identical new facts only the oldest is ranked, and the rest
+  follow its disposition. Each copy was otherwise ranked again every 36 hours, and merged — a whole-skill
+  rewrite — whenever a re-roll scored it strong. `DreamRun` records `duplicates`.
+- **`cognition`** — a fact routed weak `weakVerdictsBeforeBacklog` times (default 4, a `cognition_config`
+  setting) moves to the backlog, `dreamSkill: '__backlog__'`, instead of being deferred again; passes no longer
+  re-rank it. A weak fact was otherwise deferred for 36 hours and ranked again indefinitely, and a noisy score
+  eventually crossed the strong threshold by chance. Unlike `__none__`, the backlog is not a verdict on the
+  fact: it is what a future step clusters into new skills. Each weak verdict records `weakVerdicts` and
+  `lastVerdict` (top skill, score, reasoning) on the fact, so the backlog tells a fact no skill fits from one a
+  skill already states in other words. Counting starts with this release. `DreamRun` records `backlogged`.
+- **`cognition`** — the dream-time ranker sends the skill roster in its system prompt and the fact alone as
+  the message, so the roster, nearly all of each call's input, is a prefix a provider's prompt cache can
+  reuse across a pass; it followed the fact, which made every call unique from its first line.
 - **`function-tools`** exports its source scanner as `@matatbread/matbot-function-tools/scan`
   (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
   line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow

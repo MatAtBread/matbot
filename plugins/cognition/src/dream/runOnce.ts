@@ -42,6 +42,8 @@ import {
   type SkillCandidate,
   DEFAULT_DREAM_SETTINGS,
   DREAM_SETTINGS_KEY,
+  DREAM_SKILL_BACKLOG,
+  DREAM_SKILL_DUPLICATE,
   DREAM_SKILL_ERROR,
   DREAM_SKILL_NONE,
   validateDreamSettings,
@@ -115,6 +117,39 @@ async function fetchUnassignedFacts(store: Store<RememberedFact>, nowIso: string
     cursor = page.cursor;
   } while (cursor !== undefined);
   return out;
+}
+
+// ── Duplicates ────────────────────────────────────────────────────────────────
+
+/**
+ * What two facts must share to be the same fact: case, Unicode form, runs of whitespace and trailing
+ * punctuation, and nothing else. A duplicate is retired unread, so this errs towards keeping two: "is at
+ * 192.168.0.20" and "has IP address 192.168.0.20" stay two facts and are each ranked. Exact restatement is
+ * what a recurring capture produces — one job's prompt, remembered every ten minutes, put the same three
+ * sentences into the store over a thousand times — and each copy cost a rank every 36 hours for ever, and a
+ * whole-skill merge whenever a re-roll scored it strong.
+ */
+export function factKey(text: string): string {
+  return text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[\s.!;:,]+$/u, '');
+}
+
+/**
+ * The keys of every fact a pass has already decided: merged, retired as `none`, moved to the backlog, or
+ * itself a duplicate of one of those. A copy of a backlogged fact is a duplicate too: the backlog holds the
+ * text once, for whatever clusters it. A quarantined fact ({@link DREAM_SKILL_ERROR}) decided nothing about its text — its merge
+ * failed — so a later copy of it is ranked rather than retired.
+ */
+async function fetchDecidedKeys(store: Store<RememberedFact>): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await store.query(
+      cursor !== undefined ? { cursor } : { where: { op: 'exists', field: 'dreamSkill', value: true } },
+    );
+    for (const f of page.items) if (f.dreamSkill !== DREAM_SKILL_ERROR) keys.add(factKey(f.fact));
+    cursor = page.cursor;
+  } while (cursor !== undefined);
+  return keys;
 }
 
 // ── Candidate assembly ────────────────────────────────────────────────────────
@@ -218,18 +253,24 @@ function indexScoresByFact(scores: readonly Score[]): Map<string, Score[]> {
  * One shared helper for every routing disposition: `{ dreamSkill: <skill> }` (merged),
  * `{ dreamSkill: DREAM_SKILL_NONE }` / `{ dreamSkill: DREAM_SKILL_ERROR }` (terminal retirement),
  * or `{ ignoreUntil }` (a `weak` deferral, leaving `dreamSkill` untouched — not terminal).
+ *
+ * A patch that depends on what the fact holds (a weak verdict counts the ones before it) is a function
+ * of the fresh read, so a retry recomputes it. Returns the patch that landed, `undefined` when the fact
+ * was deleted underneath us.
  */
+type FactPatch = Partial<Pick<RememberedFact, 'dreamSkill' | 'ignoreUntil' | 'weakVerdicts' | 'lastVerdict'>>;
 async function patchFact(
   store:  Store<RememberedFact>,
   factId: string,
-  patch:  Partial<Pick<RememberedFact, 'dreamSkill' | 'ignoreUntil'>>,
-): Promise<void> {
+  patch:  FactPatch | ((fresh: RememberedFact) => FactPatch),
+): Promise<FactPatch | undefined> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const fresh = await store.get(factId);
-    if (fresh === null) return;   // deleted underneath us — nothing to patch
-    const next: RememberedFact = { ...fresh, ...patch };
+    if (fresh === null) return undefined;   // deleted underneath us — nothing to patch
+    const applied = typeof patch === 'function' ? patch(fresh) : patch;
+    const next: RememberedFact = { ...fresh, ...applied };
     const res = await store.cas(fresh.id, fresh.version, next);
-    if (res.ok) return;
+    if (res.ok) return applied;
   }
   throw new Error(`dream-time could not CAS-update fact ${factId} after retry`);
 }
@@ -340,14 +381,39 @@ export async function* runOnce(
     deferred:       0,
     retired:        0,
     quarantined:    0,
+    duplicates:     0,
+    backlogged:     0,
     unassignedRemaining,
     judgementCalls: calls,
     ...extras,
   });
 
   try {
-    const unassigned = await fetchUnassignedFacts(facts, startedAt);
-    if (unassigned.length === 0) return finish('no-facts', 0);
+    const eligible = await fetchUnassignedFacts(facts, startedAt);
+    if (eligible.length === 0) return finish('no-facts', 0);
+
+    // ── Duplicates first, with no judgement call: a fact whose text was already decided is retired as a
+    //    duplicate of it, and of several eligible facts sharing one text only the oldest (the
+    //    representative) is ranked — the rest follow its disposition below. `eligible` is oldest-first, so
+    //    the representative is the oldest copy. ──
+    const decidedKeys = await fetchDecidedKeys(facts);
+    const unassigned: RememberedFact[] = [];
+    const followers = new Map<string, RememberedFact[]>();
+    const byKey     = new Map<string, RememberedFact>();
+    let duplicates  = 0;
+    const retireDuplicate = async (f: RememberedFact): Promise<void> => {
+      try { await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_DUPLICATE }); duplicates++; } catch { /* raced edit */ }
+    };
+    for (const f of eligible) {
+      const key = factKey(f.fact);
+      if (decidedKeys.has(key)) { await retireDuplicate(f); continue; }
+      const rep = byKey.get(key);
+      if (rep === undefined) { byKey.set(key, f); unassigned.push(f); continue; }
+      const behind = followers.get(rep.id);
+      if (behind === undefined) followers.set(rep.id, [f]); else behind.push(f);
+    }
+    const followersOf = (f: RememberedFact): readonly RememberedFact[] => followers.get(f.id) ?? [];
+    if (unassigned.length === 0) return finish('no-match', 0, { duplicates });
     if (candidates.length === 0) {
       // No skills to route into at all — the purest case of "the skill landscape isn't ready",
       // not a verdict on the fact. Don't burn a rank call; don't mark anything either — this
@@ -355,7 +421,8 @@ export async function* runOnce(
       // eligible for whenever a skill appears, with no deferral bookkeeping needed.
       const primary = unassigned[0];
       if (primary === undefined) return finish('no-facts', 0);   // unreachable: length>0 above
-      return finish('no-match', unassigned.length, {
+      return finish('no-match', eligible.length - duplicates, {
+        duplicates,
         primaryFact: { id: primary.id, preview: preview(primary.fact) },
         routedTo:    { skill: '', decision: 'weak', score: 0, reasoning: 'no candidate skills are configured at all' },
       });
@@ -377,14 +444,14 @@ export async function* runOnce(
     // Classify every fact from that single rank. `unassigned` is oldest-first, so each bucket and
     // the per-skill groups below inherit that order (oldest facts processed first under any cap).
     const strong: { fact: RememberedFact; decision: RouteDecision }[] = [];
-    const weak:   RememberedFact[] = [];
+    const weak:   { fact: RememberedFact; decision: RouteDecision }[] = [];
     const none:   RememberedFact[] = [];
     let oldestDecision: RouteDecision = { decision: 'none', reasoning: '' };
     for (const f of unassigned) {
       const d = decide(f.id, byFact, settings);
       if (f.id === oldest.id) oldestDecision = d;
       if      (d.decision === 'strong') strong.push({ fact: f, decision: d });
-      else if (d.decision === 'weak')   weak.push(f);
+      else if (d.decision === 'weak')   weak.push({ fact: f, decision: d });
       else                              none.push(f);
     }
     // One linear bar over the per-fact LLM calls that follow — the enrichment re-ranks plus the
@@ -426,21 +493,45 @@ export async function* runOnce(
       const d = decide(f.id, indexScoresByFact(enrichedScores), settings);
       if (f.id === oldest.id) oldestDecision = d;
       if      (d.decision === 'strong') strong.push({ fact: f, decision: d });
-      else if (d.decision === 'weak')   weak.push(f);
+      else if (d.decision === 'weak')   weak.push({ fact: f, decision: d });
       else                              stillNone.push(f);
     }
 
     // ── Cheap dispositions (no skill writes, no judgement calls): defer the weak + over-budget
-    //    `none` facts, retire the terminal `none` facts. A CAS miss here means the fact was edited
-    //    underneath us — harmless, the next pass reconsiders it — so we skip and carry on rather
+    //    `none` facts, retire the terminal `none` facts, and move a fact weak for the
+    //    weakVerdictsBeforeBacklog-th time to the backlog. Only a weak VERDICT counts: a `none` fact
+    //    deferred for want of enrichment budget has not been answered yet. A CAS miss here means the fact
+    //    was edited underneath us — harmless, the next pass reconsiders it — so we skip and carry on rather
     //    than abort the whole pass. ──
     const ignoreUntil = new Date(Date.parse(startedAt) + settings.weakDeferralMs).toISOString();
-    let deferred = 0, retired = 0;
-    for (const f of [...weak, ...deferredNone]) {
-      try { await patchFact(facts, f.id, { ignoreUntil }); deferred++; } catch { /* raced edit */ }
+    let deferred = 0, retired = 0, backlogged = 0;
+    const defer = async (g: RememberedFact): Promise<void> => {
+      try { await patchFact(facts, g.id, { ignoreUntil }); deferred++; } catch { /* raced edit */ }
+    };
+    for (const { fact: f, decision: d } of weak) {
+      const lastVerdict = { skill: d.skill ?? '', score: d.score ?? 0, reasoning: d.reasoning };
+      let applied: FactPatch | undefined;
+      try {
+        applied = await patchFact(facts, f.id, fresh => {
+          const weakVerdicts = (fresh.weakVerdicts ?? 0) + 1;
+          return weakVerdicts >= settings.weakVerdictsBeforeBacklog
+            ? { dreamSkill: DREAM_SKILL_BACKLOG, weakVerdicts, lastVerdict }
+            : { ignoreUntil, weakVerdicts, lastVerdict };
+        });
+      } catch { continue; /* raced edit */ }
+      if (applied === undefined) continue;
+      if (applied.dreamSkill === DREAM_SKILL_BACKLOG) {
+        backlogged++;
+        for (const g of followersOf(f)) await retireDuplicate(g);
+      } else {
+        deferred++;
+        for (const g of followersOf(f)) await defer(g);
+      }
     }
+    for (const f of deferredNone) for (const g of [f, ...followersOf(f)]) await defer(g);
     for (const f of stillNone) {
       try { await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_NONE }); retired++; } catch { /* raced edit */ }
+      for (const g of followersOf(f)) await retireDuplicate(g);
     }
 
     // ── Merge phase: group strong facts by their chosen skill and drain up to maxMergesPerPass
@@ -468,7 +559,7 @@ export async function* runOnce(
 
       const cluster = members.slice(0, Math.min(settings.maxClusterSize, mergeBudget));
       let content = doc.content;
-      const skillMergedIds: string[] = [];
+      const skillMerged: RememberedFact[] = [];
       for (const f of cluster) {
         perFactDone++;
         yield { pct: bar(), message: `Merging into "${skill}"…` };
@@ -478,7 +569,7 @@ export async function* runOnce(
           calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
           content = result.content;
           for (const c of result.contradictions) allContradictions.push({ skill, location: c.location, note: c.note });
-          skillMergedIds.push(f.id);
+          skillMerged.push(f);
         } catch (e) {
           calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
           // Durable failure on THIS fact (unparseable response, or a structural guard tripped on
@@ -492,15 +583,16 @@ export async function* runOnce(
           break;
         }
       }
-      if (skillMergedIds.length === 0) continue;
+      if (skillMerged.length === 0) continue;
       try {
         // Skill save first so a CAS failure on a fact doesn't strand an un-saved merge.
         await manager.save(skill, content);
-        for (const id of skillMergedIds) {
-          try { await patchFact(facts, id, { dreamSkill: skill }); } catch { /* raced edit; fact stays eligible */ }
-          mergedFactIds.push(id);
+        for (const f of skillMerged) {
+          try { await patchFact(facts, f.id, { dreamSkill: skill }); } catch { /* raced edit; fact stays eligible */ }
+          mergedFactIds.push(f.id);
+          for (const g of followersOf(f)) await retireDuplicate(g);
         }
-        mergeBudget -= skillMergedIds.length;
+        mergeBudget -= skillMerged.length;
       } catch (e) {
         // The skill save itself failed — none of this cluster's facts are marked, so they stay
         // eligible for a future pass. Record and continue with the remaining skills.
@@ -509,7 +601,8 @@ export async function* runOnce(
     }
 
     const merged    = mergedFactIds.length;
-    const remaining = unassigned.length - merged - deferred - retired - quarantined;   // over-budget strong, eligible next pass
+    // Over-budget strong facts and their followers, and the followers of a quarantined fact: eligible next pass.
+    const remaining = eligible.length - merged - deferred - retired - quarantined - duplicates - backlogged;
     const outcome: DreamRunOutcome = merged > 0 ? 'merged' : 'no-match';
 
     return finish(outcome, remaining, {
@@ -525,6 +618,8 @@ export async function* runOnce(
       deferred,
       retired,
       quarantined,
+      duplicates,
+      backlogged,
       ...(enrichedIds.has(oldest.id) ? { enriched: true } : {}),
       ...(mergeErrors.length > 0 ? { errors: mergeErrors } : {}),
     });

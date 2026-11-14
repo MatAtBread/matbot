@@ -141,10 +141,14 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
       'isolation but route cleanly once disambiguated (enrichment itself is budgeted per pass; ' +
       'facts over that budget are deferred, not retired). Facts that route only weakly (a sound ' +
       'fact, just no confident skill home yet) are deferred rather than retired — they become ' +
-      'eligible again after a cooldown, since the skill landscape may change later. A merge that ' +
+      'eligible again after a cooldown, since the skill landscape may change later; after ' +
+      '`weakVerdictsBeforeBacklog` weak verdicts (default 4) a fact moves to the backlog (`__backlog__`) ' +
+      'and is not re-ranked, awaiting clustering into new skills. A merge that ' +
       'fails outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
       'blocking the queue (needs a config fix, e.g. a provider swap, not an automatic retry) and ' +
-      'the pass carries on with the other skills.\n\n' +
+      'the pass carries on with the other skills. A fact that restates one already merged or retired ' +
+      '(the same text, ignoring case, spacing and trailing punctuation) is retired as a duplicate without ' +
+      'being ranked, and of several identical new facts only the oldest is ranked; the rest follow it.\n\n' +
       'Takes no parameters. Intended to be invoked via the `background` tool on a schedule, not ' +
       'inline during a conversation. The ranker and merger each resolve their own provider — ' +
       '`dreamRankerProvider` / `dreamMergerProvider` via the cognition_config tool if pinned, else ' +
