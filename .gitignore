@@ -31,3 +31,4 @@ apps/web-bundle/dist/*
 
 # local tool-search eval artifacts (contain private session-derived request text)
 research/tool-search/*.local.*
+matbot.code-workspace
