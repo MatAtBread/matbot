@@ -356,18 +356,17 @@ export async function* runFunction(
   const emit = (ev: ToolEvent): void => { queue.push(ev); const w = wake; wake = null; w?.(); };
 
   const runner = machine.FunctionRunner;
-  // When the body settles, the calls it left running are stopped (`stopInFlight`): a `Promise.race` loser,
-  // a sibling of a rejection in `Promise.all`, a call left behind by an early return — each would otherwise
-  // run on, possibly as a whole agent turn, for a result nothing will read (#114). A call the body makes
-  // AFTER settling is a different thing: work it scheduled for later (a timer), which runs as written, as it
-  // would in any JavaScript. Refusing it bounded nothing — the timer itself ran on regardless — and only made
-  // one use of an ordinary `setTimeout` fail, after the body had reported success.
+  // A body's tool calls run under the calling turn's signal, as any promise runs until it settles: one the
+  // body did not await (a `Promise.race` loser, a call started and dropped) is not stopped by the body
+  // returning. Stopping them there (#114) was a rule no JavaScript author expects, so a model wrote code that
+  // failed at random; a body that wants a call stopped passes it a signal through `toolInContext`.
   //
-  // `lifetime` is for the other way a body ends: its caller stops reading before it settles (an abandoned
-  // call). Then nothing it does from that point on is anyone's, and every call it starts is refused.
+  // `lifetime` is for the one way a body ends that IS a stop: its caller stops reading before it settles
+  // (an abandoned call). Then nothing it does from that point on is anyone's, and every call it starts is
+  // refused.
   const lifetime = new AbortController();
   const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
-  const { tool, toolInContext, inFlight, stopInFlight } = makeToolBox(machine, {
+  const { tool, toolInContext } = makeToolBox(machine, {
     session: ctx.session,
     signal,
     prompt:  ctx.prompt,
@@ -430,17 +429,7 @@ export async function* runFunction(
   void fn({ importModule, ...network, ...(settings !== undefined ? { settings } : {}) },
           tool, toolInContext, context, ...argValues)
     .then(v => { result = v; }, e => { errored = true; error = e; })
-    .finally(() => {
-      done = true;
-      // Counted only when this is what stops them: after the turn's abort, or the caller abandoning the
-      // call, they were stopped already.
-      const left = signal.aborted ? 0 : inFlight();
-      stopInFlight();
-      // Said in the log because the caller cannot be told: its result is already settled. A body that
-      // meant the work to finish would otherwise lose it with no trace.
-      if (left > 0) console.warn(`[function-tools] ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}) settled with ${left} tool call${left === 1 ? '' : 's'} still running; ${left === 1 ? 'it was' : 'they were'} stopped.`);
-      settle();
-    });
+    .finally(() => { done = true; settle(); });
 
   try {
     for (;;) {
@@ -450,8 +439,7 @@ export async function* runFunction(
     }
   } finally {
     ctx.signal.removeEventListener('abort', onAbort);
-    // However this generator ends — a caller that stops reading included — nothing is waiting on the
-    // body's calls any more.
+    // Ended before the body settled: its caller stopped reading, so the body was abandoned.
     if (!done) lifetime.abort();
   }
   if (!done) { yield { type: 'error', message: CANCELLED }; return; }

@@ -6,9 +6,10 @@ import { makeToolBox } from '@matatbread/matbot-core';
 import type { MatbotMachine, Tool, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 import { createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
 
-// Issue #114: a body's tool calls were handed the calling TURN's signal, so a call the body started and
-// did not finish waiting for ran on after the body settled — since `single_turn` gained `tools: true`, as
-// a whole agent turn, for a result nothing would read. Each invocation now has a lifetime of its own.
+// Issue #114: a body's tool calls run under the calling turn's signal, and run to completion like any
+// promise whether or not the body awaited them. Stopping them when the body settled was tried and removed:
+// model-written fire-and-forget code failed at random. A body stops a call it no longer needs with a
+// signal of its own; only an ABANDONED body (its caller stopped reading) has its later calls refused.
 
 const stripper = { strip: (s: string) => stripTypeScriptTypes(s) };
 const runner = createVmFunctionRunner(200);
@@ -61,78 +62,84 @@ const failing: Tool = {
 const within = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
   Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${what} within ${ms}ms`)), ms))]);
 
-test('a Promise.race loser is stopped when the body returns, while the turn runs on', async (t) => {
+// A call that finishes after `ms`, unless its signal aborts first.
+function sleeper(ms: number): Tool & { finished: () => number; aborted: () => number } {
+  let finished = 0;
+  let aborted = 0;
+  return {
+    name: 'sleep', description: '', inputSchema: { type: 'object' },
+    executor: {
+      async *execute(_input, ctx) {
+        const ok = await new Promise<boolean>(r => {
+          const t = setTimeout(() => r(true), ms);
+          ctx.signal.addEventListener('abort', () => { clearTimeout(t); r(false); }, { once: true });
+        });
+        if (ok) { finished++; yield { type: 'result', value: 'slept' }; }
+        else { aborted++; yield { type: 'error', message: 'stopped' }; }
+      },
+    },
+    finished: () => finished,
+    aborted:  () => aborted,
+  };
+}
+
+test('calls a body left running finish after it returns, and nothing is logged', async (t) => {
   const warn = t.mock.method(console, 'warn', () => { /* captured */ });
-  const wait = waiter();
+  const sleep = sleeper(20);
   const turn = new AbortController();
-  const fn = await lambda('(args: {}): Promise<unknown> { return Promise.race([tool.wait({}), tool.quick({})]); }');
-  assert.deepEqual(await last(runFunction(machineWith([wait, quick]), ctxFor(turn.signal), fn, [{}], { tool: 'racer', source: 'x' })),
-                   { type: 'result', value: 'quick' });
-  await within(wait.stopped, 1000, 'the loser saw its signal abort');
-  assert.equal(turn.signal.aborted, false, 'the calling turn is untouched');
-  assert.equal(warn.mock.callCount(), 1);
-  const line = String(warn.mock.calls[0]?.arguments[0]);
-  for (const part of ['racer', 'session s1', 'call c1', '1 tool call still running']) assert.ok(line.includes(part), `${part} in: ${line}`);
-});
-
-test('a Promise.all sibling is stopped when another call rejects', async (t) => {
-  t.mock.method(console, 'warn', () => { /* captured */ });
-  const wait = waiter();
-  const fn = await lambda('(args: {}): Promise<unknown> { return Promise.all([tool.wait({}), tool.fail({})]); }');
-  const ev = await last(runFunction(machineWith([wait, failing]), ctxFor(new AbortController().signal), fn, [{}]));
-  assert.equal(ev?.type, 'error');
-  await within(wait.stopped, 1000, 'the sibling saw its signal abort');
-});
-
-test('a call never awaited is stopped at return, and its rejection does not escape the body', async (t) => {
-  const warn = t.mock.method(console, 'warn', () => { /* captured */ });
-  const escaped: unknown[] = [];
-  const onUnhandled = (e: unknown): void => { escaped.push(e); };
-  process.on('unhandledRejection', onUnhandled);
-  t.after(() => { process.off('unhandledRejection', onUnhandled); });
-
-  const wait = waiter();
-  const fn = await lambda("(args: {}): Promise<string> { void tool.wait({}); return 'early'; }");
-  assert.deepEqual(await last(runFunction(machineWith([wait]), ctxFor(new AbortController().signal), fn, [{}])),
-                   { type: 'result', value: 'early' });
-  await within(wait.stopped, 1000, 'the dropped call saw its signal abort');
-  await new Promise(r => setTimeout(r, 20));
-  assert.deepEqual(escaped, [], 'the stopped call rejected into nothing, not into the process');
-  assert.equal(warn.mock.callCount(), 1);
-});
-
-test('a body stopped at the runner bound stops the calls it left running', async (t) => {
-  t.mock.method(console, 'warn', () => { /* captured */ });
-  const wait = waiter();
-  const fn = await lambda('(args: {}): Promise<number> { void tool.wait({}); let d = 1; while (d > 0) { d = d; } return d; }');
-  const ev = await last(runFunction(machineWith([wait]), ctxFor(new AbortController().signal), fn, [{}]));
-  assert.match(ev?.type === 'error' ? ev.message : '', /synchronous work without an await/);
-  assert.equal(wait.started(), 1, 'the call had started before the loop');
-  await within(wait.stopped, 1000, 'the call saw its signal abort');
-});
-
-test('a body whose calls all finished is not logged', async (t) => {
-  const warn = t.mock.method(console, 'warn', () => { /* captured */ });
-  const fn = await lambda('(args: {}): Promise<unknown> { return tool.quick({}); }');
-  assert.deepEqual(await last(runFunction(machineWith([quick]), ctxFor(new AbortController().signal), fn, [{}])),
-                   { type: 'result', value: 'quick' });
+  // The shape that failed at random: work started, not awaited, the body returning at once.
+  const fn = await lambda("(args: {}): Promise<string> { void Promise.all([1, 2, 3].map(() => tool.sleep({}))); return 'started'; }");
+  assert.deepEqual(await last(runFunction(machineWith([sleep]), ctxFor(turn.signal), fn, [{}], { tool: 'fanout', source: 'x' })),
+                   { type: 'result', value: 'started' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(sleep.finished(), 3, 'every call ran to completion');
+  assert.equal(sleep.aborted(), 0);
   assert.equal(warn.mock.callCount(), 0);
 });
 
-test('the tool box counts calls in flight, and a failed call left alone is handled', async (t) => {
+test('a Promise.race loser runs on unless the body gives it a signal', async () => {
+  const sleep = sleeper(20);
+  const plain = await lambda('(args: {}): Promise<unknown> { return Promise.race([tool.sleep({}), tool.quick({})]); }');
+  assert.deepEqual(await last(runFunction(machineWith([sleep, quick]), ctxFor(new AbortController().signal), plain, [{}])),
+                   { type: 'result', value: 'quick' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(sleep.finished(), 1, 'the loser finished');
+
+  const stopped = sleeper(20);
+  const withSignal = await lambda(`(args: {}): Promise<unknown> {
+    const ac = new AbortController();
+    const won = await Promise.race([toolInContext({ signal: ac.signal }).sleep({}), tool.quick({})]);
+    ac.abort();
+    return won;
+  }`);
+  assert.deepEqual(await last(runFunction(machineWith([stopped, quick]), ctxFor(new AbortController().signal), withSignal, [{}])),
+                   { type: 'result', value: 'quick' });
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(stopped.aborted(), 1, 'the body stopped its own loser');
+  assert.equal(stopped.finished(), 0);
+});
+
+test("the turn's abort still stops a call the body left running", async () => {
+  const wait = waiter();
+  const turn = new AbortController();
+  const fn = await lambda("(args: {}): Promise<string> { void tool.wait({}); return 'early'; }");
+  assert.deepEqual(await last(runFunction(machineWith([wait]), ctxFor(turn.signal), fn, [{}])),
+                   { type: 'result', value: 'early' });
+  assert.equal(wait.started(), 1);
+  turn.abort();
+  await within(wait.stopped, 1000, 'the call saw the turn abort');
+});
+
+test('a failed call left alone is handled, and one awaited still rejects', async (t) => {
   const escaped: unknown[] = [];
   const onUnhandled = (e: unknown): void => { escaped.push(e); };
   process.on('unhandledRejection', onUnhandled);
   t.after(() => { process.off('unhandledRejection', onUnhandled); });
 
-  const box = makeToolBox(machineWith([failing, quick]), { session: { id: 's1' } as never, signal: new AbortController().signal });
+  const box = makeToolBox(machineWith([failing]), { session: { id: 's1' } as never, signal: new AbortController().signal });
   const proxy = box.tool as unknown as Record<string, (p: object) => Promise<unknown>>;
   void proxy['fail']!({});
-  const ok = proxy['quick']!({});
-  assert.equal(box.inFlight(), 2);
-  assert.equal(await ok, 'quick');
   await new Promise(r => setTimeout(r, 20));
-  assert.equal(box.inFlight(), 0);
   assert.deepEqual(escaped, []);
   await assert.rejects(proxy['fail']!({}), /failed/, 'a caller that awaits still sees the rejection');
 });
@@ -147,18 +154,6 @@ test('a call a timer makes after the body has settled runs: it was scheduled, no
                    { type: 'result', value: 'done' });
   await new Promise(r => setTimeout(r, 40));
   assert.equal(ran, 1, 'the late call ran');
-});
-
-test('a call already running when the body settles is still stopped, though one made later runs', async (t) => {
-  t.mock.method(console, 'warn', () => { /* captured */ });
-  const wait = waiter();
-  let ran = 0;
-  const counted: Tool = { ...quick, executor: { async *execute() { ran++; yield { type: 'result', value: 'quick' }; } } };
-  const fn = await lambda("(args: {}): Promise<string> { void tool.wait({}); setTimeout(() => { void tool.quick({}); }, 10); return 'done'; }");
-  await last(runFunction(machineWith([wait, counted]), ctxFor(new AbortController().signal), fn, [{}]));
-  await within(wait.stopped, 1000, 'the call left running was stopped at return');
-  await new Promise(r => setTimeout(r, 40));
-  assert.equal(ran, 1, 'and the later one still ran');
 });
 
 test('a body whose caller stopped reading before it settled starts nothing more', async () => {

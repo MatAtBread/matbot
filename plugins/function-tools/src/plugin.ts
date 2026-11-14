@@ -880,10 +880,10 @@ Three names are injected — use them directly, and do NOT declare them as param
                  to any \`fetch\` so a long run stays cancellable; \`context.progress\` draws a progress bar
                  for the person waiting, costs you no context and is never sent back to you.
 A \`tool\` call is a promise, so await each one the result depends on, a function calling itself included.
-When the body returns, any call it left running is stopped and its result is lost (an un-awaited call, a
-\`Promise.race\` loser). A call it makes LATER, from a timer, a \`.then\` or a callback, runs as written after
-the body has returned, though nothing reads its result. Return a JSON-serialisable value; that becomes the
-result the model sees. Each tool call is echoed to stdout, so the run is observable.
+Like any promise it runs to completion whether or not it is awaited; to stop one you no longer need (a
+\`Promise.race\` loser), give it an AbortController's signal: \`toolInContext({ signal }).<tool_name>(...)\`.
+Return a JSON-serialisable value; that becomes the result the model sees. Each tool call is echoed to
+stdout, so the run is observable.
 
 WHERE A BODY RUNS
 By default a body is a plain async function inside matbot's own process: nothing bounds how long it runs,

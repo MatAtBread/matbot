@@ -3,4 +3,4 @@
 "@matatbread/matbot-function-tools": patch
 ---
 
-A tool call a function body makes after it has returned, for example from a timer it set, now runs. When the body settles, only the calls it left running are stopped (#114). `makeToolBox` returns `stopInFlight()` for this.
+A function body's tool calls run until they finish, like any promise, whether or not the body awaited them; returning stops none of them (#114). To stop a call it no longer needs, a body passes a signal through `toolInContext({ signal })`. The turn's abort still stops them, and a body whose caller stops reading has every later call refused.

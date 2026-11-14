@@ -1177,14 +1177,16 @@ itself reads nothing a body can replace (primordials captured at load; `Error`'s
 descriptor), and fails closed: a body that makes the stack unreadable is refused, and so is everyone else
 until a restart.
 
-**When a body settles, the tool calls it left running stop; a call it makes later runs** (#114,
-`makeToolBox`'s `stopInFlight`). A `Promise.race` loser, the siblings of a rejection in `Promise.all`, a call
-left at an early return: each would run on, possibly as a whole agent turn, for a result nothing will read. A
-call started after the body settled (a timer it set) is work it scheduled, and runs as it would in any
-JavaScript. Refusing those was tried and removed: it stopped the tool call and not the timer, so it bounded
-nothing and only made one use of an ordinary `setTimeout` fail at run time, after the body had reported
-success. A body whose CALLER stops reading before it settles has been abandoned instead, and every call it
-starts from then on is refused.
+**A body's tool calls run until they settle, like any promise; returning stops none of them** (#114). A
+call the body did not await — a `Promise.race` loser, the siblings of a rejection in `Promise.all`, a call
+left at an early return — runs on under the calling turn's signal, so the person's abort or a steer still
+stops it. Stopping them when the body settled was tried and removed: no JavaScript author expects returning
+to cancel a promise, so model-written fire-and-forget code (`Promise.all` of appends, left running) failed
+at random, and once a call made LATER (from a timer) had to run anyway, the rule bounded nothing and only
+punished the natural spelling. A body that wants a call stopped says so the ordinary way, an
+`AbortController`'s signal through `toolInContext({ signal })`; `single_turn`'s `turns` stops its own
+siblings. The one stop is a body whose CALLER stops reading before it settles: it has been abandoned, and
+every call it starts from then on is refused.
 
 **A failure a body leaves behind is contained, not the process's.** A body can schedule work that outlives
 it (`setTimeout`) and fail there: a throw, or a rejection nothing awaits. Node's default for an unhandled rejection or
