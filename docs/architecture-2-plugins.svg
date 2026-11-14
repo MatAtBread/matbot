@@ -113,8 +113,7 @@
     <rect width="290" height="120" rx="18" fill="#ffedd5" stroke="#fb923c"/>
     <text x="145" y="31" text-anchor="middle" class="boxTitle">own UI / transport</text>
     <text x="25" y="62" class="boxText">• frontend/web — HTTP + SSE web UI</text>
-    <text x="25" y="82" class="boxText">• frontend/dom — browser DOM helpers</text>
-    <text x="25" y="102" class="boxText">• frontend/telegram — Telegram bot</text>
+    <text x="25" y="82" class="boxText">• frontend/telegram — Telegram bot</text>
   </g>
   <path class="line" d="M650 720 C685 670 705 605 770 548"/>
 

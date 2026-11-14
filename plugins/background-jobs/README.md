@@ -3,7 +3,7 @@
 This is a [matbot](https://github.com/MatAtBread/matbot) plugin.
 
 Run prompts as background jobs — now, at a time (`at`), or on an interval — with the `background_job` and
-`background_job_action` tools. It supersedes `@matatbread/matbot-tool-background`, with one change of meaning:
+`background_job_action` tools. It supersedes `@matatbread/matbot-tool-background` (removed in 0.5.0), with one change of meaning:
 
 **A job's reply is not its output.** Nothing a job prints reaches anyone. A job tells the user something by
 appending a message to a conversation (`session_action` `append`) — by default the one the job was created
@@ -27,6 +27,10 @@ the swap runs that job, and the others find a row that is no longer due and leav
 once per occurrence however many tabs are open, and a tab can create, suspend, resume or cancel a job another
 tab runs, because all four are row writes.
 
+A run-now job (no `at`, no `interval`) is the exception, having no row: the matbot that started it is the only
+one that knows about it. It appears in that matbot's `background_job_action` `list` only while it runs and only
+to the principal who started it, and `cancel` from there is the one action that applies to it.
+
 Nothing is held, so a tab closed mid-run owes nothing. For a recurring job that costs one occurrence; a
 one-shot's claim moves its fire time out rather than deleting the row, so an unfinished one is claimed again
 a few minutes later — at-least-once, which is the better failure for a request that was asked for and never
@@ -45,7 +49,9 @@ jobs.
 
 ## Moving from `matbot-tool-background`
 
-Load this plugin **instead of** the old one. Its tools have their own names, because their meaning differs,
-and it keeps its own store, so the old plugin's schedules are not run. `background_job_action list` shows them
-marked `"legacy": true`: create each again with `background_job` (rewording the prompt to say what to tell
-the user), then `cancel` the legacy row. A warning at startup counts any that are left.
+The old plugin was removed in 0.5.0. Its tools had different names, because their meaning differed, and it
+kept its schedules in a store of its own (`schedules`, under `.data/schedules/` on the filesystem backend),
+which this plugin does not run. A warning at startup counts any that are left. To move one, create it again
+with `background_job` — rewording the prompt to say what to tell the user — then delete the old row. To list
+and cancel them with a tool instead, run 0.4.x once: its `background_job_action` shows them marked
+`"legacy": true`.

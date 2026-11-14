@@ -1,18 +1,22 @@
 import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, MediaStore, UserContent, Tool,
-  ProviderAdapter, ProviderConfig, SessionRunner, SessionView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision, TurnEntry, PermissionGate,
+  ProviderAdapter, ProviderConfig, SessionRunner, SessionView, SubmittedView, OpenOpts, SubmitOpenOpts,
+  SteeringPolicy, SteeringDecision, PermissionGate, FormField, SessionStatusReport,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
 import type { ToolTypeIndex, ToolPresenter, SessionAppender, SessionWrite } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
-import { isReadOnlyError, foldOntoUserTurn, lastUserIndex, runAs, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
-import { machineBusy, withUsageScope } from '@matatbread/matbot-plugin-api/host';
-import { runSession } from './runner.js';
+import { failureOf, withFailure, foldOntoUserTurn, lastUserIndex, runAs, tryCurrentPrincipal, isRequest, isRoboSubmit } from '@matatbread/matbot-plugin-api';
+import { machineBusy, withUsageScope, askPermissionGate } from '@matatbread/matbot-plugin-api/host';
+import { runSession, errorText } from './runner.js';
 import { ingestMedia } from './media.js';
 import { MemoryStore } from './storage-base/memory-store.js';
+import { createSink, emit, notify, aheadOf, type ParallelReply, type QueuedItem, type SessionState } from './session-state.js';
+import {
+  WRITE_ATTEMPTS, parallelFraming, closedSpan, flushUsage, drainMerges, drainWrites, interjectInto, rewrite, placeNow,
+} from './session-merges.js';
 
 export interface SessionRunnerDeps {
   store:           Store<Session>;
@@ -51,44 +55,28 @@ export interface SessionRunnerDeps {
   // barrier would be waiting for a drain that its own parent prevents.
   heldByCreator?:  true;
   workdir?:        string;
-  configPath?:     string;
   loadPlugin:      (specifier: string, prompt?: PromptFn, refresh?: boolean) => Promise<MatbotPlugin>;
   unloadPlugin:    (specifier: string) => Promise<boolean>;
 }
 
-interface QueuedItem {
-  traceId:     string;
-  // The originating human turn's traceId, carried down a resubmission chain (a human submit is its
-  // own root). Lets a per-turn frontend (e.g. telegram) adopt the followups *its* turn spawned and
-  // ignore unrelated turns — lineage the bare per-turn traceId can't express.
-  rootTraceId: string;
-  content:     MessageContent[];
-  provider:    string;
-  principal:   Principal;
-  concatQueue: boolean;
-  // 0 for an external submission; a `react` resubmission carries its parent's depth + 1. The reactor
-  // budgets against it, and pump hard-caps it (MAX_RESUBMIT_DEPTH) so a misbehaving reactor can't loop.
-  resubmitDepth: number;
-  // Present ⇒ this item RE-RUNS an already-committed user turn (an agent-phase retract-redo) rather
-  // than introducing a new user message: the pump skips the persist-at-turn-start append (the user
-  // message already exists) and hands `ephemeral` (the trigger tool's output) to runSession, which
-  // tail-folds it for this run only. `content` is empty for such an item — there is no new bubble.
-  // `head` is the user message the retraction kept (see `SessionState.turnHead`), absent if there was none.
-  redo?: { ephemeral: MessageContent[]; head?: { id: string; request: string } };
-  // Turn-scoped ephemeral context to fold onto this item's turn (tail-folded, never persisted) — used
-  // to carry an interrupt's "keep going, noting the above" nudge. Feeds runSession's injectedEphemeral,
-  // the same path `redo` uses; the two are mutually exclusive in practice (redo re-runs an existing
-  // turn with no new message, a steer introduces a new user message).
-  injectEphemeral?: MessageContent[];
-  prompt?:     PromptFn;
-}
-
 const MAX_RESUBMIT_DEPTH = 8;
 
-// Tries a write gets (see `SessionRunner.write`). Writes of one session are applied one at a time, so a lost
-// compare-and-swap means a writer outside this runner — another process on the same store, a storage swap
-// `mediumGuard` refused — and reading again composes with it. The bound only stops a pathological loop.
-const WRITE_ATTEMPTS = 3;
+// How many robo-submits a session takes in a row, with no message from a person between them, before the
+// next asks whether to go on. Followup resubmits do not count — they continue a turn rather than start one,
+// and MAX_RESUBMIT_DEPTH bounds them — nor do they break the run.
+export const UNATTENDED_ROBO_SUBMITS = 3;
+
+/** How many robo-submits end `session`, counting back to the last message a person sent. */
+export function trailingRoboSubmits(session: Session): number {
+  let n = 0;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i]!;
+    if (m.role !== 'user') continue;
+    if (isRoboSubmit(m)) { n++; continue; }
+    if (isRequest(m)) break;
+  }
+  return n;
+}
 
 // Disposition for a `mode: 'auto'` mid-turn submission when no SteeringPolicy is registered (or it
 // declares no `classify`). Interrupt-by-default: a message sent while the agent works stops the
@@ -104,160 +92,10 @@ const DEFAULT_STEER_NUDGE: MessageContent[] = [{
   text: 'The user sent the message above while you were working. Take it into account and keep going — continue the task you were on, incorporating this new input rather than discarding your progress.',
 }];
 
-// Folded onto a parallel turn's message in ITS copy only (never written back): without it, a model asked
-// "how's it going?" mid-task sees a history that ends a turn early and answers as though nothing were
-// running. Names the running request so the reply can be about it, and says what happens to the reply.
-const PARALLEL_FRAMING_CAP = 2_000;
-const parallelFraming = (running: string): Extract<UserContent, { type: 'text' }> => ({
-  type: 'text',
-  origin: 'robo',
-  text: 'A separate turn of this conversation is still working on the request below, and you cannot see its '
-    + 'progress or results. Answer the message above on its own terms; your final reply is added to the '
-    + 'conversation that turn sees.\n\n<running-request>\n'
-    + (running.length > PARALLEL_FRAMING_CAP ? `${running.slice(0, PARALLEL_FRAMING_CAP)}…` : running)
-    + '\n</running-request>',
-});
-
-// A parallel turn's span as it can be placed into shared history: trimmed back to the last point at
-// which every tool-call in it has its result. An abort (or a failure mid-round) leaves a trailing
-// tool-call with nothing answering it, and an unpaired call is not valid wire for any provider — it
-// would break not just this placement but every later turn of the session.
-const closedSpan = (msgs: Message[]): Message[] => {
-  const open = new Set<string>();
-  let closed = 0;
-  for (const [i, m] of msgs.entries()) {
-    for (const c of m.content) {
-      if (c.type === 'tool-call')        open.add(c.id);
-      else if (c.type === 'tool-result') open.delete(c.id);
-    }
-    if (open.size === 0) closed = i + 1;
-  }
-  return msgs.slice(0, closed);
-};
-
-// A parallel turn's write-back: its submission and everything the turn produced, ready to place. Built
-// once, when the parallel turn settles; placed by whoever holds the session at that moment (see
-// `merges`).
-interface ParallelReply {
-  traceId:  string;
-  /** The turn's head first, then its whole span — thinking, tool calls, their results, its markers and
-   *  its final reply. Non-empty by construction, which is what keeps `messages[0]` the head: every
-   *  placement path dedupes on that id. */
-  messages: [Message, ...Message[]];
-  /** The id of the message this reply's copy was cut AT — the running turn's head when it was submitted,
-   *  captured then. The pair belongs immediately ahead of it, because that is where the history the reply
-   *  was generated against ended. Absent ⇒ the copy was cut at the end of the session (nothing was
-   *  running, or the turn's rounds were already over and only its `followup` hooks were left), so the
-   *  pair belongs at the TAIL and there is no id to place it against. */
-  head?:    string;
-  /** Written to the store by `placeNow` when it settled, rather than left for the running turn's next
-   *  round boundary. It stays on `merges` all the same, because the running turn's in-memory session
-   *  must still learn of it or that turn's whole-document write-back erases it — but it must never be
-   *  written or announced a second time, which is what every reader of this flag is for. */
-  persisted?: boolean;
-}
-
 // Marker creator for a retract-and-rerun: its `data.retracted` carries the popped (superseded) turn
 // messages so a frontend can render them struck-through and a post-mortem can audit them. Core-owned
 // because the pop is a pump operation, not a plugin's.
-const RETRACTION_CREATOR = 'matbot-retraction';
-
-interface SessionState {
-  // The queue is deliberately a plain array, drained FIFO. concatQueue is per-submission: a non-concat
-  // submission is its own turn — faithful, and correct when one submission's tools/state are a
-  // precondition for the next (e.g. "add plugin X" then "use X": tools are rebuilt per turn, so X is
-  // only visible to a *later* turn). A run of consecutive concat submissions merges into one turn —
-  // cheaper, and the common "let me add more context now" case — without collapsing the queued/robo
-  // submissions interleaved among them (see the batch-building loop in pump). Concat and queued mix freely.
-  queue:       QueuedItem[];
-  running:     boolean;
-  // traceId of the turn currently running (set at pump loop top, cleared when the turn ends). Lets an
-  // interrupt name the turn it is yielding, so a frontend correlates the `steer` event's
-  // `interruptedTraceId` with the `aborted` (reason 'steer') it is about to see.
-  runningTraceId: string | undefined;
-  ac:          AbortController | undefined;
-  subscribers: Set<Sink>;
-  // Events of the *current* turn, replayed to a subscriber that joins mid-turn. Cleared at each
-  // turn boundary — committed history comes from the store, not from here.
-  replay:      PipelineEvent[];
-  // Accounting entries awaiting a flush, held BY REFERENCE to each turn's usage scope. A completion
-  // can be recorded after its turn commits — a detached trigger classifier, a `followup` hook — and it
-  // appends to the very array captured here, so a late arrival needs no coordination: whatever is in
-  // these arrays at the flush is what gets written, and each entry says which turn caused it.
-  pendingUsage: TurnEntry[][];
-  // ── parallel turns (`mode: 'parallel'`) ──
-  // Each in flight, by traceId: its own replay (it outlives the running turn's, which is cleared at every
-  // boundary) and how to stop it.
-  parallel:    Map<string, { replay: PipelineEvent[]; stop: AbortController }>;
-  // Settled replies awaiting placement. Drained by whichever holder reaches a safe point first: the
-  // running turn at its next round boundary (`interject`), else the pump between turns. Never the
-  // SessionAppender — that writes at the quiescent edge, which cannot arrive until the pump's whole
-  // queue drains, and the point of a parallel turn is not waiting for that.
-  merges:      ParallelReply[];
-  // The running turn's first own message (its user message; for a redo, the kept one): its id is where
-  // the copy a parallel turn runs on ends, and so where its pair is placed while this turn runs; its text
-  // is the request that copy's framing names. Set together with `runningTraceId`, in the step that takes
-  // the item off the queue: `runningTraceId` is what admits a parallel turn, so set any later — even after
-  // the store read that follows — one arriving in between had no head, ran unframed, and copied the turn
-  // it was beside. Cleared once the turn's rounds end, because from then
-  // on the turn has answered, and a parallel turn should see the answer rather than be told it is
-  // still being worked on.
-  turnHead:    { id: string; request: string } | undefined;
-  // Replies placed into the running turn's in-memory copy and not yet committed: a parallel turn started
-  // now must see them, and they reach the store only when that turn ends.
-  interjected: ParallelReply[];
-  // Set while the pump has run out of queue but still holds the machine for a parallel turn: resolving it
-  // resumes the loop.
-  wake:        (() => void) | undefined;
-  // Writes from outside the turns (`SessionRunner.write`), waiting for a moment no turn holds the session.
-  writes:      Array<() => Promise<void>>;
-}
-
-interface Sink {
-  push(ev: PipelineEvent): void;
-  close(): void;
-  iterable: AsyncIterable<PipelineEvent>;
-}
-
-// A single-consumer push channel surfaced as an AsyncIterable. `dispose` runs when the consumer
-// stops (break/return) or the channel closes, so an abandoned subscriber unregisters itself.
-function createSink(dispose: () => void): Sink {
-  const buffer: PipelineEvent[] = [];
-  let waiting: ((r: IteratorResult<PipelineEvent>) => void) | null = null;
-  let closed = false;
-
-  const finish = (): void => {
-    if (closed) return;
-    closed = true;
-    if (waiting) { const w = waiting; waiting = null; w({ value: undefined as never, done: true }); }
-  };
-
-  return {
-    push(ev) {
-      if (closed) return;
-      if (waiting) { const w = waiting; waiting = null; w({ value: ev, done: false }); }
-      else buffer.push(ev);
-    },
-    close: finish,
-    iterable: {
-      [Symbol.asyncIterator](): AsyncIterator<PipelineEvent> {
-        return {
-          next() {
-            const head = buffer.shift();
-            if (head !== undefined) return Promise.resolve({ value: head, done: false });
-            if (closed)            return Promise.resolve({ value: undefined as never, done: true });
-            return new Promise(res => { waiting = res; });
-          },
-          return() {
-            finish();
-            dispose();
-            return Promise.resolve({ value: undefined as never, done: true });
-          },
-        };
-      },
-    },
-  };
-}
+export const RETRACTION_CREATOR = 'matbot-retraction';
 
 /**
  * A tool's description with its wire contract appended — the text the model actually reads for every
@@ -292,217 +130,37 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
     return s;
   };
 
+  // Questions a session's turns have asked and nobody has answered yet, by session. Kept beside `states`,
+  // not in it: an entry there is dropped once a session idles, and a question asked without being awaited
+  // (a `fetch` nobody awaits, inside a body) can outlive the turn that asked it.
+  const asking = new Map<string, number>();
+  const counted = (id: string, ask: PromptFn): PromptFn => {
+    const asked = ask as (p: string | FormField, defaultValue?: string) => Promise<string>;
+    return ((p: string | FormField, defaultValue?: string): Promise<string> => {
+      asking.set(id, (asking.get(id) ?? 0) + 1);
+      const settle = (): void => { const n = (asking.get(id) ?? 1) - 1; if (n > 0) asking.set(id, n); else asking.delete(id); };
+      return asked(p, defaultValue).finally(settle);
+    }) as PromptFn;
+  };
+
+  // Before a robo-submit's turn: past UNATTENDED_ROBO_SUBMITS in a row, a person decides whether it goes on
+  // — asked through the turn's own prompt, so the session shows as waiting on them. Nobody to ask ⇒ it
+  // stops, a loop being the one thing that must not run on unattended.
+  const mayContinue = async (id: string, session: Session, head: QueuedItem): Promise<boolean> => {
+    const n = trailingRoboSubmits(session);
+    if (n < UNATTENDED_ROBO_SUBMITS) return true;
+    const decision = await runAs(head.principal, () => (deps.permissionGate?.() ?? askPermissionGate).decide({
+      gate:     'tools.robo-submit',
+      subject:  id,
+      label:    `This conversation has been continued ${n} times in a row without you — the last by "${textOf({ content: head.content } as Message).slice(0, 120)}". Let it continue?`,
+      fallback: false,
+    }, head.prompt, { session: id }));
+    if (!decision.allowed) console.warn(`[matbot] robo-submit to session "${id}" not run: ${n} in a row, and continuing was not allowed (${decision.source}).`);
+    return decision.allowed;
+  };
+
   const maybeCleanup = (id: string, s: SessionState): void => {
     if (!s.running && s.queue.length === 0 && s.subscribers.size === 0 && s.parallel.size === 0 && s.merges.length === 0 && s.writes.length === 0) states.delete(id);
-  };
-
-  // Turn events go to the replay buffer (so a mid-flight subscriber sees the in-progress turn) and
-  // all live subscribers.
-  const emit = (s: SessionState, ev: PipelineEvent): void => {
-    s.replay.push(ev);
-    for (const sink of s.subscribers) sink.push(ev);
-  };
-
-  // Subscribers-only (no replay buffer): used for the `queued` events that describe the pending
-  // queue. Pending is NOT kept in `replay` (which is per-turn) — it's reconstructed from `s.queue`
-  // when a subscriber joins, so it survives turn boundaries correctly.
-  const notify = (s: SessionState, ev: PipelineEvent): void => {
-    for (const sink of s.subscribers) sink.push(ev);
-  };
-
-  // How many submissions sit ahead of the item at queue index `i` (the running turn counts as one).
-  const aheadOf = (s: SessionState, i: number): number => (s.running ? 1 : 0) + i;
-
-  /**
-   * Write whatever accounting has accrued onto the turn heads that caused it, then clear it.
-   *
-   * Entries are drained by SPLICING each pending array, so an entry appended after this point (a
-   * classifier still in flight) accumulates afresh and lands on the next flush rather than being
-   * written twice. That is the whole concurrency story: no marks, no coordination, and eventual
-   * delivery — which is all a log needs, since each entry names the turn that caused it.
-   *
-   * Anchored on the turn's head (its user message) because that is the message a retract-and-rerun
-   * keeps; assistant and tool messages are popped into a retraction marker where no reduction over
-   * `session.messages` would find them again. An entry whose turn head has since gone (a session
-   * edit, a compaction) is dropped rather than orphaned onto an unrelated message.
-   */
-  const flushUsage = async (id: string, s: SessionState): Promise<void> => {
-    // Splice each array in place and KEEP the references. Dropping a drained array is the obvious
-    // tidy-up and it silently loses exactly the case this exists for: a classifier that settles after
-    // the flush appends to the array its scope captured, so if the pump has stopped holding it, the
-    // write goes nowhere observable. They are left registered for the life of the session state, at a
-    // cost of one empty array per turn.
-    //
-    // The limit of that: `maybeCleanup` disposes the state once the session is quiet and unsubscribed,
-    // so a completion still in flight at THAT point is lost. This is the carrier's stated best-effort
-    // contract rather than a hole to plug — nothing can know what is still pending — and it is bounded
-    // in practice, since the two channels that settle late (a `followup` hook, a user-phase classifier
-    // the runner polls) are both awaited inside the pump iteration this scope wraps.
-    const drained = s.pendingUsage.flatMap(entries => entries.splice(0));
-    if (drained.length === 0) return;
-
-    const session = await deps.store.get(id);
-    if (!session) return;
-
-    // Anchor on the entry's own turn head when it has one, and on its ROOT's otherwise. A
-    // retract-and-rerun re-runs an existing user turn under a fresh traceId and introduces no user
-    // message, so its entries have no head of their own — and the root is the honest home anyway, since
-    // a retry's cost belongs to the turn being retried. Without this the redo's spend was dropped
-    // outright, which is the very under-report anchoring on the turn head exists to prevent.
-    const heads = new Set(session.messages.filter(m => m.role === 'user').map(m => m.traceId));
-    const byTrace = new Map<string, TurnEntry[]>();
-    for (const e of drained) {
-      const anchor = e.traceId !== undefined && heads.has(e.traceId) ? e.traceId : e.rootTraceId;
-      if (anchor === undefined || !heads.has(anchor)) continue;
-      const list = byTrace.get(anchor);
-      if (list) list.push(e); else byTrace.set(anchor, [e]);
-    }
-
-    let changed = false;
-    const messages = session.messages.map(m => {
-      const add = m.role === 'user' ? byTrace.get(m.traceId) : undefined;
-      if (add === undefined) return m;
-      byTrace.delete(m.traceId);
-      changed = true;
-      return { ...m, activity: [...(m.activity ?? []), ...add] };
-    });
-    if (!changed) return;
-    await deps.store.set(id, { ...session, messages });
-  };
-
-  // Between turns: nothing holds the session but the pump itself, so a settled parallel reply is simply
-  // appended — after the turn it ran beside, which by now has committed.
-  const drainMerges = async (id: string, s: SessionState): Promise<void> => {
-    if (s.merges.length === 0) return;
-    // One `placeNow` already wrote is in the store and was announced then; it stayed on the list only so
-    // a running turn's in-memory session would pick it up, and there is no running turn here.
-    const taken = s.merges.splice(0).filter(r => r.persisted !== true);
-    if (taken.length === 0) return;
-    const session = await deps.store.get(id);
-    if (session === null) return;
-    // And one whose `placeNow` is still in flight has no flag set yet, so the id is the authority: every
-    // placement path is idempotent on it, and whichever gets there first is the one that announces.
-    const have    = new Set(session.messages.map(m => m.id));
-    const replies = taken.filter(r => !have.has(r.messages[0].id));
-    if (replies.length === 0) return;
-    try {
-      await deps.store.set(id, replies.flatMap(r => r.messages).reduce(appendMessage, session));
-    } catch (e) {
-      if (!isReadOnlyError(e)) throw e;
-      for (const r of replies) notify(s, { type: 'error', error: e.message, traceId: r.traceId });
-      return;
-    }
-    for (const r of replies) notify(s, { type: 'merged', traceId: r.traceId });
-  };
-
-  // Between turns, too: the writes that were waiting for no turn to hold the session. One at a time, in
-  // the order they came, each reading the document for itself, so each sees the one before it — two
-  // writes of one session never race each other. Never throws (see `write`).
-  const drainWrites = async (s: SessionState): Promise<void> => {
-    for (let w = s.writes.shift(); w !== undefined; w = s.writes.shift()) await w();
-  };
-
-  // While a turn runs: called by runSession at the top of each round. The pair goes AHEAD of the running
-  // turn's own messages, where the copy the parallel turn ran on ended — so the history stays exactly
-  // what that reply was generated against, and alternates without help. At the tail, after the latest
-  // tool result, the reply would be the last message of the turn's next provider call (a prefill), and
-  // once the turn answered, two adjacent assistant messages, which the adapters fold into one — putting
-  // text ahead of a `thinking` block. Each later pair lands after the earlier ones, so they stay in order.
-  const interjectInto = (s: SessionState) => (cur: Session): { session: Session; merged: string[] } | undefined => {
-    if (s.merges.length === 0 || s.turnHead === undefined) return undefined;
-    const head = s.turnHead.id;
-    const at = cur.messages.findIndex(m => m.id === head);
-    if (at < 0) return undefined;
-    const replies = s.merges.splice(0);
-    s.interjected.push(...replies);
-    // Only what is not already here. `placeNow` may have written a pair while a PREVIOUS turn's followup
-    // hooks ran, and this turn (a redo, or whatever followup enqueued) then read a session that already
-    // contains it — so splicing the list wholesale would duplicate the pair. The id is the authority, the
-    // same way it is in `placeNow` and `drainMerges`.
-    const have = new Set(cur.messages.map(m => m.id));
-    const add  = replies.flatMap(r => r.messages).filter(m => !have.has(m.id));
-    return {
-      session: { ...cur, messages: [...cur.messages.slice(0, at), ...add, ...cur.messages.slice(at)] },
-      // A reply `placeNow` wrote announced itself then. It still has to reach the turn's in-memory
-      // session — that is the whole reason it is on this list — but announcing it twice would make a
-      // frontend place the same pair twice.
-      merged:  replies.filter(r => r.persisted !== true).map(r => r.traceId),
-    };
-  };
-
-  /**
-   * A whole-document rewrite of a session whose turn has already committed — the `followup` writes. The
-   * pump used to be the only writer at that point, so an unconditional `set` was safe; it no longer is,
-   * because `placeNow` may insert a settled parallel pair while the hooks are judging. So these compare
-   * against the document the hooks were shown and rebuild from `current` if it moved, which costs no read
-   * at all on the uncontended path — a re-read would cost one per turn, and would also consume the next
-   * `store.get`, which is a thing tests legitimately hold.
-   *
-   * `build` is called once per attempt and must therefore derive everything from the document it is given.
-   * Giving up is logged rather than thrown: the turn has committed, and the caller decides what a write it
-   * could not make means (the retraction does not enqueue a redo it never wrote).
-   */
-  const rewrite = async (
-    id: string, from: Session, build: (cur: Session) => Session, lost: string,
-  ): Promise<boolean> => {
-    let cur = from;
-    for (let n = 0; n < WRITE_ATTEMPTS; n++) {
-      const res = await deps.store.cas(id, cur.version, build(cur));
-      if (res.ok) return true;
-      if (res.current === null) break;
-      cur = res.current;
-    }
-    console.error(lost);
-    return false;
-  };
-
-  /**
-   * Place a settled parallel reply in the store NOW, while a turn is still running, rather than leaving
-   * it to that turn's next round boundary. A turn parked in one long tool call reaches no boundary, so
-   * the pair used to exist in no store, no replay and no stream until the tool returned — a client that
-   * reconnected in that window could not see it at all, and the pair is a COMPLETED turn, not a partial
-   * one: nothing about it is waiting to be finished.
-   *
-   * The runner still owns the session exclusively. The pair is handed to the running turn as well
-   * (`interjectInto`, and the final pull in `end`), so that turn's whole-document write-back carries it
-   * instead of erasing it. Placed ahead of the running turn's head, exactly where `interjectInto` puts
-   * it, so the two never disagree about where the pair goes.
-   *
-   * CAS rather than `set`, because the running turn commits with a whole-document write of its own:
-   * losing the compare is how we learn it landed, and `current` is what it wrote.
-   *
-   * Three outcomes, because the pair is on `merges` before this runs and so EVERY placement path may
-   * reach it — this one, `interjectInto` at a round boundary, `drainMerges` once the turn is over. They
-   * are mutually idempotent on the pair's own message id, and exactly one of them inserts it: `present`
-   * says somebody else did, and is why this does not announce a `merged` the other path already sent.
-   */
-  const placeNow = async (id: string, reply: ParallelReply): Promise<'inserted' | 'present' | 'no'> => {
-    if (reply.head === undefined) return 'no';
-    let cur = await deps.store.get(id);
-    for (let n = 0; n < WRITE_ATTEMPTS; n++) {
-      if (cur === null) return 'no';
-      if (cur.messages.some(m => m.id === reply.messages[0].id)) return 'present';
-      // The reply's OWN head, not the session's current one: a parallel turn submitted during a turn's
-      // `followup` ran on a copy that INCLUDED that finished turn, so its pair belongs after it, and
-      // `s.turnHead` would have put it in front of the very history it answered. Resolved per attempt,
-      // since a lost compare hands us a different document.
-      const at = cur.messages.findIndex(m => m.id === reply.head);
-      // The head is not in the store yet (it is persisted just after it is set), or a retract has since
-      // popped it: either way there is nothing here to place against. Leave it to the turn or the pump.
-      if (at < 0) return 'no';
-      const next = { ...cur, messages: [...cur.messages.slice(0, at), ...reply.messages, ...cur.messages.slice(at)] };
-      try {
-        const res = await deps.store.cas(id, cur.version, next);
-        if (res.ok) return 'inserted';
-        cur = res.current;
-      } catch (e) {
-        // A shared session this principal may only read. The turn's own placement reports it (drainMerges
-        // / the turn's commit); claiming nothing was written is what lets that path run unchanged.
-        if (!isReadOnlyError(e)) throw e;
-        return 'no';
-      }
-    }
-    return 'no';
   };
 
   const pump = async (id: string, s: SessionState): Promise<void> => {
@@ -543,7 +201,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // to the end, so a parallel reply appended first would go with it.
           if (s.queue[0]?.redo === undefined) {
             await drainWrites(s);
-            await drainMerges(id, s);
+            await drainMerges(deps.store, id, s);
             // One that arrived while the other was writing. Its arrival found the pump busy, so nothing
             // else will come round for it; going on would leave it unwritten, and the session busy.
             if (s.writes.length > 0 || s.merges.length > 0) continue;
@@ -572,7 +230,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // minted here, so its id is known before the read below, and persisted after it; a redo's is the
           // message its retraction kept.
           const userMsg = head.redo === undefined
-            ? createMessage({ role: 'user', content, traceId: head.traceId, providerName: head.provider })
+            ? createMessage({
+                role: 'user', content, traceId: head.traceId, providerName: head.provider,
+                ...(head.metadata !== undefined ? { metadata: head.metadata } : {}),
+              })
             : undefined;
           s.turnHead = userMsg !== undefined ? { id: userMsg.id, request: textOf(userMsg) } : head.redo?.head;
           // In the same synchronous step that takes the item off the queue, so there is no moment at which a
@@ -595,78 +256,6 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             s.replay.push({ type: 'queued', content, queued: 0, concatQueue: false, traceId: head.traceId, rootTraceId: head.rootTraceId });
           }
 
-          let session = await deps.store.get(id);
-          if (session === null) {
-            s.ac = s.turnHead = undefined;
-            emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId });
-            continue;
-          }
-
-          // A redo re-runs the existing committed user turn — no title derivation, no new user message.
-          if (userMsg !== undefined) {
-            if (!session.title && !session.messages.some(m => m.role === 'user')) {
-              // Falls back to the attachment names when the turn has no words of its own: an image-only
-              // first turn is a real submission, and got no title at all — which reads in the session
-              // list as a session that failed to start.
-              const text = content
-                .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
-                .map(c => c.text).join(' ').trim()
-                || content
-                  .filter((c): c is Extract<MessageContent, { type: 'file-ref' }> => c.type === 'file-ref')
-                  .map(c => c.name).join(', ');
-              if (text) {
-                const words = text.split(/\s+/).slice(0, 8).join(' ');
-                session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
-              }
-            }
-
-            // Persist-at-turn-start: the user message only hits the store when its turn begins, never
-            // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
-            // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
-            session = appendMessage(session, userMsg);
-            try {
-              await deps.store.set(session.id, session);
-            } catch (e) {
-              // A read-only store rejects the persist-at-turn-start write (e.g. a session shared read-only
-              // from another profile's partition). That is a per-turn condition, not a host fault: surface
-              // it as a turn error and drop this submission rather than let it escape the detached pump and
-              // crash the process. Any other write failure stays fatal.
-              if (!isReadOnlyError(e)) throw e;
-              s.ac = s.turnHead = undefined;
-              emit(s, { type: 'error', error: e.message, traceId: head.traceId });
-              continue;
-            }
-          }
-
-          const resolved = await deps.resolveProvider(head.provider);
-          if (resolved === null) {
-            s.ac = s.turnHead = undefined;
-            emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId });
-            continue;
-          }
-
-          // A redo re-runs an existing turn with its ephemeral; a steer carries an interrupt's nudge. The
-          // two never coincide on one item, so either supplies runSession's injectedEphemeral.
-          const inject = head.redo?.ephemeral ?? head.injectEphemeral;
-
-          // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
-          // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
-          // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
-          // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
-          // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
-          const wire = await deps.toolTypeIndex?.()?.wireContracts();
-          const toolPresenter = deps.toolPresenter?.();
-          const mediaStore    = deps.mediaStore?.();
-          const permissionGate = deps.permissionGate?.();
-          const toolMap = deps.tools !== undefined
-            ? new Map<string, Tool>(deps.tools.list().map(t => {
-                const wc = wire?.[t.name];
-                return [t.name, wc !== undefined
-                  ? { ...t, description: wireDescription(t.description, wc) }
-                  : t];
-              }))
-            : undefined;
-
           // The terminal event this turn ended on. `followup` is post-COMMIT, and only `done` is a
           // commit: an `aborted` turn was cut short (a steer, a user cancel, a screen/toolcall hook
           // refusing it, a provider round ceiling) and an `error` turn produced no response at all, so
@@ -675,10 +264,87 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // budget. Tracked here rather than inferred from `ac.signal`, which only knows about the two
           // signal-driven aborts and not the policy ones. Declared outside the `try` because `finally`
           // also asks whether the turn committed at all.
+          //
+          // The `try` starts here, at the turn's first await, not at its run: everything from now on is
+          // this turn's. It started at the run, and a throw before it — the store read below, the
+          // persist, resolving the provider, the tool types — left the whole drain, so the pump's promise
+          // rejected with nothing awaiting it (an unhandled rejection exits the process) and the turn just
+          // taken off the queue vanished with no terminal. A failure here is this turn's `error`, the next
+          // turn goes ahead, and whether trying again could help is whatever the failing layer said
+          // (`failure`), never guessed (#115).
           let terminal: PipelineEvent['type'] | undefined;
           try {
+            let session = await deps.store.get(id);
+            if (session === null) {
+              emit(s, { type: 'error', error: `Session "${id}" not found`, traceId: head.traceId, failure: 'invalid' });
+              continue;
+            }
+
+            // A redo re-runs the existing committed user turn — no title derivation, no new user message.
+            if (userMsg !== undefined) {
+              if (!session.title && !session.messages.some(m => m.role === 'user')) {
+                // Falls back to the attachment names when the turn has no words of its own: an image-only
+                // first turn is a real submission, and got no title at all — which reads in the session
+                // list as a session that failed to start.
+                const text = content
+                  .filter((c): c is Extract<MessageContent, { type: 'text' }> => c.type === 'text')
+                  .map(c => c.text).join(' ').trim()
+                  || content
+                    .filter((c): c is Extract<MessageContent, { type: 'file-ref' }> => c.type === 'file-ref')
+                    .map(c => c.name).join(', ');
+                if (text) {
+                  const words = text.split(/\s+/).slice(0, 8).join(' ');
+                  session = { ...session, title: words.length > 60 ? `${words.slice(0, 60)}…` : words };
+                }
+              }
+
+              // Persist-at-turn-start: the user message only hits the store when its turn begins, never
+              // while queued. That is what stops a mid-turn submit from clobbering session state. A robo
+              // resubmission's blocks already carry `origin: 'robo'` (stamped where it was enqueued).
+              // A failed write here — a session shared in read-only, a store that could not be reached —
+              // drops this submission with the turn's error: nothing of it was written, unless the store
+              // lost its answer to a write that landed, which only the store's error can say.
+              // A robo-submit following others with nobody in between is a loop until a person says it is
+              // not: asked before anything of it is written, so a refusal leaves no unanswered message.
+              if (isRoboSubmit(userMsg) && !await mayContinue(id, session, head)) {
+                emit(s, { type: 'cancelled', sessionId: id, traceId: head.traceId });
+                continue;
+              }
+
+              session = appendMessage(session, userMsg);
+              await deps.store.set(session.id, session);
+            }
+
+            const resolved = await deps.resolveProvider(head.provider);
+            if (resolved === null) {
+              emit(s, { type: 'error', error: `Unknown provider "${head.provider}"`, traceId: head.traceId, failure: 'invalid' });
+              continue;
+            }
+
+            // A redo re-runs an existing turn with its ephemeral; a steer carries an interrupt's nudge. The
+            // two never coincide on one item, so either supplies runSession's injectedEphemeral.
+            const inject = head.redo?.ephemeral ?? head.injectEphemeral;
+
+            // Fold each tool's wire contract — the `params`/`result` text flattened from its single contract
+            // (a source tool's ToolContracts arms, or a source-less tool's `toolContract`) — into its description
+            // for this turn, so the model reasons about the real TS shapes, not just the loose inputSchema.
+            // Derived here because `services`/ToolTypeIndex are live at dispatch. Tools with only a loose
+            // inputSchema (no contract) are left as-is; absent ToolTypeIndex (browser) ⇒ plain descriptions.
+            const wire = await deps.toolTypeIndex?.()?.wireContracts();
+            const toolPresenter = deps.toolPresenter?.();
+            const mediaStore    = deps.mediaStore?.();
+            const permissionGate = deps.permissionGate?.();
+            const toolMap = deps.tools !== undefined
+              ? new Map<string, Tool>(deps.tools.list().map(t => {
+                  const wc = wire?.[t.name];
+                  return [t.name, wc !== undefined
+                    ? { ...t, description: wireDescription(t.description, wc) }
+                    : t];
+                }))
+              : undefined;
+
             // Establish the submitter's principal for the whole turn here, not inside runSession:
-            // pump runs detached (`void pump`), so this scope — not the request that enqueued — is the
+            // pump runs detached (`startPump`), so this scope — not the request that enqueued — is the
             // turn's async root. Everything downstream (hooks, tools, and any Store/FileStore/Vault
             // access they trigger) reads it via currentPrincipal(). The consumption is inside the callback
             // because the pump owns it, not because it must be: runAs rescopes a returned iterator itself.
@@ -711,7 +377,6 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   ...(deps.appender      !== undefined ? { appender:      deps.appender      } : {}),
                   ...(mediaStore         !== undefined ? { mediaStore                        } : {}),
                   ...(permissionGate     !== undefined ? { permissionGate                    } : {}),
-                  ...(deps.configPath    !== undefined ? { configPath:    deps.configPath    } : {}),
                   ...(deps.vault         !== undefined ? { vault:         deps.vault         } : {}),
                   ...(head.prompt        !== undefined ? { prompt:        head.prompt        } : {}),
                   ...(inject             !== undefined ? { injectedEphemeral: inject } : {}),
@@ -752,7 +417,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                   // to keep ordering sane (a separate append here would be sliced into the popped region).
                   if (followup.markers.length > 0 && !followup.retract) {
                     const markerMsg = createMessage({ role: 'marker', content: followup.markers, traceId: head.traceId });
-                    await rewrite(id, committed, cur => ({ ...cur, messages: [...cur.messages, markerMsg] }),
+                    await rewrite(deps.store, id, committed, cur => ({ ...cur, messages: [...cur.messages, markerMsg] }),
                       `[matbot] followup markers of session "${id}" were not written`);
                     notify(s, { type: 'marker', content: followup.markers, traceId: head.traceId });
                   }
@@ -803,7 +468,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
                     // document the kept prefix comes from.
                     let keptHead:      Message | undefined;
                     let retractionMsg: Message | undefined;
-                    const wrote = await rewrite(id, committed, cur => {
+                    const wrote = await rewrite(deps.store, id, committed, cur => {
                       const lastUserIdx = lastUserIndex(cur);
                       const popped      = lastUserIdx >= 0 ? cur.messages.slice(lastUserIdx + 1) : [];
                       const truncated   = lastUserIdx >= 0
@@ -853,7 +518,8 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
               }
             }, { traceId: head.traceId, rootTraceId: head.rootTraceId });
           } catch (e) {
-            emit(s, { type: 'error', error: String(e), traceId: head.traceId });
+            const failure = failureOf(e);
+            emit(s, { type: 'error', error: errorText(e), traceId: head.traceId, ...(failure !== undefined ? { failure } : {}) });
           } finally {
             s.ac = undefined;
             s.turnHead = undefined;
@@ -880,13 +546,19 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // submission arriving during it must queue behind this pump rather than start a second one —
           // whose persist-at-turn-start write would interleave with it, and whichever landed second
           // erased the other: this flush's entries, or that turn's user message.
-          await flushUsage(id, s);
+          //
+          // A failure is logged and the entries are gone. Accounting is best-effort by its own contract
+          // (see `flushUsage`), nobody downstream decides anything on it, and putting them back would
+          // count them twice should the write have landed before its answer was lost.
+          await flushUsage(deps.store, id, s).catch((e: unknown) => {
+            console.error(`[matbot] the usage of session "${id}" was not recorded:`, e instanceof Error ? e : String(e));
+          });
         } finally {
           s.running = false;
           // A submission or a write that arrived during the flush found the pump running and did not start
           // one; nor did a parallel reply that settled then — possible only when a throw left the loop above
           // with parallel turns still out, since it otherwise ends only once none are.
-          if (s.queue.length > 0 || s.merges.length > 0 || s.writes.length > 0) void pump(id, s);
+          if (s.queue.length > 0 || s.merges.length > 0 || s.writes.length > 0) startPump(id, s);
           else {
             // Deterministic busy→idle signal: running is now false, so any subscriber draining the stream
             // (a frontend's status tracker) reads an authoritative idle the moment it sees this — no racing
@@ -898,6 +570,17 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       }
     };
     return deps.heldByCreator ? drain() : machineBusy(drain);
+  };
+
+  // Every start of a pump goes through here, because a pump is detached: nothing awaits it, so a rejection
+  // would be unhandled, and under node's default that exits the process. Each turn reports its own failures
+  // and the drain's own store work reports or logs its own, so nothing is known to arrive here; this is
+  // the line that keeps a failure nobody anticipated from taking every session with it. It only logs — it
+  // runs after the drain's own `finally`, by which time a new pump may already be running on this state.
+  const startPump = (id: string, s: SessionState): void => {
+    pump(id, s).catch((e: unknown) => {
+      console.error(`[matbot] the turn pump of session "${id}" failed:`, e instanceof Error ? e : String(e));
+    });
   };
 
   /**
@@ -913,7 +596,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const runParallel = async (
     id: string, s: SessionState, rec: { replay: PipelineEvent[]; stop: AbortController },
     p: { traceId: string; content: MessageContent[]; provider: string; principal: Principal; prompt?: PromptFn;
-         head: { id: string; request: string } | undefined; interjected: Message[] },
+         metadata?: Record<string, unknown>; head: { id: string; request: string } | undefined; interjected: Message[] },
   ): Promise<void> => {
     const forward = (ev: PipelineEvent): void => {
       rec.replay.push(ev);
@@ -936,28 +619,35 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       const store = new MemoryStore<Session>();
       await store.set(id, copy);
       const sub = createSessionRunner({ ...deps, store, heldByCreator: true });
-      if (rec.stop.signal.aborted) { forward({ type: 'cancelled', sessionId: id, traceId: p.traceId }); return; }
-      rec.stop.signal.addEventListener('abort', () => sub.abort(id), { once: true });
+      if (rec.stop.signal.aborted) {
+        // Stopped before it started: nothing runs, but the submission is still the person's and is recorded,
+        // with a note where the reply would have been — as it is when the stop lands a moment later, inside
+        // the nested run. Returning here dropped it without trace, depending only on how early the stop came.
+        forward({ type: 'cancelled', sessionId: id, traceId: p.traceId });
+      } else {
+        rec.stop.signal.addEventListener('abort', () => sub.abort(id), { once: true });
 
-      // Tap BEFORE submitting: the nested pump starts inside `open`, and an event (or its `idle`) emitted
-      // before a later tap would be missed — the last of them leaving this loop waiting for ever.
-      const tapAc = new AbortController();
-      const tap   = (await sub.open({ sessionId: id, signal: tapAc.signal })).events;
-      await sub.open({
-        sessionId: id, signal: tapAc.signal, traceId: p.traceId, provider: p.provider, principal: p.principal,
-        content: [...asSubmitted(p.content), ...(running ? [parallelFraming(running)] : [])],
-        ...(p.prompt !== undefined ? { prompt: p.prompt } : {}),
-      });
-      // Again, now that there is something to stop: a stop landing while the submission was on its way in
-      // (its media boundary is an await) reached a runner with nothing queued, and the listener has fired.
-      if (rec.stop.signal.aborted) sub.abort(id);
-      for await (const ev of tap) {
-        if (ev.type === 'idle') break;
-        // Announced as `parallel` already, with the content as submitted rather than the framed copy.
-        if (ev.type === 'queued') continue;
-        forward(ev);
+        // Tap BEFORE submitting: the nested pump starts inside `open`, and an event (or its `idle`) emitted
+        // before a later tap would be missed — the last of them leaving this loop waiting for ever.
+        const tapAc = new AbortController();
+        const tap   = (await sub.open({ sessionId: id, signal: tapAc.signal })).events;
+        await sub.open({
+          sessionId: id, signal: tapAc.signal, traceId: p.traceId, provider: p.provider, principal: p.principal,
+          content: [...asSubmitted(p.content), ...(running ? [parallelFraming(running)] : [])],
+          ...(p.prompt   !== undefined ? { prompt:   p.prompt   } : {}),
+          ...(p.metadata !== undefined ? { metadata: p.metadata } : {}),
+        });
+        // Again, now that there is something to stop: a stop landing while the submission was on its way in
+        // (its media boundary is an await) reached a runner with nothing queued, and the listener has fired.
+        if (rec.stop.signal.aborted) sub.abort(id);
+        for await (const ev of tap) {
+          if (ev.type === 'idle') break;
+          // Announced as `parallel` already, with the content as submitted rather than the framed copy.
+          if (ev.type === 'queued') continue;
+          forward(ev);
+        }
+        tapAc.abort();
       }
-      tapAc.abort();
 
       const final  = await store.get(id);
       const msgs   = final?.messages ?? [];
@@ -1022,7 +712,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
         if (s.ac !== undefined && reply.head !== undefined) {
           let placed: 'inserted' | 'present' | 'no' = 'no';
           try {
-            placed = await placeNow(id, reply);
+            placed = await placeNow(deps.store, id, reply);
           } catch (e) {
             console.error(`[matbot] placing a parallel reply of session "${id}" failed:`,
               e instanceof Error ? e : String(e));
@@ -1038,170 +728,195 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       }
       // Placed by the running turn if there is one (it is polled each round), else by the pump that admitted
       // this turn, which is waiting for it.
-      void pump(id, s);
+      startPump(id, s);
     }
   };
 
-  return {
-    async open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView> {
-      // For a pure read (no content, events never tapped) we must not materialise a state entry —
-      // otherwise every session_action `get` would leak one. State is created only when there is
-      // something to queue or someone to subscribe.
-      let s = states.get(opts.sessionId);
-
-      let traceId: string | undefined;
-      if ('content' in opts) {
-        // Belt-and-braces: the union enforces this for TS callers, but a frontend deserialising a
-        // request body can still hand us a malformed object — fail loudly at the boundary.
-        if (opts.provider === undefined || opts.principal === undefined) {
-          throw new Error('open(): submitting content requires both provider and principal');
+  // The live tap, subscribed on first access to `events` and never before: a view whose events are never
+  // read costs nothing. Defined on the object rather than spread into it, which would read the getter.
+  const withEvents = <T extends object>(opts: OpenOpts, fields: T): T & { readonly events: AsyncIterable<PipelineEvent> } => {
+    let cached: AsyncIterable<PipelineEvent> | undefined;
+    return Object.defineProperty(fields, 'events', {
+      enumerable: true,
+      get(): AsyncIterable<PipelineEvent> {
+        if (cached === undefined) {
+          const st = stateFor(opts.sessionId);
+          const remove = (): void => { st.subscribers.delete(sink); maybeCleanup(opts.sessionId, st); };
+          const sink = createSink(remove);
+          st.subscribers.add(sink);
+          // Replay the in-progress turn, any parallel turns beside it, then the pending queue — the delta
+          // region, in order.
+          for (const ev of st.replay) sink.push(ev);
+          for (const { replay } of st.parallel.values()) for (const ev of replay) sink.push(ev);
+          st.queue.forEach((item, i) =>
+            sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), concatQueue: item.concatQueue, traceId: item.traceId, rootTraceId: item.rootTraceId }));
+          if (opts.signal.aborted) { sink.close(); remove(); }
+          else opts.signal.addEventListener('abort', () => { sink.close(); remove(); }, { once: true });
+          cached = sink.iterable;
         }
-        s = stateFor(opts.sessionId);
-        traceId = opts.traceId ?? crypto.randomUUID();
-        const { provider, principal } = opts;
-        const mode = opts.mode ?? 'queue';
+        return cached;
+      },
+    }) as T & { readonly events: AsyncIterable<PipelineEvent> };
+  };
 
-        // Which turn a steer is FOR is fixed here, before the first await, and checked again before the
-        // abort. `s.running` alone cannot answer it: it is true across the pump's whole queue, so it
-        // says "something is running", not "still the one you meant". Every await below can outlive a
-        // turn — the classifier and the nudge could already, and media ingestion can hold for seconds
-        // on a large attachment — after which aborting on `s.running` kills whatever is running NOW,
-        // a turn the user never saw, and names the wrong `interruptedTraceId` on the way.
-        const steerTarget = s.runningTraceId;
-
-        // The media boundary, before anything else this submission touches: by-value attachments are
-        // written through the MediaStore and become `file-ref`s here, so nothing downstream — the
-        // steering classifier, the `queued`/`steer` events, the persisted user message — ever sees
-        // bytes. One place, and every frontend inherits it, which is what lets Telegram (where bytes
-        // arrive WITH the message and there is no upload-in-advance leg) work with no code of its own.
-        // Throws MediaRejectedError on a refusal; nothing is enqueued, so the caller has nothing to
-        // undo — it just tells the user which file and why.
-        const content = await ingestMedia(opts.content, opts.sessionId, deps.mediaStore?.());
-
-        // Decide interrupt vs queue for a submission arriving mid-turn. Steering is only meaningful
-        // while a turn is running; with nothing running it enqueues and runs next regardless of mode.
-        // The decision — and, on interrupt, the abort+unshift — happen here synchronously against
-        // s.running (re-checked after any classify/nudge await) so an interrupt can never land on the
-        // wrong (a later) turn: the fatal race of deciding across a wire is closed by deciding in-runner.
-        let handled = false;
-        if (mode !== 'queue' && s.running) {
-          const policy = deps.steeringPolicy?.();
-          // Fetch the committed session once (history up to the running turn's start) only when a policy
-          // member actually needs it: classify under `auto`, and nudge on any interrupt. The common
-          // no-policy interrupt path (e.g. the web default) does no extra read.
-          const wantClassify = mode === 'auto' && policy?.classify !== undefined;
-          const wantNudge    = policy?.nudge !== undefined;
-          const committed = (wantClassify || wantNudge) ? await deps.store.get(opts.sessionId) : null;
-
-          const decision: SteeringDecision = mode === 'interrupt' || mode === 'parallel'
-            ? mode
-            : policy?.classify !== undefined
-              ? (committed ? await policy.classify({ session: committed, steer: content }) : DEFAULT_STEERING_POLICY)
-              : DEFAULT_STEERING_POLICY;
-
-          // Any await above may have outlived the turn this steer was for: interrupt only if THAT one
-          // is still the running turn. Otherwise fall through and queue — the turn they were steering
-          // has already committed, which makes this an ordinary follow-up rather than an interruption.
-          // `running` alone is not "a turn is running": it holds through the usage flush after the queue
-          // drains, where `runningTraceId` is already cleared — and `steerTarget` captured then is
-          // undefined too, so without the first test the two compare equal and nothing gets steered.
-          if (decision === 'interrupt' && s.runningTraceId !== undefined && s.runningTraceId === steerTarget) {
-            const nudge = policy?.nudge !== undefined && committed
-              ? policy.nudge({ session: committed, steer: content })
-              : DEFAULT_STEER_NUDGE;
-            const interruptedTraceId = s.runningTraceId;
-            // Head of the queue (ahead of anything else already queued): the steer runs immediately
-            // after the interrupted turn commits its partial work. Own turn (never concat).
-            s.queue.unshift({
-              traceId,
-              rootTraceId:     traceId,
-              content,
-              provider,
-              principal,
-              concatQueue:     false,
-              resubmitDepth:   0,
-              injectEphemeral: nudge,
-              ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
-            });
-            // Announce the steer before aborting so a subscriber places the new bubble and reads the
-            // imminent `aborted` (reason 'steer') as a yield, not a dead-end.
-            notify(s, { type: 'steer', content, interruptedTraceId, traceId, rootTraceId: traceId });
-            s.ac?.abort('steer');
-            handled = true;
-          }
-
-          // Unlike a steer, a parallel turn needs no particular turn to still be running — only SOME turn,
-          // since that is what it runs beside. Its copy is cut at whichever turn that is, captured here,
-          // synchronously, because the next await could outlive it.
-          if (decision === 'parallel' && s.running && s.runningTraceId !== undefined) {
-            const rec = { replay: [] as PipelineEvent[], stop: new AbortController() };
-            const announce: PipelineEvent = { type: 'parallel', content, runningTraceId: s.runningTraceId, traceId, rootTraceId: traceId };
-            rec.replay.push(announce);
-            s.parallel.set(traceId, rec);
-            notify(s, announce);
-            void runParallel(opts.sessionId, s, rec, {
-              traceId, content, provider, principal,
-              head:        s.turnHead,
-              interjected: s.interjected.flatMap(r => r.messages),
-              ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
-            });
-            handled = true;
-          }
-        }
-
-        if (!handled) {
-          const concatQueue = opts.concatQueue ?? false;
-          s.queue.push({
-            traceId,
-            rootTraceId:   traceId,
-            content,
-            provider,
-            principal,
-            concatQueue,
-            resubmitDepth: 0,
-            ...(opts.prompt !== undefined ? { prompt: opts.prompt } : {}),
-          });
-          // Announce the submission on the stream as part of the live delta, before its turn's events.
-          // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
-          // tells a frontend whether this submission will merge into the running batch (so it can fold the
-          // bubble) or run as its own turn.
-          notify(s, { type: 'queued', content, queued: aheadOf(s, s.queue.length - 1), concatQueue, traceId, rootTraceId: traceId });
-        }
-        void pump(opts.sessionId, s);
-      }
-
+  function open(opts: SubmitOpenOpts): Promise<SubmittedView>;
+  function open(opts: OpenOpts): Promise<SessionView>;
+  async function open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView | SubmittedView> {
+    if (!('content' in opts)) {
       // Stored state is pure committed history (ends at the running turn's user message). The pending
       // queue and the in-progress response are the "delta", delivered over `events` — never overlaid
-      // here — so `stored ++ delta` concatenates in a single, refresh-stable order.
+      // here — so `stored ++ delta` concatenates in a single, refresh-stable order. Read without
+      // materialising a state entry: every session_action `get` would otherwise leak one.
       const base = await deps.store.get(opts.sessionId);
-      if (base === null) throw new Error(`Session "${opts.sessionId}" not found`);
+      if (base === null) throw withFailure(new Error(`Session "${opts.sessionId}" not found`), 'invalid');
+      return withEvents(opts, { session: base, queued: states.get(opts.sessionId)?.queue.length ?? 0 });
+    }
+    try {
+      return await submit(opts);
+    } catch (e) {
+      // Nothing was queued (see the end of `submit`), but its state entry was made before the awaits that
+      // threw — a refused attachment, a failed steering read — and would otherwise stay for good.
+      const s = states.get(opts.sessionId);
+      if (s !== undefined) maybeCleanup(opts.sessionId, s);
+      throw e;
+    }
+  }
 
-      let cached: AsyncIterable<PipelineEvent> | undefined;
-      const view: SessionView = {
-        session: base,
-        queued: s !== undefined ? s.queue.length : 0,
-        ...(traceId !== undefined ? { traceId } : {}),
-        get events(): AsyncIterable<PipelineEvent> {
-          if (cached === undefined) {
-            const st = stateFor(opts.sessionId);
-            const remove = (): void => { st.subscribers.delete(sink); maybeCleanup(opts.sessionId, st); };
-            const sink = createSink(remove);
-            st.subscribers.add(sink);
-            // Replay the in-progress turn, any parallel turns beside it, then the pending queue — the delta
-            // region, in order.
-            for (const ev of st.replay) sink.push(ev);
-            for (const { replay } of st.parallel.values()) for (const ev of replay) sink.push(ev);
-            st.queue.forEach((item, i) =>
-              sink.push({ type: 'queued', content: item.content, queued: aheadOf(st, i), concatQueue: item.concatQueue, traceId: item.traceId, rootTraceId: item.rootTraceId }));
-            if (opts.signal.aborted) { sink.close(); remove(); }
-            else opts.signal.addEventListener('abort', () => { sink.close(); remove(); }, { once: true });
-            cached = sink.iterable;
-          }
-          return cached;
-        },
-      };
-      return view;
-    },
+  async function submit(opts: SubmitOpenOpts): Promise<SubmittedView> {
+    // Belt-and-braces: the union enforces this for TS callers, but a frontend deserialising a
+    // request body can still hand us a malformed object — fail loudly at the boundary.
+    if (opts.provider === undefined || opts.principal === undefined) {
+      throw new Error('open(): submitting content requires both provider and principal');
+    }
+    const s = stateFor(opts.sessionId);
+    const traceId = opts.traceId ?? crypto.randomUUID();
+    // How many turns are ahead of this submission's, as its `queued` event says: none beside a running
+    // turn (parallel), the interrupted turn's commit for a steer.
+    let ahead = 0;
+    const { provider, principal } = opts;
+    const mode = opts.mode ?? 'queue';
+    const prompt = opts.prompt !== undefined ? counted(opts.sessionId, opts.prompt) : undefined;
+
+    // Which turn a steer is FOR is fixed here, before the first await, and checked again before the
+    // abort. `s.running` alone cannot answer it: it is true across the pump's whole queue, so it
+    // says "something is running", not "still the one you meant". Every await below can outlive a
+    // turn — the classifier and the nudge could already, and media ingestion can hold for seconds
+    // on a large attachment — after which aborting on `s.running` kills whatever is running NOW,
+    // a turn the user never saw, and names the wrong `interruptedTraceId` on the way.
+    const steerTarget = s.runningTraceId;
+
+    // The media boundary, before anything else this submission touches: by-value attachments are
+    // written through the MediaStore and become `file-ref`s here, so nothing downstream — the
+    // steering classifier, the `queued`/`steer` events, the persisted user message — ever sees
+    // bytes. One place, and every frontend inherits it, which is what lets Telegram (where bytes
+    // arrive WITH the message and there is no upload-in-advance leg) work with no code of its own.
+    // Throws MediaRejectedError on a refusal; nothing is enqueued, so the caller has nothing to
+    // undo — it just tells the user which file and why.
+    const content = await ingestMedia(opts.content, opts.sessionId, deps.mediaStore?.());
+
+    // Decide interrupt vs queue for a submission arriving mid-turn. Steering is only meaningful
+    // while a turn is running; with nothing running it enqueues and runs next regardless of mode.
+    // The decision — and, on interrupt, the abort+unshift — happen here synchronously against
+    // s.running (re-checked after any classify/nudge await) so an interrupt can never land on the
+    // wrong (a later) turn: the fatal race of deciding across a wire is closed by deciding in-runner.
+    let handled = false;
+    if (mode !== 'queue' && s.running) {
+      const policy = deps.steeringPolicy?.();
+      // Fetch the committed session once (history up to the running turn's start) only when a policy
+      // member actually needs it: classify under `auto`, and nudge on any interrupt. The common
+      // no-policy interrupt path (e.g. the web default) does no extra read.
+      const wantClassify = mode === 'auto' && policy?.classify !== undefined;
+      const wantNudge    = policy?.nudge !== undefined;
+      const committed = (wantClassify || wantNudge) ? await deps.store.get(opts.sessionId) : null;
+
+      const decision: SteeringDecision = mode === 'interrupt' || mode === 'parallel'
+        ? mode
+        : policy?.classify !== undefined
+          ? (committed ? await policy.classify({ session: committed, steer: content }) : DEFAULT_STEERING_POLICY)
+          : DEFAULT_STEERING_POLICY;
+
+      // Any await above may have outlived the turn this steer was for: interrupt only if THAT one
+      // is still the running turn. Otherwise fall through and queue — the turn they were steering
+      // has already committed, which makes this an ordinary follow-up rather than an interruption.
+      // `running` alone is not "a turn is running": it holds through the usage flush after the queue
+      // drains, where `runningTraceId` is already cleared — and `steerTarget` captured then is
+      // undefined too, so without the first test the two compare equal and nothing gets steered.
+      if (decision === 'interrupt' && s.runningTraceId !== undefined && s.runningTraceId === steerTarget) {
+        const nudge = policy?.nudge !== undefined && committed
+          ? policy.nudge({ session: committed, steer: content })
+          : DEFAULT_STEER_NUDGE;
+        const interruptedTraceId = s.runningTraceId;
+        // Head of the queue (ahead of anything else already queued): the steer runs immediately
+        // after the interrupted turn commits its partial work. Own turn (never concat).
+        s.queue.unshift({
+          traceId,
+          rootTraceId:     traceId,
+          content,
+          provider,
+          principal,
+          concatQueue:     false,
+          resubmitDepth:   0,
+          injectEphemeral: nudge,
+          ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
+        });
+        // Announce the steer before aborting so a subscriber places the new bubble and reads the
+        // imminent `aborted` (reason 'steer') as a yield, not a dead-end.
+        notify(s, { type: 'steer', content, interruptedTraceId, traceId, rootTraceId: traceId });
+        s.ac?.abort('steer');
+        ahead   = aheadOf(s, 0);
+        handled = true;
+      }
+
+      // Unlike a steer, a parallel turn needs no particular turn to still be running — only SOME turn,
+      // since that is what it runs beside. Its copy is cut at whichever turn that is, captured here,
+      // synchronously, because the next await could outlive it.
+      if (decision === 'parallel' && s.running && s.runningTraceId !== undefined) {
+        const rec = { replay: [] as PipelineEvent[], stop: new AbortController() };
+        const announce: PipelineEvent = { type: 'parallel', content, runningTraceId: s.runningTraceId, traceId, rootTraceId: traceId };
+        rec.replay.push(announce);
+        s.parallel.set(traceId, rec);
+        notify(s, announce);
+        void runParallel(opts.sessionId, s, rec, {
+          traceId, content, provider, principal,
+          head:        s.turnHead,
+          interjected: s.interjected.flatMap(r => r.messages),
+          ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
+        });
+        handled = true;
+      }
+    }
+
+    if (!handled) {
+      const concatQueue = opts.concatQueue ?? false;
+      s.queue.push({
+        traceId,
+        rootTraceId:   traceId,
+        content,
+        provider,
+        principal,
+        concatQueue,
+        resubmitDepth: 0,
+        ...(prompt !== undefined ? { prompt } : {}),
+          ...(opts.metadata !== undefined ? { metadata: opts.metadata } : {}),
+      });
+      // Announce the submission on the stream as part of the live delta, before its turn's events.
+      // If it runs immediately `queued` is 0 (no wait); otherwise it's how many are ahead. concatQueue
+      // tells a frontend whether this submission will merge into the running batch (so it can fold the
+      // bubble) or run as its own turn.
+      ahead = aheadOf(s, s.queue.length - 1);
+      notify(s, { type: 'queued', content, queued: ahead, concatQueue, traceId, rootTraceId: traceId });
+    }
+    // Nothing is awaited from here on: if `open()` has not thrown by now, the submission is in, and if it
+    // threw, nothing was queued. The session is not read back for the caller — a read after the queueing
+    // that failed told the caller a running submission had failed, and one sent again ran twice.
+    startPump(opts.sessionId, s);
+    return withEvents(opts, { queued: ahead, traceId });
+  }
+
+  return {
+    open,
 
     abort(sessionId: string): void {
       const s = states.get(sessionId);
@@ -1230,12 +945,12 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       s.ac?.abort('user-cancel');
     },
 
-    status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number } {
+    status(sessionId: string): SessionStatusReport {
       const s = states.get(sessionId);
       const running  = s?.running ?? false;
       const queued   = s?.queue.length ?? 0;
       const parallel = s?.parallel.size ?? 0;
-      return { busy: running || queued > 0 || parallel > 0 || (s?.merges.length ?? 0) > 0, running, queued, parallel };
+      return { busy: running || queued > 0 || parallel > 0 || (s?.merges.length ?? 0) > 0, running, queued, parallel, prompting: asking.has(sessionId) };
     },
 
     write(sessionId: string, attempt: () => Promise<boolean>, lost: string): SessionWrite {
@@ -1264,7 +979,7 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
       });
       // On a microtask, so the write cannot start before this returns: a caller decides what to do from
       // `deferred`, and its attempt may read what it set after the call.
-      queueMicrotask(() => { void pump(sessionId, s); });
+      queueMicrotask(() => { startPump(sessionId, s); });
       return { deferred, done };
     },
   };

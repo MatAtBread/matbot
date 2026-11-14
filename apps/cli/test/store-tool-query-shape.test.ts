@@ -46,6 +46,7 @@ function machine(seed: Record<string, Doc[]>): { tools: Tool[]; services: Parame
         const i = tools.findIndex(t => t.name === name);
         if (i >= 0) tools.splice(i, 1);
       },
+      resolve: (name: string) => tools.find(t => t.name === name) ?? null,
       list: () => tools.map(t => t.name),
     },
   } as unknown as Parameters<typeof defineStore>[0];
@@ -105,14 +106,15 @@ test('a query with no grammar keys at all still matches everything', async () =>
   assert.deepEqual((result as { items: unknown[] }).items.length, 2, 'an omitted query still means match-all');
 });
 
-// ── store_action create: the namespace is LLM-supplied, and it is not an opaque key ───────────────
+// ── store_action create: the name is LLM-supplied, and it is not an opaque key ────────────────────
 //
-// The filesystem backend makes it a directory name verbatim (document ids are percent-encoded,
-// namespaces never were), so it is checked where untrusted names arrive rather than defended against
-// in every backend.
+// It becomes part of a namespace, which the filesystem backend makes a directory name verbatim
+// (document ids are percent-encoded, namespaces never were), so it is checked where untrusted names
+// arrive rather than defended against in every backend.
 
-async function storeActionTool(existing: Record<string, Doc[]> = {}): Promise<Tool> {
+async function storeActionTool(existing: Record<string, Doc[]> = {}, preset: Tool[] = []): Promise<{ tool: Tool; tools: Tool[] }> {
   const { tools, services } = machine(existing);
+  tools.push(...preset);
   // Give the machine a backend that can enumerate, so the create guard has something to ask.
   (services as unknown as { StorageBackend: unknown }).StorageBackend = {
     createStore: (ns: string) => (services as unknown as { createStore(n: string): unknown }).createStore(ns),
@@ -123,38 +125,80 @@ async function storeActionTool(existing: Record<string, Doc[]> = {}): Promise<To
   await plugin.setup!(services as never);
   const tool = tools.find(t => t.name === 'store_action');
   assert.ok(tool !== undefined, 'the plugin must register store_action');
-  return tool;
+  return { tool, tools };
 }
 
 const created = { description: 'notes', shape: 'interface N { text: string }' };
 
-test('a namespace that would escape the data directory is rejected', async () => {
-  const tool = await storeActionTool();
-  for (const namespace of ['../evil', 'a/b', '.', '..', 'a\\b']) {
-    const { error, result } = await call(tool, { action: 'create', namespace, ...created });
-    assert.equal(result, undefined, `${namespace} must not create a store`);
-    assert.match(String(error), /not a valid namespace/, `${namespace} must be rejected`);
+test('a name that would escape the data directory is rejected', async () => {
+  const { tool } = await storeActionTool();
+  for (const name of ['../evil', 'a/b', '.', '..', 'a\\b']) {
+    const { error, result } = await call(tool, { action: 'create', name, ...created });
+    assert.equal(result, undefined, `${name} must not create a store`);
+    assert.match(String(error), /not a valid store name/, `${name} must be rejected`);
   }
 });
 
-test('a namespace matbot itself uses is still accepted', async () => {
-  const tool = await storeActionTool();
-  for (const namespace of ['remembered_facts', 'profile-registry', 'a1']) {
-    const { error } = await call(tool, { action: 'create', namespace, ...created });
-    assert.equal(error, undefined, `${namespace} must remain valid`);
-  }
+test("a created store lives in tool-store's own namespace, never a plugin's", async () => {
+  const { tool, tools } = await storeActionTool({ sessions: [{ id: 's1', version: 'v1' }] });
+  const { error, result } = await call(tool, { action: 'create', name: 'sessions', ...created });
+  assert.equal(error, undefined);
+  assert.equal((result as { namespace: string }).namespace, 'store-sessions');
+  const generated = tools.find(t => t.name === 'sessions_action');
+  assert.ok(generated !== undefined);
+  const { result: page } = await call(generated, { action: 'query' });
+  assert.equal((page as { items: unknown[] }).items.length, 0, "the plugin's sessions are not reachable");
 });
 
-test("creating over a plugin's own namespace is refused", async () => {
-  const tool = await storeActionTool({ sessions: [{ id: 's1', version: 'v1' }] });
-  const { error, result } = await call(tool, { action: 'create', namespace: 'sessions', ...created });
+test('expose is gone: a model cannot open a store it did not create', async () => {
+  const { tool } = await storeActionTool({ settings: [{ id: 'x', version: 'v1' }] });
+  const { error, result } = await call(tool, { action: 'expose', name: 'settings', ...created });
   assert.equal(result, undefined);
-  assert.match(String(error), /already exists/);
+  assert.match(String(error), /Unknown action "expose"/);
 });
 
-test('a namespace differing only by case is refused', async () => {
-  const tool = await storeActionTool({ sessions: [{ id: 's1', version: 'v1' }] });
-  const { error, result } = await call(tool, { action: 'create', namespace: 'Sessions', ...created });
+test('a name whose generated tool another plugin provides is refused', async () => {
+  const gate = { name: 'gate_action', description: '', inputSchema: {}, executor: { async *execute() {} } } as unknown as Tool;
+  const { tool, tools } = await storeActionTool({}, [gate]);
+  const { error, result } = await call(tool, { action: 'create', name: 'gate', ...created });
+  assert.equal(result, undefined);
+  assert.match(String(error), /would generate the tool "gate_action", which the host already provides/);
+  assert.equal(tools.find(t => t.name === 'gate_action'), gate, 'the existing tool is untouched');
+});
+
+test('remove of a name with no definition removes no tool', async () => {
+  const gate = { name: 'gate_action', description: '', inputSchema: {}, executor: { async *execute() {} } } as unknown as Tool;
+  const { tool, tools } = await storeActionTool({}, [gate]);
+  const { result } = await call(tool, { action: 'remove', name: 'gate' });
+  assert.deepEqual(result, { removed: false });
+  assert.ok(tools.includes(gate));
+});
+
+test("re-creating a removed store's name re-attaches its documents", async () => {
+  const { tool, tools } = await storeActionTool({ 'store-notes': [{ id: 'n1', version: 'v1', text: 'kept' }] });
+  const { error } = await call(tool, { action: 'create', name: 'notes', ...created });
+  assert.equal(error, undefined);
+  const { result: page } = await call(tools.find(t => t.name === 'notes_action')!, { action: 'query' });
+  assert.equal((page as { items: unknown[] }).items.length, 1);
+});
+
+test('a name differing only by case is refused', async () => {
+  const { tool } = await storeActionTool({ 'store-notes': [{ id: 'n1', version: 'v1' }] });
+  const { error, result } = await call(tool, { action: 'create', name: 'Notes', ...created });
   assert.equal(result, undefined, 'one directory on macOS and Windows');
-  assert.match(String(error), /collides with the existing namespace "sessions"/);
+  assert.match(String(error), /collides with the existing namespace "store-notes"/);
+});
+
+test('a persisted def over a namespace the host refuses is skipped, not fatal', async () => {
+  const legacy = { id: 'settings', version: 'v1', namespace: 'settings', description: 'd', shape: 'interface S { data: object }', createdAt: '', updatedAt: '' };
+  const { tools, services } = machine({ store_tools: [legacy] });
+  const open = (services as unknown as { createStore(n: string): unknown }).createStore;
+  (services as unknown as { createStore(n: string): unknown }).createStore = (ns: string) => {
+    if (ns === 'settings') throw new Error('refused');
+    return open(ns);
+  };
+  const { plugin } = await import('../../../plugins/tool-store/src/index.ts');
+  await plugin.setup!(services as never);
+  assert.ok(tools.some(t => t.name === 'store_action'));
+  assert.ok(!tools.some(t => t.name === 'settings_action'));
 });

@@ -7,15 +7,14 @@ import {
   HookRegistry,
 } from '@matatbread/matbot-plugin-api/host';
 import type { SwapFn } from '@matatbread/matbot-plugin-api/host';
-import { notifyingStore, createMessage } from '@matatbread/matbot-plugin-api';
+import { notifyingStore, createMessage, describeProviders } from '@matatbread/matbot-plugin-api';
 import { mediumGuard } from './storage-base/medium-guard.js';
 import { MemoryStore } from './storage-base/memory-store.js';
 import { unifyServices } from './plugin.js';
-import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins } from './registry.js';
-import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces } from './settings.js';
+import { instantiateProvider, recordServiceKey, getPluginNameForSpecifier, getRegisteredPlugins, unloadPlugin } from './registry.js';
+import { installSettingsDefaults, installSettingsNotifier, makePluginSettings, settingsDefaultNamespaces, storedSettingsData } from './settings.js';
 import type { SettingsDoc } from './settings.js';
 import { ToolRegistryImpl } from './tool-registry.js';
-import type { ToolInputValidator } from './tool-registry.js';
 import type { ProviderRegistryImpl } from './provider-registry.js';
 import { SystemContextRegistryImpl } from './system-context.js';
 import { LookupKnowledgeIndex } from './knowledge/index.js';
@@ -24,6 +23,7 @@ import { createSessionAppender } from './session-append.js';
 import { createSingleTurnTool } from './single-turn.js';
 import { createAboutMatbotTool } from './about.js';
 import { addUsage } from './usage.js';
+import { defaultGate } from './default-gate/index.js';
 
 /** A storage backend a configured plugin's manifest supplied at boot, and the config entry it came from. */
 export interface PreScannedStorage {
@@ -49,16 +49,18 @@ export async function preScanStorage(
   return undefined;
 }
 
-/** The host's default permission policy, and the tools that inspect it (`@matatbread/matbot-default-gate`). */
+/** A permission policy, and the tools that inspect it. Core's own is `defaultGate`. */
 export interface HostGate {
   namespace: string;
-  create(settings: PluginSettings): PermissionGate;
+  /** `stored` reads the namespace's stored document alone, with no configured default under it — for a
+   *  policy migrating a stored format, which must never copy a default into what is stored. */
+  create(settings: PluginSettings, stored: () => Promise<Record<string, unknown>>): PermissionGate;
   tools(settings: PluginSettings): Tool[];
 }
 
 /** The machine members only a host can supply. */
 export type HostMembers =
-  Pick<MatbotMachine, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'isSubAgent' | 'TypeScriptStripper' | 'workdir' | 'configPath'>;
+  Pick<MatbotMachine, 'loadPlugin' | 'unloadPlugin' | 'resolver' | 'isSubAgent' | 'TypeScriptStripper' | 'workdir' | 'projectDir' | 'dataDir'>;
 
 export interface AssembleOptions {
   /** The host's own storage: the revert target when a plugin's StorageBackend is unregistered. */
@@ -67,24 +69,32 @@ export interface AssembleOptions {
   /** The boot vault, behind a swappable proxy like every other swap-member. */
   vault:            Vault;
   providers:        ProviderRegistryImpl;
-  gate:             HostGate;
+  /** The installation's permission policy; `defaultGate` (ask, remember, honour) when absent. */
+  gate?:            HostGate;
   defaultSettings?: ReadonlyMap<string, Readonly<Record<string, unknown>>> | undefined;
   builtinTools?:    Tool[];
   /** Resolve one `${NAME}` reference; the browser prompts for a missing secret. Defaults to the vault. */
   resolveSecret?(ref: string, vault: Vault): Promise<string>;
-  /** Reported by `about_matbot`. */
+  /** The application's own version, which `about_matbot` reports as the harness version (the CLI passes
+   *  its package's, which the lockstep release makes core's too). */
   version:          string;
   /** Called with a late-bound handle, since these members call back into the machine being built. */
   host(machine: () => MatbotMachine): HostMembers;
 }
 
 export interface AssembledMachine {
-  services: MatbotMachine;
+  /** With the shared session store and runner, which a plugin's machine types as optional, present. */
+  services: MatbotMachine & { readonly sessions: Store<Session>; readonly run: SessionRunner };
   /** A session runner over any store — the shared one is `services.run`. */
   makeRunner(store: Store<Session>, opts?: { appender?: SessionAppender }): SessionRunner;
   /** Call once the configured plugins have loaded. */
   loaded(): void;
+  /** Unload every plugin, last loaded first, and let this process assemble another machine. */
+  dispose(): Promise<void>;
 }
+
+// Whether a machine is assembled in this process now. See assembleMachine.
+let assembled = false;
 
 const NEVER_ABORT = new AbortController().signal;
 type AnyStore = Store<{ id: string; version: string }>;
@@ -97,8 +107,20 @@ type AnyStore = Store<{ id: string; version: string }>;
  *
  * The host installs its principal and usage carriers first: nothing here reads an identity, but the
  * runner and every plugin will.
+ *
+ * **One machine per process at a time.** Core's plugin registry and the installation's settings defaults
+ * are the module's, and a plugin is a module instance whatever machine loads it, holding what it captured
+ * from the one that set it up — so a second machine would share the first's plugins and replace its
+ * defaults, half-working with nothing to say so. It throws instead. Several principals are one machine
+ * (`runAs`); a machine configured differently is a process of its own, as background-jobs-node runs a
+ * job. `dispose()` frees the slot, for a host (a test, in practice) done with the first.
  */
 export function assembleMachine(opts: AssembleOptions): AssembledMachine {
+  if (assembled) {
+    throw new Error('A matbot machine is already assembled in this process, and plugins and core\'s registry are shared by ' +
+                    'every machine in it. dispose() that one first, or run another machine in a process of its own.');
+  }
+  assembled = true;
   const { bootBackend, preScanned, providers } = opts;
   installSettingsDefaults(opts.defaultSettings);
 
@@ -191,6 +213,8 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
       run:        () => services.run,
       notifier:   () => services.Notifier,
       isSubAgent: () => services.isSubAgent(),
+      providers:  () => services.providers,
+      prompter:   () => services.SessionPrompter,
     }),
   };
   const serviceRegistry = new Map<string, unknown>(Object.entries(seed));
@@ -198,13 +222,6 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // covered by one wrapper. It asks the `validate` hooks per call: validators arrive long after the
   // builtins are seeded, and may be unloaded again.
   const hooks = new HookRegistry();
-  // The `ToolCallValidator` service is its predecessor, still honoured: consulted as one more hook, so a
-  // validator registered there is combined with the rest by the same rule. Host-owned (no `pluginName`),
-  // so no plugin's unload removes it; the key is read per call.
-  hooks.register({
-    on: 'validate',
-    handler: ctx => (serviceRegistry.get('ToolCallValidator') as ToolInputValidator | undefined)?.validateToolCall(ctx.tool, ctx.parameters),
-  });
   const tools = new ToolRegistryImpl(opts.builtinTools, notifier,
     (tool, parameters, signal) => hooks.runValidate({ tool, parameters, signal }));
   const systemContext = new SystemContextRegistryImpl();
@@ -213,8 +230,10 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   // to replace a policy is to capture the one displaced and delegate to it, and a capture-safe proxy
   // would make that capture resolve to the capturing gate itself — which then calls itself until the
   // stack overflows. A getter keeps the member read late-bound; every consumer resolves it per call.
-  const gateSettings = makePluginSettings(createStore<SettingsDoc>('settings'), opts.gate.namespace);
-  let activeGate = opts.gate.create(gateSettings);
+  const gate = opts.gate ?? defaultGate;
+  const gateStore    = createStore<SettingsDoc>('settings');
+  const gateSettings = makePluginSettings(gateStore, gate.namespace);
+  let activeGate = gate.create(gateSettings, storedSettingsData(gateStore, gate.namespace));
 
   const boot = { vault: activeVault, knowledge: knowledgeImpl, notifier: activeNotifier, gate: activeGate };
 
@@ -293,8 +312,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     registerFrontend() { /* bound per plugin in setupPlugin's scope */ },
 
     async complete(req) {
-      const raw = providers.get(req.provider);
-      if (raw === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${[...providers.keys()].join(', ')}`);
+      // An alias is resolved here, where the call is made, and nowhere above.
+      const raw = providers.resolve(req.provider);
+      if (raw === undefined) throw new Error(`complete(): unknown provider "${req.provider}". Available: ${describeProviders(providers)}`);
       const resolved = await resolveConfig({
         ...raw,
         // Per-call overrides shallow-merged over the config's own parameters (request wins).
@@ -315,8 +335,9 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
         if (ev.type === 'usage')      usage = addUsage(usage, ev);
       }
       // Into the ambient usage sink, so a tool running this completion has its spend attributed to the
-      // site in force. Measured here because this is where the call is issued.
-      recordUsage(req.provider, usage, { startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt });
+      // site in force. Measured here because this is where the call is issued. Under the profile that ran,
+      // never an alias: the entry is priced by the model's rates, and an alias moves.
+      recordUsage(raw.name, usage, { startedAt: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt });
       return { text, usage };
     },
     async singleTurn(req) {
@@ -344,10 +365,11 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
   };
   const services: MatbotMachine = unifyServices(baseServices);
 
-  // Resolved per turn, so it sees live `provider` edits. instantiateProvider force-loads an adapter that
-  // is not registered yet, and yields null rather than throwing when it cannot.
+  // Resolved per turn, so it sees live `provider` edits, and an alias here, where the turn calls it: the
+  // runner keeps the name it was given, which is what a message records. instantiateProvider force-loads
+  // an adapter that is not registered yet, and yields null rather than throwing when it cannot.
   const resolveProvider = async (name: string): Promise<{ adapter: ProviderAdapter; config: ProviderConfig } | null> => {
-    const cfg = providers.get(name);
+    const cfg = providers.resolve(name);
     if (cfg === undefined) return null;
     const config  = await resolveConfig(cfg);
     const adapter = await instantiateProvider(services, config);
@@ -370,7 +392,6 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     mediaStore:     () => services.MediaStore,
     permissionGate: () => services.PermissionGate,
     ...(services.workdir    !== undefined ? { workdir:    services.workdir }    : {}),
-    ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     loadPlugin:     services.loadPlugin.bind(services),
     unloadPlugin:   services.unloadPlugin.bind(services),
   });
@@ -378,18 +399,18 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
 
   // Seeded rather than carried by configured plugins: `gate_action` because a minimal install's first act
   // (adding a plugin or provider) is gated, so inspecting an answer cannot depend on a config line.
-  for (const tool of opts.gate.tools(gateSettings)) tools.register(tool);
+  for (const tool of gate.tools(gateSettings)) tools.register(tool);
   tools.register(createSingleTurnTool(services));
   // The harness is not a plugin (no `plugin list` row), so its version gets a tool of its own.
   tools.register(createAboutMatbotTool(opts.version, services));
 
   const loaded = (): void => {
     // A defaults key is a plugin NAME — loader-derived, not necessarily what `plugins:` spells. One
-    // naming nothing loaded is the feature's one silent failure. The gate's namespace is seeded by the
-    // host rather than a plugin, and reserved dunder namespaces are not plugins; both are exempt.
+    // naming nothing loaded is the feature's one silent failure. The gate's namespace is seeded at boot
+    // rather than by a plugin, and reserved dunder namespaces are not plugins; both are exempt.
     const names = new Set(getRegisteredPlugins().map(p => p.name));
     for (const ns of settingsDefaultNamespaces()) {
-      if (names.has(ns) || ns === opts.gate.namespace || (ns.startsWith('__') && ns.endsWith('__'))) continue;
+      if (names.has(ns) || ns === gate.namespace || (ns.startsWith('__') && ns.endsWith('__'))) continue;
       console.warn(
         `[matbot] default settings name "${ns}", which is not a loaded plugin — they apply only once a plugin ` +
         `of that name loads. Key them by the plugin's package name (\`plugin list\` reports them).`,
@@ -402,5 +423,10 @@ export function assembleMachine(opts: AssembleOptions): AssembledMachine {
     if (name !== undefined) recordServiceKey(name, 'StorageBackend');
   };
 
-  return { services, makeRunner, loaded };
+  const dispose = async (): Promise<void> => {
+    for (const plugin of [...getRegisteredPlugins()].reverse()) await unloadPlugin(plugin.name, services);
+    assembled = false;
+  };
+
+  return { services: services as AssembledMachine['services'], makeRunner, loaded, dispose };
 }

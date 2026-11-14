@@ -44,6 +44,48 @@ export function lastActivityAt(session: Session): string {
 }
 
 /**
+ * The `Message.metadata` key marking a user message as a **robo-submit**: machine-authored (its blocks are
+ * `origin: 'robo'`) and still a request in its own right, which the conversation answers as a turn — a
+ * background job asking about what it found. Set by the host when a `SessionAppender` is handed a user
+ * message, never by the author.
+ *
+ * It exists because `origin: 'robo'` alone has always meant two things: who wrote a message, and that it is
+ * not a new request — a `followup` resubmit, which continues the turn before it. A robo-submit is the first
+ * message that is one and not the other.
+ */
+export const ROBO_SUBMIT = 'roboSubmit';
+
+/** What a robo-submit's mark holds: who sent it, in words a model is shown (`background job "x"`). */
+export interface RoboSubmitMark { from?: string }
+
+/** Whether `message` is a robo-submit (see {@link ROBO_SUBMIT}). */
+export function isRoboSubmit(message: Message): boolean {
+  const mark = message.role === 'user' ? message.metadata?.[ROBO_SUBMIT] : undefined;
+  return mark === true || (typeof mark === 'object' && mark !== null);
+}
+
+/**
+ * `message` as a model is shown it: a robo-submit says who sent it, since nothing else on the wire does —
+ * `origin` and metadata are not sent — and a model told nothing answers a job's question as the person's.
+ * For the outgoing copy only, never stored; fixed per message, so it costs no prompt cache.
+ */
+export function withSenderShown(message: Message): Message {
+  if (!isRoboSubmit(message)) return message;
+  const mark = message.metadata?.[ROBO_SUBMIT] as RoboSubmitMark | true;
+  const from = mark !== true && typeof mark.from === 'string' && mark.from !== '' ? mark.from : 'an automated process';
+  return { ...message, content: [{ type: 'text', text: `[Sent by ${from}, not by the person in this conversation.]` }, ...message.content] };
+}
+
+/**
+ * Whether `message` is a request — a user message that starts a piece of work, rather than one continuing
+ * the work before it (a `followup` resubmit, which is wholly `origin: 'robo'`). A person's message is one,
+ * and so is a robo-submit.
+ */
+export function isRequest(message: Message): boolean {
+  return message.role === 'user' && (!message.content.every(c => c.origin === 'robo') || isRoboSubmit(message));
+}
+
+/**
  * Index of the turn's user message — the message a durable fold attaches to, and the point a retraction
  * pops back to. `-1` when the session has none.
  */
@@ -70,4 +112,27 @@ export function foldOntoUserTurn(session: Session, blocks: readonly MessageConte
   if (idx < 0) return session;
   return { ...session, messages: session.messages.map((m, i) =>
     i === idx ? { ...m, content: [...m.content, ...blocks] } : m) };
+}
+
+/** The creator of the marker a sub-turn's transcript starts with (`single_turn` with `tools: true`). */
+export const SUB_TURN_CREATOR = 'matbot-sub-turn';
+
+/**
+ * How many turns deep these messages are: 0 for a conversation, 1 for a turn another turn started, and so
+ * on. Read off a marker in the transcript because `ctx.session` is the one thing every door hands a tool or
+ * a hook and a body cannot replace, so nothing has to remember to forward it.
+ *
+ * Here rather than in core because a hook needs it too: a sub-turn has no person on either end (its prompt
+ * is another model's, and its answer goes back to that model), so a hook that judges what a person said, or
+ * what was said back to them, has nothing to judge in one.
+ */
+export function subTurnDepth(messages: readonly Message[]): number {
+  let depth = 0;
+  for (const m of messages) {
+    if (m.role !== 'marker') continue;
+    for (const c of m.content) {
+      if (c.type === 'marker' && c.creator === SUB_TURN_CREATOR) depth = Math.max(depth, (c.data as { depth: number }).depth);
+    }
+  }
+  return depth;
 }

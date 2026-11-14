@@ -1,0 +1,44 @@
+{
+  "name": "@matatbread/matbot-host-node",
+  "version": "0.5.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "What a Node application needs to embed matbot that core cannot hold, being Node-only: AsyncLocalStorage principal and usage carriers, the module hooks that load matbot's TypeScript-source packages, plugin loading from disk, and a .env-file vault.",
+  "keywords": [
+    "matbot",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./register": "./src/register.js",
+    "./typescript-hooks": "./src/typescript-hooks.js"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "host-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "@matatbread/matbot-core": "workspace:^"
+  }
+}

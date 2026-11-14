@@ -76,7 +76,7 @@ Boot with a **minimal config listing exactly one plugin**. Its `setup()`:
    `loadPlugin`/`unloadPlugin`.
 
 This makes *installation* a per-user decision. Mechanics and gotchas (boot re-entrancy, shadow-not-
-omit, the collision default, fail-closed on unload) are in *Bootstrap mechanics* below. Note the
+omit, the collision default, what unloading it gives back) are in *Bootstrap mechanics* below. Note the
 residual: a plugin an admin installs is visible to **all** users (visibility is global — see the
 ceiling below); install-gating decides who can *change* the set, not who *sees* it.
 
@@ -168,13 +168,13 @@ another tenant's tools exist), that is the line at which you move to **process-p
 `register()`-swappable — `unifyServices` throws on `services.loadPlugin = …`, and `register` won't
 accept them ([plugin-api/src/plugin.ts](../plugin-api/src/plugin.ts)). A plugin cannot
 override them. Their *implementation* lives in the app entry, not core
-([apps/cli/src/index.ts](../apps/cli/src/index.ts);
+([apps/cli/src/boot.ts](../apps/cli/src/boot.ts);
 [apps/web-bundle/src/bootstrap.ts](../apps/web-bundle/src/bootstrap.ts)).
 
 But that openness is not a hole, because **`services.loadPlugin` is not reachable by the model** — it
 is plugin-code-facing. The model reaches it only *through a registered tool*
 ([runner.ts](../core/src/runner.ts) wraps it onto `ToolContext`; the built-in `plugin`
-tool calls `ctx.loadPlugin` in [tool-plugin/src/tools/plugin.ts](../plugins/tool-plugin/src/tools/plugin.ts)).
+tool calls `ctx.loadPlugin` in [apps/cli/src/plugins/tools/plugin.ts](../apps/cli/src/plugins/tools/plugin.ts)).
 So the real question is not "is the seam open?" but **"which registered tools reach it?"** In a stock
 config that is the always-present built-in `plugin` tool — which is exactly why Step 1 shadows it. The
 closure rests on one auditable assumption you now control: no manifest-listed plugin re-exposes
@@ -211,22 +211,29 @@ plugin-visibility ceiling is structural.
   nested load from inside `setup()` goes through `loadPlugins → registerPlugin → setupPlugin`
   sequentially; `registerPlugin` throws on duplicate names and the global `state` mutations don't
   interleave.
-- **Shadow, not omit.** The built-in `plugin` tool is hardcoded into `createBuiltinTools()`
-  ([tool-plugin/src/index.ts](../plugins/tool-plugin/src/index.ts)) and seeded before any config
-  plugin loads — you cannot exclude it, only register a same-named tool over it. That triggers
+- **Shadow, not omit.** The built-in `plugin` and `provider` tools are hardcoded into the CLI's
+  `builtinTools` ([apps/cli/src/boot.ts](../apps/cli/src/boot.ts)) and seeded before any config
+  plugin loads — you cannot exclude them, only register a same-named tool over one, capturing the
+  built-in in `setup()` if you delegate to it. (`provider`'s description lists the adapters loaded
+  when it is read, so what you captured describes the adapters that load after you. Before 0.5.0
+  `provider` was registered after every plugin's setup, and silently replaced any shadow.) That triggers
   `resolveToolCollision` ([registry.ts](../core/src/registry.ts)), which declares the
   `tools.overwrite` gate with `fallback: true`: **non-interactive** (boot / HTTP installs, no
   `prompt`) → overwrites, your tool wins; **interactive** → the installation's permission policy asks
-  (the default one: Deny / Allow / Always-this-subject / Always-every). The registry `Map` is keyed by
-  name, so the later `register()` replaces the earlier entry. An install can skip the prompt for
+  (the default one: Deny / Allow / Always-this-subject / Always-every). The registry holds one tool
+  per name, so the later `register()` replaces the earlier entry. An install can skip the prompt for
   exactly the names it means to shadow by listing them under the policy plugin's own settings —
-  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'` (see
+  `default_settings.'@matatbread/matbot-default-gate'.'tools.overwrite'.'*'` (see
   [GETTING-STARTED](GETTING-STARTED.md)) — the same resolution as not being asked, i.e. your tool
   wins, without blanket-overwriting collisions you would rather hear about.
-- **Shadow, not stack.** Because the `Map` overwrites, the built-in is *gone*, not suspended — if your
-  bootstrap plugin is ever unloaded, `removeByPlugin` deletes the `plugin` entry and the built-in is
-  **not** restored. This fails **closed** (no plugin tool at all), which is safe but deliberate.
-  Self-reload is fine (collision where `existing.pluginName === plugin.name` is skipped).
+- **Unloading gives the built-in back.** The registry keeps the host's own tools beside whatever
+  shadows them, so if your bootstrap plugin is unloaded — or a reload of it fails to load — the
+  built-in `plugin` is current again, for every user. Its installs are gated, but the default policy
+  asks whoever is in the session, which in this recipe is any user. Until 0.5.0 the name was left
+  empty instead, failing closed; it now matches unloading a `PermissionGate` policy, which falls back to
+  asking. Only the host's tools come back: a plugin's tool that another plugin displaced is replaced,
+  not suspended. A reload asks the `tools.overwrite` question again, since the built-in holds the name
+  between the unload and the load; the `default_settings` entry above answers it.
 - **The non-interactive overwrite default is load-bearing.** It is the `fallback: true` on that one
   gate, and it is what lets the override win at boot with no human present. If it ever changed to
   fail-closed — or a policy plugin denied `tools.overwrite` outright — your override would silently

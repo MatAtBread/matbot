@@ -1,6 +1,6 @@
 import { isBuiltin } from 'node:module';
 import vm from 'node:vm';
-import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importableByName, type FunctionRunSettings, type FunctionRunner, type ImportCaller } from '@matatbread/matbot-plugin-api';
 import { ROUTE, transformBody } from './body-transform.js';
 import { BODY_FILE, hostCall, inBody } from './host-only.js';
 
@@ -44,14 +44,14 @@ const SHADOWED = [...WITHHELD, ...PHANTOM] as const;
 // another function before its first await, inside the outer script — each run taking its own thunk.
 const invoke = new vm.Script(`globalThis[Symbol.for(${JSON.stringify(PENDING)})].pop()()`, { filename: BODY_FILE });
 
-/** This runner's reading of its settings: the declared restriction, plus the time bound only it reads. */
+/** This runner's reading of its settings: the time bound, which only it reads. */
 export interface VmRunSettings extends FunctionRunSettings {
   readonly timeoutMs: number;
 }
 
 /** Where the settings come from, if not the fixed values the runner was built with. Called once per
- *  invocation ({@link FunctionRunner.settings}); `permit` undefined means no restriction. */
-export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: readonly string[] | undefined }>;
+ *  invocation ({@link FunctionRunner.settings}). */
+export type ReadRunnerSettings = () => Promise<{ timeoutMs: number }>;
 
 /**
  * A {@link FunctionRunner} over `node:vm`: runs in THIS context, so a body keeps the globals it has today
@@ -91,43 +91,36 @@ export type ReadRunnerSettings = () => Promise<{ timeoutMs: number; permit: read
  *
  * `limitMs` of `0` removes the TIME bound and nothing else. That matters because the two were once the
  * same switch: a timeout of `0` seeded no runner at all, which is a documented way to run bodies
- * unbounded — and silently took the import restriction with it, the empty list included, along with the
- * withheld globals and the inert `import()`. One line of yaml about how long a body may compute is not
+ * unbounded — and silently took the withheld globals and the inert `import()` with it. One line of yaml about how long a body may compute is not
  * an answer to what a body may reach.
  */
 export function createVmFunctionRunner(
   limitMs = FUNCTION_SYNC_LIMIT_MS,
-  imports: { permit?: readonly string[]; projectDir?: string } = {},
+  imports: {
+    projectDir?: string;
+    /** Mediate a granted module before the body sees it (the `ImportedModuleWrapper` registry's
+     *  `apply`). Called with the canonicalised specifier, the loaded module and the importing invocation;
+     *  returns what the body gets. Absent ⇒ the module is handed through unchanged. */
+    wrapModule?: (canonicalSpec: string, module: unknown, caller: ImportCaller) => unknown;
+  } = {},
   read?: ReadRunnerSettings,
 ): FunctionRunner {
   const projectDir = imports.projectDir;
+  const wrapModule = imports.wrapModule;
   // `isBuiltin` and not a `builtinModules` lookup, because a subpath counts (`fs/promises`) and the
   // prefix-only builtins do not (`test` is a package; only `node:test` is the builtin).
   const canonical = (spec: string): string => !spec.includes(':') && isBuiltin(spec) ? `node:${spec}` : spec;
   const slot = globalThis as unknown as Record<symbol, Array<() => Promise<unknown>> | undefined>;
   const stack = (slot[Symbol.for(PENDING)] ??= []);
-  const settingsOf = (timeoutMs: number, permit: readonly string[] | undefined): VmRunSettings => ({
-    timeoutMs,
-    // Absent must stay ABSENT, not become `[]`: an empty list is the configured "never", while no key at
-    // all means unrestricted-and-ask. Collapsing the two is what made an unconfigured install refuse
-    // every import without a prompt.
-    // Entries are canonicalised as specifiers are, or `['os']` would stop admitting the `os` the gate now
-    // asks about as `node:os`. A trailing `/` is the entry's boundary marker, so it is kept off and back on.
-    ...(permit !== undefined
-      ? { permittedImports: permit.map(p => p.endsWith('/') ? `${canonical(p.slice(0, -1))}/` : canonical(p)) }
-      : {}),
-  });
-  const fixed = settingsOf(limitMs, imports.permit);
+  const fixed: VmRunSettings = { timeoutMs: limitMs };
   return {
-    async settings() {
-      if (read === undefined) return fixed;
-      const { timeoutMs, permit } = await read();
-      return settingsOf(timeoutMs, permit);
+    async settings(): Promise<VmRunSettings> {
+      return read === undefined ? fixed : { timeoutMs: (await read()).timeoutMs };
     },
     // Reached only after the gate has allowed this specifier for this function, so it checks nothing of
     // the gate's. It does refuse a path or a URL, which the gate never passes: a body imports builtins and
     // installed packages by name, and placing or downloading code is a plugin install's job.
-    async import(spec: string, options?: ImportCallOptions): Promise<unknown> {
+    async import(spec: string, caller: ImportCaller, options?: ImportCallOptions): Promise<unknown> {
       if (!importableByName(spec)) {
         throw new Error(`Cannot import "${spec}": a function body imports only node builtins and installed packages, by name.`);
       }
@@ -147,10 +140,14 @@ export function createVmFunctionRunner(
       try { target = import.meta.resolve(spec); }
       catch {
         throw new Error(`Cannot import "${spec}": it is not installed where matbot can see it.${
-          projectDir !== undefined ? ` Install it in ${projectDir}, where matbot.yaml is.` : ''}`);
+          projectDir !== undefined ? ` Install it in ${projectDir}.` : ''}`);
       }
       // As host code: a module's own top-level may compile code, and it is not the body's.
-      return hostCall(() => import(target, options));
+      const module = await hostCall(() => import(target, options));
+      // A registered ImportedModuleWrapper may mediate the module before the body sees it (path-gated
+      // `node:fs`), asking through the importing invocation's gate. Keyed by the canonical specifier, so
+      // one spelling is enough.
+      return wrapModule !== undefined ? wrapModule(canonical(spec), module, caller) : module;
     },
     canonicalImport: canonical,
     hostCall,

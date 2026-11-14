@@ -111,7 +111,6 @@ export const plugin: MatbotPluginSpec = {
       mediaStore:      () => services.MediaStore,
       permissionGate:  () => services.PermissionGate,
       notifier:        services.Notifier,
-      ...(services.configPath !== undefined ? { configPath: services.configPath } : {}),
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -148,6 +147,9 @@ export const plugin: MatbotPluginSpec = {
       services.tools.register(makeUrlForResourceTool(services));
       services.tools.register(webServer.webEnvTool);
       toolRegistry = services.tools;
+      // A robo-submit's turn asks here: its questions park on the session like a submitter's, and are
+      // answered whenever someone next views it. Withdrawn with this plugin on unload.
+      await services.register('SessionPrompter', webServer.prompter);
     }
   },
 

@@ -36,6 +36,25 @@ export interface ProviderConfig {
 }
 
 /**
+ * A name for a ROLE (`text_classifier`) that stands for a configured profile, so code, settings and
+ * stored functions can name what they need a model for and keep working when the profile behind it
+ * changes. It carries nothing but its target: no parameters, no `maxRounds`, so it can never become a
+ * profile that inherits from another — "prefer duplication over references" is about configuration,
+ * and an alias shares none.
+ *
+ * One hop: the target is always a profile, never another alias, so a cycle cannot be written and
+ * resolving is one lookup. What is persisted (a message's `providerName`, a plugin's pinned setting)
+ * is the name that was chosen, alias or not; the alias is resolved only where a provider is called.
+ */
+export interface ProviderAlias {
+  name:  string;
+  alias: string;
+}
+
+/** What the provider registry holds under a name: a profile, or an alias of one. */
+export type ProviderEntry = ProviderConfig | ProviderAlias;
+
+/**
  * Token (and optional cost) counters for one provider call — pure accounting data, never conversation
  * content. Recorded onto the message stream for cost reckoning but elided from provider submission. The
  * producing provider is recorded alongside at each storage site (an assistant turn carries it on the
@@ -175,7 +194,7 @@ export type TurnEntry =
  * (interface augmentation) — a generic type parameter can bind only one provider per instantiation and
  * so could not type a heterogeneous transcript.
  *
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface ProviderMeta {}
@@ -200,7 +219,9 @@ export type CompletionEvent =
       truncated?: { bytes: number; stopReason?: string } }
   | { type: 'tool-result';         id: string; result: unknown }
   | { type: 'thinking';            delta: string }
-  | { type: 'thinking-block';      thinking: string; signature: string }
+  | { type: 'thinking-block';      thinking: string; signature: string;
+      /** Provider-specific round-trip metadata for this block, opaque to the harness — see `ProviderMeta`. */
+      meta?: ProviderMeta }
   | { type: 'redacted-thinking';   data: string }
   | { type: 'reasoning-block';     reasoning: string }
   | { type: 'refusal';             text: string }

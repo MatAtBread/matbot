@@ -39,7 +39,7 @@ import path from 'node:path';
 // The mirror's layout is stated once, in the package that also writes a plugin's entry into it. A plain .js
 // file there, so that this one — which runs before anything strips types, and again on a worker with no
 // hooks — can import it at all.
-import { mirrorPath, mirroredFile, candidatesFor, schemeFor, recordOrigin } from '@matatbread/matbot-tool-plugin/cache-layout';
+import { mirrorPath, mirroredFile, candidatesFor, schemeFor, recordOrigin } from './src/plugins/cache-layout.js';
 
 const CACHE_DIR = '.plugins';
 

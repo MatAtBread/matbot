@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makePluginSettings, installSettingsDefaults, settingsDefaultNamespaces, parseConfig,
+import { makePluginSettings, installSettingsDefaults, settingsDefaultNamespaces,
          slugSettingsNamespace } from '@matatbread/matbot-core';
+import { parseConfig } from '../src/config-parse.js';
 import type { Store, CASResult, QueryResult, SettingsDoc } from '@matatbread/matbot-core';
 
 // `default_settings:` is a read-through FLOOR under the settings store, and the whole design rests on

@@ -9,8 +9,8 @@ import type {
 } from '@matatbread/matbot-core';
 import { createFunctionToolsPlugin } from '@matatbread/matbot-function-tools';
 import { createToolTypesPlugin } from '@matatbread/matbot-tool-types';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
-import { createAlsUsageCarrier } from '../src/usage-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());
@@ -200,7 +200,7 @@ test('promoting to global retires the session function; remove retires one too',
 test('session functions type-check like registered tools, and a global function may not call one', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);
@@ -222,8 +222,9 @@ test('session functions type-check like registered tools, and a global function 
   // `checkedAgainst` is where it passed — no FunctionRunner here, which is as much an environment as a
   // configured one: install the runner later and what a body may import changes under the stored verdict.
   assert.deepEqual(defined[0], { type: 'marker', creator: '@matatbread/matbot-function-tools',
-    data: { op: 'define', name: 'fib', definition: FIB, checkedAgainst: 'no-runner' } },
-    'checked: recursion types against its own contract, and no definedUnchecked');
+    data: { op: 'define', name: 'fib', definition: FIB, checkedAgainst: 'no-runner',
+            inputSchema: { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] } } },
+    'checked: recursion types against its own contract, its input schema as the checker resolved it, and no definedUnchecked');
 
   // What the runner would hand the next round: the tool built from that marker.
   session.messages.push({ id: 'm', role: 'marker', traceId: 't', createdAt: '', content: [defined[0] as never] } as Message);
@@ -264,7 +265,7 @@ test('session functions type-check like registered tools, and a global function 
 test('execute takes a bare body, and an arrow definition is refused rather than run', { timeout: 60000 }, async () => {
   let index: ToolTypeIndex | undefined;
   const machine = machineWith({
-    configPath: join(import.meta.dirname, '..', '..', '..', 'matbot.yaml'),
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
     register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
   });
   await createToolTypesPlugin().setup?.(machine);
@@ -313,4 +314,87 @@ test('execute takes a bare body, and an arrow definition is refused rather than 
   const retired = await call({ action: 'lambda', definition: 'x' });
   assert.equal(retired.at(-1)?.type, 'error');
   assert.match(errOf(retired), /[Uu]nknown tool_function action/);
+
+  // Every one of those is the caller's to fix, so each carries the validator's 422 and a transport does not
+  // answer it as a server fault. A body that throws while it RUNS is not one: that is the function's error.
+  const codeOf = (evs: ToolEvent[]): unknown => (evs.at(-1) as { code?: number }).code;
+  for (const evs of [arrow, retired, await call({ action: 'execute', definition: noSuchField }),
+                     await call({ action: 'define', definition: 'nameless(): number { return 1; }x' })]) {
+    assert.equal(codeOf(evs), 422, errOf(evs));
+  }
+  const thrown = await call({ action: 'execute', definition: `{ throw new Error('boom'); }` });
+  assert.match(errOf(thrown), /boom/);
+  assert.equal(codeOf(thrown), undefined);
+});
+
+// On node a defined tool's inputSchema is the checker's: the text path sees `Opts` as an unknown name and
+// can only offer `{}`, which tells the provider nothing and lets json-validation accept anything. It is
+// stored with the definition, since nothing re-checks one on load.
+test('a define and a package export take their inputSchema from the checker, and keep it', { timeout: 60000 }, async () => {
+  let index: ToolTypeIndex | undefined;
+  const machine = machineWith({
+    projectDir: join(import.meta.dirname, '..', '..', '..'),
+    register: async (k: string, v: unknown) => { if (k === 'ToolTypeIndex') index = v as ToolTypeIndex; },
+  });
+  await createToolTypesPlugin().setup?.(machine);
+  Object.assign(machine, { ToolTypeIndex: index });
+  await createFunctionToolsPlugin().setup?.(machine);
+  const fn = machine.tools.resolve('tool_function')!;
+  const call = async (input: unknown): Promise<ToolEvent[]> => {
+    const ctx = { callId: 'c', session: createSession(), signal: new AbortController().signal, prompt: async () => { throw new Error('no'); } } as unknown as ToolContext;
+    const out: ToolEvent[] = [];
+    for await (const ev of fn.executor.execute(input, ctx)) out.push(ev);
+    return out;
+  };
+
+  const defined = await call({ action: 'define', definition: "greet(who: Pick<{ name: string; title?: 'Dr' | 'Ms' }, 'name' | 'title'>): string { return who.name; }" });
+  assert.equal(defined.at(-1)?.type, 'result', JSON.stringify(defined.at(-1)));
+  const expected = { type: 'object', properties: { who: {
+    type: 'object', properties: { name: { type: 'string' }, title: { type: 'string', enum: ['Dr', 'Ms'] } }, required: ['name'] } }, required: ['who'] };
+  assert.deepEqual(machine.tools.resolve('greet')?.inputSchema, expected);
+  const stored = await machine.createStore<{ id: string; version: string; inputSchema?: unknown }>('functions').get('greet');
+  assert.deepEqual(stored?.inputSchema, expected, 'stored, so a reload rebuilds the same schema without a check');
+
+  const pkg = await call({ action: 'package', name: 'shapes', definition:
+    'type Box = { w: number; h: number; unit?: "cm" | "in" };\nexport async function area(box: Box): Promise<number> { return box.w * box.h; }' });
+  assert.equal(pkg.at(-1)?.type, 'result', JSON.stringify(pkg.at(-1)));
+  assert.deepEqual(machine.tools.resolve('shapes__area')?.inputSchema, {
+    type: 'object', properties: { w: { type: 'number' }, h: { type: 'number' }, unit: { type: 'string', enum: ['cm', 'in'] } }, required: ['w', 'h'] });
+
+  // An alias hid a non-object parameter from the text check; the checker sees through it.
+  const bad = await call({ action: 'package', name: 'oops', definition:
+    'type Name = string;\nexport async function hi(name: Name): Promise<string> { return name; }' });
+  assert.match(JSON.stringify(bad.at(-1)), /must be an object/);
+});
+
+// A tool called from a body yields its markers into the body's box, which used to keep only the result: the
+// callee reported success and its durable record was gone. A session define made that way said "Defined"
+// and the function did not exist the next round.
+test('a marker a tool yields inside a body is stored in the session, as from a direct call', { timeout: 20000 }, async () => {
+  const machine = machineWith();
+  machine.tools.register({
+    name: 'stash', description: 'emits a marker', inputSchema: { type: 'object' },
+    executor: { async *execute() {
+      yield { type: 'marker', creator: 'probe', data: { stashed: true } };
+      yield { type: 'result', value: 'stashed' };
+    } },
+  } as unknown as Tool);
+  await createFunctionToolsPlugin().setup?.(machine);
+  const store = memStore();
+  const s = await newSession(store);
+
+  const def = JSON.stringify('double(n: number): number { return n * 2; }');
+  const r = await turn(machine, store, s.id, [
+    [{ name: 'tool_function', input: { action: 'execute', definition: '{ return await tool.stash({}); }' } }],
+    [{ name: 'tool_function', input: { action: 'execute', definition: `{ return await tool.tool_function({ action: 'define', scope: 'session', definition: ${def} }); }` } }],
+    [{ name: 'double', input: { n: 4 } }],
+  ]);
+  const results = ends(r.events);
+  assert.equal(results[0]!.result, 'stashed');
+  assert.ok(r.offered[2]!.includes('double'), 'a define made from a body is offered the next round');
+  assert.equal(results[2]!.result, 8);
+
+  const markers = store.docs.get(s.id)!.messages.filter((m: Message) => m.role === 'marker').flatMap(m => m.content);
+  assert.deepEqual(markers.map(c => c.type === 'marker' ? [c.creator, (c.data as { op?: string; stashed?: boolean }).op ?? (c.data as { stashed?: boolean }).stashed] : null),
+    [['probe', true], ['@matatbread/matbot-function-tools', 'define']]);
 });

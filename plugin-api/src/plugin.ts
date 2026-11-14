@@ -3,7 +3,7 @@ import type {
   ProviderAdapter, ProviderConfig, ProviderRegistry, Tool, ToolRegistry, FrontendInfo,
   Store, Session, SystemContextRegistry, KnowledgeIndex, PromptFn, SessionRunner, Usage, HookRegistrar,
   TypeScriptStripper, FunctionRunner, ToolTypeIndex, ToolPresenter, SteeringPolicy, UserContent, PermissionGate,
-  SessionAppender, EphemeralRun,
+  SessionAppender, SessionPrompter, EphemeralRun,
 } from './types.js';
 import type { Notifications, Notifier } from './notify.js';
 
@@ -19,7 +19,7 @@ import type { Notifications, Notifier } from './notify.js';
  * It matters at 1.0.0, where a plugin still declaring `'0.x'` fails the major check loudly instead of
  * loading against a contract it was never built for.
  */
-export const PLUGIN_API_VERSION = '0.4';
+export const PLUGIN_API_VERSION = '0.5';
 
 // ── Sub-runner types ──────────────────────────────────────────────────────────
 
@@ -115,10 +115,11 @@ export interface PluginResolver {
   /**
    * The runtimes a plugin declares support for via its package.json `matbotRuntime`
    * (e.g. `["node"]`, `["browser"]`, `["node","browser"]`), or `undefined` when the field is
-   * absent — meaning "don't know". The loader skips a plugin *before* importing it when this
-   * returns a non-empty list that excludes the current runtime; `undefined` falls back to the
-   * try-load / catch / rollback path. Reading the declaration is host-specific (walk package.json
-   * on node; consult the baked manifest in the browser), so it lives here, not in the core loader.
+   * absent. The loader refuses a package *before* importing it when this returns a list that
+   * excludes the current runtime, and when it returns none at all: the field is what makes a
+   * package a plugin. Reading the declaration is host-specific (walk package.json on node; consult
+   * the baked manifest in the browser), so it lives here, not in the core loader — and a host that
+   * supplies no `runtimes` has nothing to check, so its loads are imported as before.
    */
   runtimes?(specifier: string): Promise<readonly Runtime[] | undefined>;
 }
@@ -133,7 +134,7 @@ export interface PluginSelf {
 // ── Services container ────────────────────────────────────────────────────────
 
 /**
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  *
  * The registry bucket: the swappable, registerable services, keyed by interface name. This is the
@@ -194,11 +195,14 @@ export interface MatbotServices {
    *  one; absent ⇒ such code runs unbounded, as it must where synchronous code cannot be interrupted.
    *  See {@link FunctionRunner}. */
   readonly FunctionRunner?: FunctionRunner | undefined;
-  /** Appends messages to a session without running a turn, once no turn holds it. The host seeds
-   *  one wherever it holds the session store; a background job registers one that forwards to its parent.
-   *  Absent ⇒ this process has no safe way to append (a job spawned without that channel), and a caller
-   *  refuses rather than writing the store itself. See {@link SessionAppender}. */
+  /** Appends messages to a session once no turn holds it — and submits a user message as a turn (a
+   *  robo-submit). The host seeds one wherever it holds the session store; a background job registers one
+   *  that forwards to its parent. Absent ⇒ this process has no safe way to append (a job spawned without
+   *  that channel), and a caller refuses rather than writing the store itself. See {@link SessionAppender}. */
   readonly SessionAppender?: SessionAppender | undefined;
+  /** Where a robo-submit's turn asks its questions: registered by a frontend that can put them to whoever
+   *  views the session. Absent ⇒ such a turn has nobody to ask. See {@link SessionPrompter}. */
+  readonly SessionPrompter?: SessionPrompter | undefined;
 }
 
 /** The assembled machine: registry services wired to the fixed runtime — what `setup()` receives. */
@@ -322,8 +326,18 @@ export interface MatbotRuntime {
   readonly systemContext:   SystemContextRegistry;
   /** Default working directory for tool execution. Plugins that create servers should forward this to tool contexts. */
   readonly workdir?:        string;
-  /** Absolute path to the loaded config file. Plugins that create servers should forward this to tool contexts. */
-  readonly configPath?:     string;
+  /**
+   * Where the host resolves packages and relative plugin specifiers from: a plugin that writes code for
+   * the host to load (a compiled skill), types against what is installed, or tells a user where to install
+   * a package uses this. Absent ⇒ the host has no such directory (a browser), and the plugin degrades.
+   */
+  readonly projectDir?:     string;
+  /**
+   * Where plugins keep state on disk of their own — a storage backend's files, a sandbox's mount. The host
+   * chooses it; a plugin never derives one from anything else. Absent ⇒ no disk (a browser, an embedder
+   * that gives none), and the plugin degrades.
+   */
+  readonly dataDir?:        string;
 
   /**
    * Whether this process is a background sub-agent (spawned by another matbot, not a top-level

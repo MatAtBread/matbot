@@ -9,8 +9,8 @@ import type {
   Session, Store, MediaStore, FileHandle, FileFilter, ProviderAdapter, ProviderConfig,
   CompletionEvent, PipelineEvent, Principal, Message, MessageContent, MimeType, UserContent,
 } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

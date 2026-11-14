@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installPrincipalCarrier, runAs } from '@matatbread/matbot-core';
 import { ProfilesStorageBackend } from '@matatbread/matbot-storage-profiles';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // `url_for_resource` used to mint the `~<id>` segment of a file URL from the identity in force, gated on
 // nothing but "the profiles plugin is loaded". A principal with no profile writes to the shared base area,

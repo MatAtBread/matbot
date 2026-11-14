@@ -22,7 +22,6 @@ let composerReadOnly = false; // true while viewing a session shared IN from ano
 let sending = false;          // current session busy? mirrors the server's 'session-busy' status
 const busySessions   = new Set();
 const promptingSessions = new Set(); // busy sessions parked on a question for the user
-const unreadSessions = new Set();
 const updatedFiles   = new Set();
 // path → owning profile id for files shared IN from another profile (read-only here). Refreshed with the
 // file list in one `share`/`owner`/`*` call; empty when profiles are inactive. Gates the per-file share UI.
@@ -633,9 +632,21 @@ function refreshSessions(delay = 150) {
   return sessionsRefresh;
 }
 
-async function apiGetSession(id)  { try { return await callTool('session_action', { action: 'get', sessionId: id }); } catch { return null; } }
+// Reading the session on screen, in a page someone can see, is showing it to them — so it is marked read.
+// A peer session read for a link, or a page in a background tab, is not.
+const shownNow = id => id === currentSessionId && document.visibilityState === 'visible';
+// A sessions plugin without read tracking refuses the unknown field, which must not stop the session opening.
+async function apiGetSession(id)  {
+  if (shownNow(id)) {
+    try { return await callTool('session_action', { action: 'get', sessionId: id, markRead: true }); } catch { /* read plainly */ }
+  }
+  try { return await callTool('session_action', { action: 'get', sessionId: id }); }
+  catch { return null; }
+}
+function markShown(id) { if (shownNow(id)) void apiGetSession(id); }
+document.addEventListener('visibilitychange', () => { if (currentSessionId) markShown(currentSessionId); });
 async function apiSessionBusy(id) { return T.sessionBusy(id); }
-async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.map(p => p.name); } catch { return []; } }
+async function apiListProviders() { try { return (await callTool('provider', { action: 'list' })).providers.filter(p => p.alias === undefined).map(p => p.name); } catch { return []; } }
 
 async function refreshProviderSelect() {
   const current  = providerSel.value;
@@ -2271,11 +2282,15 @@ function renderSessions(sessions) {
   for (const s of sessions) {
     const label = (s.title || s.preview || s.id.slice(0, 8)).slice(0, 44);
     const el = document.createElement('div');
+    // `state` is the server's at the time of the list; the status stream keeps busy/prompting live between
+    // lists. Unread is the server's alone: it is stored, so it holds across reloads and devices.
+    const prompting = promptingSessions.has(s.id) || s.state === 'prompting';
+    const busy      = busySessions.has(s.id) || prompting || s.state === 'running';
     el.className = 'session-item' +
       (s.id === currentSessionId ? ' active' : '') +
-      (busySessions.has(s.id) ? ' busy' : '') +
-      (promptingSessions.has(s.id) ? ' prompting' : '') +
-      (!busySessions.has(s.id) && s.id !== currentSessionId && unreadSessions.has(s.id) ? ' unread' : '');
+      (busy ? ' busy' : '') +
+      (prompting ? ' prompting' : '') +
+      (!busy && s.id !== currentSessionId && s.state === 'unread' ? ' unread' : '');
     el.dataset.sid = s.id;
 
     const labelEl = document.createElement('span');
@@ -3278,7 +3293,6 @@ async function openSession(id, scrollTarget) {
   currentSessionId = id;
   const ownerOf = sessionOwner(id);
   void refreshShareState(id, ownerOf);
-  unreadSessions.delete(id);
   sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = sessionHash(id);
   void refreshSessions();
@@ -4063,7 +4077,7 @@ async function renderTurn(sid, traceId) {
             const block = document.createElement('div');
             block.className = 'prompt-block';
             // Settle the dialog: disable every control (incl. the cancel ×) once answered or cancelled.
-            const done = () => block.querySelectorAll('button, input').forEach(el => { el.disabled = true; });
+            const done = () => block.querySelectorAll('button, input, select').forEach(el => { el.disabled = true; });
             // Settled with no choice made (cancelled, or answered elsewhere): the default wasn't picked either.
             const unmark = () => block.querySelectorAll('.prompt-choice-btn.primary').forEach(b => b.classList.remove('primary'));
             // Retire the dialog without answering — someone else got there first. Resolving with
@@ -4092,7 +4106,79 @@ async function renderTurn(sid, traceId) {
             q.className = 'prompt-question';
             q.innerHTML = md(questionText);
             block.appendChild(q);
-            if (choices) {
+            // A select that is the product of independent choices (a permission's subject, lifetime and
+            // effect) gets one control per axis. The answer is the chosen values joined by '|' in axis order —
+            // the encoding every flat option's value already uses — and the initial choices are the default
+            // split the same way. An axis marked `submit` (allow / deny) is drawn as the buttons that send the
+            // answer, so the row reads as a phrase ending in its verb; with none, an OK button sends it. A
+            // frontend that ignores `axes` answers from the flat options instead.
+            const axes = field && field.type === 'select' && Array.isArray(field.axes) && field.axes.length > 0 ? field.axes : null;
+            if (axes) {
+              const row = document.createElement('div');
+              row.className = 'prompt-row prompt-axes';
+              const initial = (defaultValue ?? '').split('|');
+              const submitAt = axes.findIndex(a => a.submit === true);
+              const selects = axes.map((axis, i) => {
+                if (i === submitAt) return null;
+                const wrap = document.createElement('label');
+                wrap.className = 'prompt-axis';
+                if (axis.label) {
+                  const cap = document.createElement('span');
+                  cap.className = 'prompt-axis-label';
+                  cap.textContent = axis.label;
+                  wrap.appendChild(cap);
+                }
+                const sel = document.createElement('select');
+                sel.className = 'prompt-axis-select';
+                const opts = (axis.options ?? []).map(asChoice);
+                for (const o of opts) {
+                  const opt = document.createElement('option');
+                  opt.value = o.value;
+                  opt.textContent = o.label;
+                  sel.appendChild(opt);
+                }
+                if (opts.some(o => o.value === initial[i])) sel.value = initial[i];
+                wrap.appendChild(sel);
+                row.appendChild(wrap);
+                return sel;
+              });
+              const answerWith = (value, btn) => {
+                if (btn) row.querySelectorAll('.prompt-choice-btn').forEach(b => b.classList.toggle('primary', b === btn));
+                done();
+                resolve({ answer: axes.map((_, i) => i === submitAt ? value : selects[i].value).join('|') });
+              };
+              const buttons = document.createElement('div');
+              buttons.className = 'prompt-axis-buttons';
+              let first = null;
+              if (submitAt >= 0) {
+                for (const o of (axes[submitAt].options ?? []).map(asChoice)) {
+                  const btn = document.createElement('button');
+                  btn.type = 'button';
+                  btn.className = 'prompt-choice-btn' + (o.value === initial[submitAt] ? ' primary' : '');
+                  btn.textContent = o.label;
+                  btn.onclick = () => answerWith(o.value, btn);
+                  buttons.appendChild(btn);
+                  if (first === null || o.value === initial[submitAt]) first = btn;   // the default, else the first
+                }
+              } else {
+                const ok = document.createElement('button');
+                ok.type = 'button';
+                ok.className = 'prompt-submit';
+                ok.textContent = 'OK';
+                ok.onclick = () => answerWith();
+                buttons.appendChild(ok);
+                first = ok;
+              }
+              row.appendChild(buttons);
+              block.appendChild(row);
+              turnWrap.appendChild(block);
+              if (!isScrollSuppressed()) {
+                programmaticScrollTo(() => {
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                });
+              }
+              first?.focus();
+            } else if (choices) {
               const row = document.createElement('div');
               row.className = 'prompt-choices';
               let defaultBtn = null;
@@ -4573,16 +4659,13 @@ async function init() {
       item?.classList.toggle('prompting', !!prompting);
       if (busy) {
         busySessions.add(sessionId);
-        unreadSessions.delete(sessionId);
         if (item) { item.classList.add('busy'); item.classList.remove('unread'); }
       } else {
         busySessions.delete(sessionId);
-        if (sessionId !== currentSessionId) {
-          unreadSessions.add(sessionId);
-          if (item) { item.classList.remove('busy'); item.classList.add('unread'); }
-        } else {
-          if (item) item.classList.remove('busy');
-        }
+        // Shown at once; the list the turn's write refreshes then says whether it is still unread.
+        if (sessionId !== currentSessionId) item?.classList.add('unread');
+        else markShown(sessionId);
+        item?.classList.remove('busy');
       }
       // Drive the Stop button + the busy flag for the session currently in view.
       if (sessionId === currentSessionId) setBusyState(busy);

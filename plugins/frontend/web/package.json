@@ -4,7 +4,7 @@
     "node",
     "browser"
   ],
-  "version": "0.4.25",
+  "version": "0.5.0",
   "engines": {
     "node": ">=24.0.0"
   },
@@ -60,7 +60,6 @@
     "@matatbread/matbot-sessions": "workspace:^",
     "@matatbread/matbot-edit-session": "workspace:^",
     "@matatbread/matbot-triggers": "workspace:^",
-    "@matatbread/matbot-tool-plugin": "workspace:^",
     "@matatbread/matbot-tool-workspace": "workspace:^",
     "@matatbread/matbot-storage-profiles": "workspace:^"
   }

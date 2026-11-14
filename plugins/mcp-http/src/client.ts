@@ -1,4 +1,5 @@
 import type { MCPClient, MCPRemoteConfig, MCPToolDef, MCPToolResult } from './types.js';
+import { failureForStatus, withFailure } from '@matatbread/matbot-plugin-api';
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const CLIENT_INFO = { name: 'matbot', version: '0.1.0' };
@@ -11,7 +12,7 @@ interface JsonRpcResponse { jsonrpc: string; id?: unknown; result?: unknown; err
 // (brand + guard, not a class) so the check survives a plugin reload — see plugin-api/src/errors.ts.
 interface HttpStatusError extends Error { httpStatus: number }
 function httpStatusError(status: number, message: string): HttpStatusError {
-  return Object.assign(new Error(message), { httpStatus: status });
+  return Object.assign(withFailure(new Error(message), failureForStatus(status)), { httpStatus: status });
 }
 function isHttpStatusError(e: unknown): e is HttpStatusError {
   return typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).httpStatus === 'number';

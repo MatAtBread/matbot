@@ -1,5 +1,6 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
-import { parseSSE } from '@matatbread/matbot-core/providers-base';
+import { parseSSE, responseError } from '@matatbread/matbot-core/providers-base';
+import { withFailure, type FailureClass } from '@matatbread/matbot-plugin-api';
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, type CacheControl } from './convert.js';
 
 const DEFAULT_ENDPOINT   = 'https://api.anthropic.com';
@@ -82,10 +83,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       signal,
     });
 
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => res.statusText);
-      throw new Error(`Anthropic ${res.status}: ${text}`);
-    }
+    if (!res.ok || !res.body) throw await responseError('Anthropic', res);
 
     // Accumulate content block state per index
     const toolInputs      = new Map<number, { id: string; name: string; json: string }>();
@@ -229,8 +227,10 @@ export class AnthropicAdapter implements ProviderAdapter {
         }
 
         case 'error': {
-          const err = ev['error'] as { message?: string } | undefined;
-          throw new Error(`Anthropic stream error: ${err?.message ?? JSON.stringify(ev)}`);
+          // An error after the 200 — `overloaded_error` is the common one — arrives in the stream, so the
+          // status that would have classified it never comes. Its `type` says the same thing.
+          const err = ev['error'] as { type?: string; message?: string } | undefined;
+          throw withFailure(new Error(`Anthropic stream error: ${err?.message ?? JSON.stringify(ev)}`), streamFailure(err?.type));
         }
       }
     }
@@ -273,12 +273,26 @@ export class AnthropicAdapter implements ProviderAdapter {
         headers: { 'x-api-key': config.credentials?.['apiKey'] ?? '', 'anthropic-version': ANTHROPIC_VERSION },
         ...(signal !== undefined ? { signal } : {}),
       });
-      if (!res.ok) throw new Error(`Anthropic ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+      if (!res.ok) throw await responseError('Anthropic', res);
       const body = await res.json() as { data?: Array<{ id?: unknown }>; has_more?: boolean; last_id?: string };
       for (const m of body.data ?? []) if (typeof m.id === 'string') ids.push(m.id);
       if (body.has_more !== true || body.last_id === undefined) break;
       after = body.last_id;
     }
     return ids;
+  }
+}
+
+// Anthropic's error `type`s (https://docs.anthropic.com/en/api/errors), by what each means to a caller.
+function streamFailure(type: string | undefined): FailureClass | undefined {
+  switch (type) {
+    case 'overloaded_error': case 'api_error': case 'rate_limit_error': case 'timeout_error':
+      return 'unavailable';
+    case 'authentication_error': case 'permission_error': case 'billing_error':
+      return 'denied';
+    case 'invalid_request_error': case 'request_too_large': case 'not_found_error':
+      return 'invalid';
+    default:
+      return undefined;
   }
 }

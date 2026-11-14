@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { loadPlugins, installSettingsDefaults, makePluginSettings, slugSettingsNamespace } from '@matatbread/matbot-core';
 import type { FormOption, PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
 import { optionLabel, optionValue } from '@matatbread/matbot-core';
-import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
+import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-core';
 import { collider, twinCollider, machine } from './fixtures/collision-harness.ts';
 
 // Own file: this is about what ANSWERING "always" writes, and a sibling test in the same file would
@@ -11,7 +11,7 @@ import { collider, twinCollider, machine } from './fixtures/collision-harness.ts
 
 // The install already exempts a subject of its own. Answering "always" for one more must not drop it:
 // a stored key wins over the default wholesale, so the write has to carry the list in effect.
-installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': ['already-exempt'] }]]));
+installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': { '*': ['already-exempt'] } }]]));
 
 test('"Always allow <subject>" adds it to the list, keeping what the install already exempted', async () => {
   const asked: string[] = [];
@@ -31,7 +31,7 @@ test('"Always allow <subject>" adds it to the list, keeping what the install alr
   assert.equal(asked.length, 1);
   assert.equal(tools.get('contested')?.pluginName, 'collides-tool');
   const stored = docs.get(slugSettingsNamespace(DEFAULT_GATE_SETTINGS_NS)) as { data: Record<string, unknown> } | undefined;
-  assert.deepEqual(stored?.data, { 'tools.overwrite': ['already-exempt', 'contested'] },
+  assert.deepEqual(stored?.data, { 'tools.overwrite': { '*': ['already-exempt', 'contested'] } },
     'the answer is persisted as the list in effect plus this subject — one key, one write, no index');
 
   // And it takes effect: the next plugin to claim that name is not asked about.

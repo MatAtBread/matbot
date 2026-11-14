@@ -1,5 +1,7 @@
 import type { ProviderAdapter, ProviderConfig } from './types.js';
 import type { Vault } from './types/vault.js';
+import type { ToolContext } from './types/tools.js';
+import { refusalMessage } from './types/permission.js';
 
 export const MODEL_LIST_TIMEOUT_MS = 8_000;
 
@@ -103,4 +105,32 @@ export async function checkProviderModel(
   if (ids.length === 0) return { kind: 'unchecked', reason: 'the endpoint listed no models' };
   if (modelListed(config.model, ids)) return { kind: 'listed' };
   return { kind: 'unlisted', count: ids.length, closest: closestIds(config.model, ids) };
+}
+
+/**
+ * A model the endpoint does not list goes to a gate rather than being refused: an endpoint accepts names
+ * it does not list (an Azure deployment, an alias the matching does not know), and those must stay usable.
+ * Returns the refusal to report, or `undefined` to go ahead. Shared by both hosts' `provider` tools, so
+ * the question a person is asked does not depend on which one asks it.
+ */
+export async function confirmUnlistedModel(
+  check:  Extract<ModelCheck, { kind: 'unlisted' }>,
+  config: ProviderConfig,
+  ctx:    Pick<ToolContext, 'gate'>,
+  gate:   'add-unlisted' | 'update-unlisted',
+  verb:   'Add' | 'Update',
+): Promise<string | undefined> {
+  const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
+  const permit = await ctx.gate({ gate, subject: config.name, fallback: false,
+                                  label: `**"${config.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${config.name}"** with it anyway?` });
+  if (permit.allowed) return undefined;
+  return `${refusalMessage(permit, `Using unlisted model "${config.model}"`)} The endpoint lists ${check.count} models.${near}`;
+}
+
+/** What to tell the caller when an update left a credential behind rather than send it to the endpoint's
+ *  new origin ({@link movedCredentialKeys}); empty when nothing moved. */
+export function movedCredentialNote(keys: readonly string[]): string {
+  if (keys.length === 0) return '';
+  return ` Its credential was not sent to the new origin: the profile now reads ${keys.join(', ')}, which is not set. ` +
+         'Ask the user to supply it with the `plugin` tool\'s `store-key` action, if this endpoint should have one.';
 }

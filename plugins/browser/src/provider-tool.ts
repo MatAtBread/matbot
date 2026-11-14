@@ -1,7 +1,7 @@
 import type { Tool, ToolExecutor, ToolResultOf, ToolContext, ToolEvent, ModelParameters,
-              ProviderToolContract, ProviderSummary, AvailableProvider,
+              ProviderSummary, AvailableProvider,
               ProviderPatch, ProviderConfig, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
-import { applyProviderPatch, checkProviderModel, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { applyProviderPatch, checkProviderModel, confirmUnlistedModel, movedCredentialNote } from '@matatbread/matbot-plugin-api';
 
 export type { AvailableProvider, ProviderSummary };
 
@@ -17,15 +17,6 @@ export interface ProviderDraft {
   parameters?: ModelParameters;
 }
 
-// Shared with the node implementation of this same tool name — see plugin-api/src/types/builtin-tools.ts.
-// The two used to declare different types for this one key, and node's names won: `hasCredentials` (not
-// `hasKey`) and `module` (not `adapter`) are what matbot.yaml calls these, and this tool's own
-// `ProviderSummary` already said `module` on the way out while demanding `adapter` on the way in.
-declare module '@matatbread/matbot-plugin-api' {
-  interface ToolContracts {
-    provider: ProviderToolContract;
-  }
-}
 
 /**
  * The provider-admin surface a host (the web bootstrap) or a storage-backend plugin (google-drive)
@@ -36,13 +27,20 @@ declare module '@matatbread/matbot-plugin-api' {
  */
 export interface ProviderAdmin {
   available: AvailableProvider[];
+  /** Rows as `providerRows` builds them: profiles and aliases in one shape. */
   list(): ProviderSummary[];
   add(draft: ProviderDraft): Promise<string>;   // persist + load adapter + register
   /** Apply a patch to an existing profile with `applyProviderPatch`, and say which vault keys its credential
    *  is now read from where the endpoint moved origin and the credential did not follow (empty otherwise).
    *  `undefined` ⇒ no such profile. The adapter is unchanged by construction, so nothing needs loading. */
   update(name: string, patch: ProviderPatch): Promise<readonly string[] | undefined>;
+  /** Throws, with a message for the caller, when the provider registry refuses it — a profile an alias
+   *  points at, which would leave the alias failing at every call. */
   remove(name: string): Promise<boolean>;
+  /** Create or repoint the alias `name` so it runs on the profile `target`, and persist it. Throws, with a
+   *  message for the caller, when the registry refuses the alias (see `aliasProblem`). Absent, this
+   *  runtime stores no aliases, and the tool's `alias` action says so. */
+  alias?(name: string, target: string): Promise<void>;
   /** The stored profile, credential placeholders and all — what `update` checks its model against before
    *  applying. Absent, an update's model is not checked. */
   get?(name: string): ProviderConfig | undefined;
@@ -52,7 +50,8 @@ type ProviderInput =
   | { action: 'list' }
   | { action: 'add'; name: string; module: string; endpoint?: string; model?: string; parameters?: ModelParameters }
   | ({ action: 'update'; name: string } & ProviderPatch)
-  | { action: 'remove'; name: string };
+  | { action: 'remove'; name: string }
+  | { action: 'alias'; name: string; alias: string };
 
 /**
  * Browser `provider` tool. The portable analogue of the node provider tool: it manages the same
@@ -60,13 +59,6 @@ type ProviderInput =
  * than a YAML file. The API key is collected out-of-band via `ctx.prompt` (never in the transcript),
  * exactly like `plugin store-key`. Persistence is entirely the injected {@link ProviderAdmin}'s concern.
  */
-/** What to tell the caller when a credential did not follow an endpoint to another origin. */
-function movedNote(keys: readonly string[]): string {
-  if (keys.length === 0) return '';
-  return ` Its credential was not sent to the new origin: the profile now reads ${keys.join(', ')}, which is not set. ` +
-         'Ask the user to supply it with the `plugin` tool\'s `store-key` action, if this endpoint should have one.';
-}
-
 // The adapter's own factory, read from its module as the setup wizard reads it. Importing registers
 // nothing, and a module already loaded is the same instance.
 async function adapterOf(module: string, cfg: ProviderConfig): Promise<ReturnType<NonNullable<MatbotPluginSpec['provider']>> | undefined> {
@@ -96,13 +88,8 @@ async function* confirmModel(
     case 'unchecked':
       yield { type: 'stdout', chunk: `Could not list the endpoint's models (${check.reason}); "${cfg.model}" is not checked.\n` };
       return undefined;
-    case 'unlisted': {
-      const near = check.closest.length > 0 ? ` Closest: ${check.closest.join(', ')}.` : '';
-      const permit = await ctx.gate({ gate, subject: cfg.name, fallback: false,
-                                      label: `**"${cfg.model}"** is not among the ${check.count} models the endpoint lists.${near}\n\n${verb} **"${cfg.name}"** with it anyway?` });
-      if (permit.allowed) return undefined;
-      return `${refusalMessage(permit, `Using unlisted model "${cfg.model}"`)} The endpoint lists ${check.count} models.${near}`;
-    }
+    case 'unlisted':
+      return confirmUnlistedModel(check, cfg, ctx, gate, verb);
   }
 }
 
@@ -114,7 +101,10 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       const act = input as ProviderInput;
 
       if (act.action === 'list') {
-        yield { type: 'result', value: { providers: admin.list(), adapters: admin.available } };
+        yield { type: 'result', value: {
+          providers: admin.list(),
+          adapters:  admin.available,
+        } };
         return;
       }
 
@@ -122,6 +112,12 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         const { name, module: mod, endpoint, model, parameters } = act;
         if (!name || !mod) {
           yield { type: 'error', message: 'add requires: name, module.' };
+          return;
+        }
+        // Before the key is asked for: adding over an alias would turn a role name into a profile.
+        const aliasOf = admin.list().find(r => r.name === name)?.alias;
+        if (aliasOf !== undefined) {
+          yield { type: 'error', message: `"${name}" is an alias of "${aliasOf}", which takes no settings of its own. Use action "alias" to point it at another profile, or add this profile under another name.` };
           return;
         }
         // Resolve the adapter by module spec, exact/substring label, or numeric index.
@@ -185,6 +181,11 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       if (act.action === 'update') {
         const { action: _a, name, ...patch } = act;
         if (!name) { yield { type: 'error', message: 'update requires a "name".' }; return; }
+        const aliased = admin.list().find(r => r.name === name);
+        if (aliased?.alias !== undefined) {
+          yield { type: 'error', message: `"${name}" is an alias of "${aliased.alias}", and has no fields of its own to update. Use action "alias" to point it at another profile, or update "${aliased.alias}" itself.` };
+          return;
+        }
 
         const supplied = (['model', 'endpoint', 'parameters', 'maxRounds'] as const).filter(f => patch[f] !== undefined);
         if (supplied.length === 0) {
@@ -213,7 +214,7 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
         yield {
           type:  'result',
           value: moved !== undefined
-            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedNote(moved)}` }
+            ? { message: `Provider "${name}" updated: ${supplied.join(', ')}. Takes effect on the next turn.${movedCredentialNote(moved)}` }
             : { message: `No provider named "${name}".` },
         };
         return;
@@ -229,18 +230,41 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
           return;
         }
 
-        const rows = admin.list();
-        if (!rows.some(r => r.name === act.name)) {
+        const rows  = admin.list();
+        const entry = rows.find(r => r.name === act.name);
+        if (entry === undefined) {
           yield { type: 'result', value: { message: `No provider named "${act.name}".` } };
           return;
         }
-        if (rows.length <= 1) {
+        // Counted in profiles: aliases run nothing of their own, so they are no replacement for the last.
+        if (!('alias' in entry) && rows.filter(r => !('alias' in r)).length <= 1) {
           yield { type: 'result', value: { message: `Cannot remove "${act.name}" — it is the only configured provider. Add a replacement profile first.` } };
           return;
         }
 
-        const ok = await admin.remove(act.name);
-        yield { type: 'result', value: { message: ok ? `Provider "${act.name}" removed.` : `No provider named "${act.name}".` } };
+        let ok: boolean;
+        try { ok = await admin.remove(act.name); }
+        catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
+        yield { type: 'result', value: { message: ok ? `${'alias' in entry ? 'Alias' : 'Provider'} "${act.name}" removed.` : `No provider named "${act.name}".` } };
+        return;
+      }
+
+      if (act.action === 'alias') {
+        const { name, alias: target } = act;
+        if (!name || !target) { yield { type: 'error', message: 'alias requires "name" (the alias) and "alias" (the profile it runs on).' }; return; }
+        if (admin.alias === undefined) { yield { type: 'error', message: 'This runtime does not store provider aliases.' }; return; }
+        const cur = admin.list().find(r => r.name === name);
+        if (cur !== undefined && cur.alias === undefined) {
+          yield { type: 'error', message: `"${name}" is a provider profile, not an alias. Choose another name, or remove the profile first.` };
+          return;
+        }
+        if (cur !== undefined && cur.alias === target) {
+          yield { type: 'result', value: { message: `"${name}" is already an alias of "${target}".` } };
+          return;
+        }
+        try { await admin.alias(name, target); }
+        catch (e) { yield { type: 'error', message: e instanceof Error ? e.message : String(e) }; return; }
+        yield { type: 'result', value: { message: `"${name}" now runs on "${target}", from the next call that uses it.` } };
         return;
       }
 
@@ -262,8 +286,12 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       'to see them — each carries `endpointHint`/`modelHint` and whether it is `selfContained`). A ' +
       '`selfContained` adapter (e.g. a local demo LLM) needs no endpoint, model, or key at all — omit ' +
       'them and the tool will not prompt for a key either. `remove` refuses to delete the only ' +
-      'configured profile or the one powering the current turn — add a replacement first or switch ' +
-      'providers.\n\n' +
+      'configured profile, the one powering the current turn, or one an alias points at — add a ' +
+      'replacement first or switch providers.\n\n' +
+      'ALIAS creates or repoints an alias: `name` is a stable name for a ROLE (e.g. "text_classifier") and ' +
+      '`alias` the profile it runs on. Name the alias wherever a provider name is fixed (a pinned setting, ' +
+      'a function run outside any turn) and point it elsewhere later without touching those. Its target ' +
+      'must be a profile, never another alias; `list` reports an alias as the row of the profile it names, under its own name and with `alias` set.\n\n' +
       'UPDATE changes `model`, `endpoint`, `parameters` or `maxRounds` on an existing profile: supply ' +
       'the name plus only the fields to change, an explicit `null` to clear one (not `model` — a ' +
       'profile must keep one). `parameters` is replaced WHOLESALE, not merged, so `list` first and send ' +
@@ -279,8 +307,9 @@ export function createBrowserProviderTool(admin: ProviderAdmin): Tool<ToolResult
       type:     'object',
       required: ['action'],
       properties: {
-        action:   { type: 'string', enum: ['list', 'add', 'update', 'remove'] },
-        name:     { type: 'string', description: 'Profile name (add/update/remove).' },
+        action:   { type: 'string', enum: ['list', 'add', 'update', 'remove', 'alias'] },
+        name:     { type: 'string', description: 'Profile or alias name (add/update/remove/alias).' },
+        alias:    { type: 'string', description: 'The profile the alias named by `name` runs on (alias only).' },
         module:   { type: 'string', description: 'Adapter type — label, module, or index from `list` (add only; update cannot change it).' },
         // `['string','null']` here and below: null is update's clear signal, and inputSchema is an
         // enforcement point (json-validation) as well as documentation.

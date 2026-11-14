@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseYaml } from '@matatbread/matbot-core';
+import { parseYaml } from '../src/yaml.js';
 
 // The config parser used to answer a construct it could not read by `break`ing its enclosing loop,
 // which returned what had been read so far and left the rest of the document silently discarded. A
@@ -22,6 +22,18 @@ providers:
 `);
   assert.deepEqual(doc['plugins'], ['@a/b', null, '@a/d']);
   assert.deepEqual(doc['providers'], { p: { model: 'm' } });
+});
+
+test('a key with nothing beneath it is null, not an empty mapping', () => {
+  const doc = parseYaml(`plugins:
+providers:
+  p:
+    model: m
+last:
+`);
+  assert.equal(doc['plugins'], null);
+  assert.deepEqual(doc['providers'], { p: { model: 'm' } });
+  assert.equal(doc['last'], null);
 });
 
 test('a bare dash takes the block indented beneath it as its value', () => {

@@ -9,8 +9,8 @@ import type {
 } from '@matatbread/matbot-core';
 import { AnthropicAdapter } from '@matatbread/matbot-provider-anthropic';
 import { GoogleAdapter } from '@matatbread/matbot-provider-google';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

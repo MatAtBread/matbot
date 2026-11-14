@@ -5,6 +5,7 @@ import type { Store, FileStore } from '@matatbread/matbot-plugin-api';
 import type { StorageBackend } from '@matatbread/matbot-plugin-api';
 import { SQLiteStore, quoteIdent, TABLE_SUFFIX } from './store.js';
 import { SQLiteFileStore } from './file-store.js';
+import { classified } from './failure.js';
 
 export class SQLiteStorageBackend implements StorageBackend {
   private readonly db: DatabaseSync;
@@ -12,7 +13,7 @@ export class SQLiteStorageBackend implements StorageBackend {
 
   private constructor(db: DatabaseSync) {
     this.db        = db;
-    this.fileStore = new SQLiteFileStore(db);
+    this.fileStore = classified(new SQLiteFileStore(db));
   }
 
   static open(dotData: string): Promise<SQLiteStorageBackend> {
@@ -25,7 +26,7 @@ export class SQLiteStorageBackend implements StorageBackend {
   }
 
   createStore<T extends { id: string; version: string }>(namespace: string): Store<T> {
-    return new SQLiteStore<T>(this.db, namespace);
+    return classified(new SQLiteStore<T>(this.db, namespace));
   }
 
   /**

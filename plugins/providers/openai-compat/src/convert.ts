@@ -5,8 +5,19 @@ import { textDocument } from '@matatbread/matbot-core/providers-base';
 // THIS package (not the native @matatbread/matbot-provider-google adapter) because both surfaces round-
 // trip them — this OpenAI-compat gemini mode and the native adapter, which depends on this package and so
 // sees the augmentation transitively. Core carries `meta` opaquely; only these two adapters read `google`.
+//
+// `model` is the model that minted the signature, which is the only one it is valid for. A message's
+// `providerName` cannot say that: it records the name that was chosen, and an alias keeps its name while
+// the profile behind it, and so the model, changes. Absent on history written before it was recorded.
 declare module '@matatbread/matbot-plugin-api' {
-  interface ProviderMeta { google?: { thoughtSignature?: string } }
+  interface ProviderMeta { google?: { thoughtSignature?: string; model?: string } }
+}
+
+/** Whether a signature recorded with `meta` is one `model` minted. History from before the model was
+ *  recorded has no answer here, which the caller settles by its own older rule. */
+export function signedBy(meta: { google?: { model?: string } } | undefined, model: string | undefined): boolean | undefined {
+  const minted = meta?.google?.model;
+  return minted === undefined ? undefined : minted === model;
 }
 
 // ── Internal OpenAI API types ─────────────────────────────────────────────────
@@ -89,7 +100,7 @@ function applyCacheBreakpoints(result: OAIMessage[]): void {
   if (userTurns.length >= 2) markCacheable(result[userTurns[userTurns.length - 2]!]!);
 }
 
-export function toOAIMessages(messages: Message[], cache = false, geminiMode = false): OAIMessage[] {
+export function toOAIMessages(messages: Message[], cache = false, geminiMode = false, model?: string): OAIMessage[] {
   const result: OAIMessage[] = [];
 
   // Gemini rejects any historical functionCall lacking a thought_signature. A call produced by another
@@ -102,7 +113,8 @@ export function toOAIMessages(messages: Message[], cache = false, geminiMode = f
   if (geminiMode) {
     for (const m of messages)
       for (const c of m.content)
-        if (c.type === 'tool-call' && c.meta?.google?.thoughtSignature === undefined) {
+        // A signature another model minted is as unusable as none (an alias moved to another model).
+        if (c.type === 'tool-call' && (c.meta?.google?.thoughtSignature === undefined || signedBy(c.meta, model) === false)) {
           dropIds.add(c.id);
           foreignCall.set(c.id, { name: c.name, args: c.input });
         }

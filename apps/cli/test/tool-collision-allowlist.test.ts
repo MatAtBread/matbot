@@ -2,13 +2,13 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPlugins, installSettingsDefaults, makePluginSettings } from '@matatbread/matbot-core';
 import type { PromptFn, SettingsDoc, Store } from '@matatbread/matbot-core';
-import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-default-gate';
+import { createDefaultGate, DEFAULT_GATE_SETTINGS_NS } from '@matatbread/matbot-core';
 import { collider, otherCollider, machine } from './fixtures/collision-harness.ts';
 
-// The policy is the default-gate plugin's, out of ITS settings namespace — core holds none of this any
-// more, and the key it used to hold (`__matbot_core__.overwriteToolsOnCollision`) is deliberately not
+// The policy is the default gate's, out of ITS settings namespace — not the registry's, and the key the
+// registry used to hold (`__matbot_core__.overwriteToolsOnCollision`) is deliberately not
 // migrated. Both tests here want the same floor, so it is installed once.
-installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': ['contested'] }]]));
+installSettingsDefaults(new Map([[DEFAULT_GATE_SETTINGS_NS, { 'tools.overwrite': { '*': ['contested'] } }]]));
 after(() => { installSettingsDefaults(undefined); });
 
 const gate = (settings: Store<never>) =>
@@ -18,7 +18,7 @@ const gate = (settings: Store<never>) =>
 // was skipped, and the unlisted one survives only if it was consulted.
 function recordingPrompt(): { asked: string[]; prompt: PromptFn } {
   const asked: string[] = [];
-  const prompt = (async (f: { label: string }) => { asked.push(f.label); return 'deny'; }) as PromptFn;
+  const prompt = (async (f: { label: string }) => { asked.push(f.label); return '0|once|deny'; }) as PromptFn;
   return { asked, prompt };
 }
 

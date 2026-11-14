@@ -1,4 +1,4 @@
-import { PLUGIN_API_VERSION, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, StoreQueryError, isReadOnlyError } from '@matatbread/matbot-plugin-api';
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolEvent, ToolContract, ToolResultOf, Store, StoreQuery,
 } from '@matatbread/matbot-plugin-api';
@@ -8,15 +8,21 @@ import { parseShape, shapeName, shapeType } from './shape.js';
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     store_action:
-      | ToolContract<StoreDef,             { action: 'create'; namespace: string; description: string; shape: string }>
-      | ToolContract<StoreDef,             { action: 'expose'; namespace: string; description: string; shape: string }>
-      | ToolContract<StoreDef | null,      { action: 'get';    namespace: string }>
-      | ToolContract<{ removed: boolean }, { action: 'remove'; namespace: string }>
+      | ToolContract<StoreDef,             { action: 'create'; name: string; description: string; shape: string }>
+      | ToolContract<StoreDef | null,      { action: 'get';    name: string }>
+      | ToolContract<{ removed: boolean }, { action: 'remove'; name: string }>
       | ToolContract<{ stores: StoreDef[] }, { action: 'list' }>;
   }
 }
 
 const META_NAMESPACE = 'store_tools';
+
+// Where a store the model creates keeps its documents. A namespace of its own is what keeps a model-named
+// store out of every plugin's: unprefixed, `create email_accounts` before matbot-email is installed
+// would hand that plugin's store to a model-writable tool, and no check made at create time can see a
+// plugin that is not loaded yet. A def from before 0.5.0 (`id === namespace`, no owner) is moved into one
+// on first use, per principal, unless its owner takes it over first (see `migratedOnUse`).
+const OWN_PREFIX = 'store-';
 
 function now(): string { return new Date().toISOString(); }
 function actionToolName(namespace: string): string { return `${namespace}_action`; }
@@ -37,31 +43,113 @@ function registerStoreTool(services: MatbotMachine, def: StoreDef): void {
   // refusing here would take an existing store's tool away at boot. It says so once instead.
   const { fault } = parseShape(def.shape);
   if (fault !== undefined) {
-    console.warn(`[tool-store] Store "${def.namespace}" has an unreadable shape, so its documents are typed \`Record<string, unknown>\` and nothing about them is checked: ${fault}\n`);
+    console.warn(`[tool-store] Store "${def.id}" has an unreadable shape, so its documents are typed \`Record<string, unknown>\` and nothing about them is checked: ${fault}\n`);
   }
-  services.tools.remove(actionToolName(def.namespace));
-  services.tools.register(makeStoreTool(services.self?.name, def, services.createStore<StoreRecord>(def.namespace)));
+  let store: Store<StoreRecord>;
+  try { store = services.createStore<StoreRecord>(def.namespace); }
+  catch (e) {
+    // A def exposing a namespace the host will not open (`settings`, which `expose` once reached) is
+    // skipped rather than failing the plugin, which would take every other store's tool with it.
+    console.warn(`[tool-store] Store "${def.id}" is not registered (remove it with \`store_action remove\`): ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  // Registering replaces this plugin's own earlier tool of the name, and a name another plugin holds goes
+  // through the host's collision decision rather than round it. Not remove-then-register: removing ours
+  // would reinstate a host built-in it displaced, and the registration would then collide with that.
+  const tool = makeStoreTool(services.self?.name, def, store);
+  services.tools.register(isLegacy(def) ? migratedOnUse(services, def, tool) : tool);
 }
 
+/** A def from before 0.5.0: no owner, and the namespace its own name rather than one of tool-store's. */
+const isLegacy = (def: StoreDef): boolean => def.owner === undefined && def.namespace === def.id;
+
+/** How many times one call reads the def again because another writer keeps replacing it under the move. */
+const MAX_MOVE_ATTEMPTS = 4;
+
 /**
- * Persist a store definition and (re)register its generated `<namespace>_action` tool. This is the
- * single mechanism behind `store_action`'s create/expose verbs, exported so other plugins can seed a
- * built-in store at setup() without going through the LLM-facing tool (e.g. cognition's
- * `remembered_facts`). Idempotent: re-defining an existing namespace preserves its `createdAt` and
- * simply re-registers the tool, matching the restart behaviour. Returns the persisted def.
+ * A def from before 0.5.0 reads and writes the namespace named after it, and nothing recorded whether that
+ * was a store `create` made or an `expose` over a namespace a plugin owns. Either way, moving the store into
+ * one of tool-store's own namespaces is safe: a model's store keeps its documents, and an exposure stops
+ * reaching the live data — the model keeps a copy of what it could already read and write.
+ *
+ * On first USE rather than at boot, because a plugin that owns the namespace and exposes it takes the store
+ * over in its own setup (see `defineStore`), and may load after this plugin: by the time the model calls
+ * the tool, the owner has had its chance, and a store it took is not this tool's to move. The originals stay
+ * where they were.
+ *
+ * Decided per CALL, and nothing about the outcome is remembered: the meta store is read per principal, so one
+ * principal's move says nothing about another's documents; another process may have moved the def or handed it
+ * to its owner since this one booted; and a move that failed is tried again by the next call. Once no legacy
+ * def remains a call costs one read of the meta store, and a restart registers the plain tool.
  */
-export async function defineStore(
+function migratedOnUse(services: MatbotMachine, def: StoreDef, tool: Tool): Tool {
+  return {
+    ...tool,
+    executor: {
+      async *execute(input, ctx) {
+        const current = await storeToolNow(services, def);
+        if (typeof current === 'string') { yield { type: 'error', message: current }; return; }
+        yield* current.executor.execute(input, ctx);
+      },
+    },
+  };
+}
+
+/** The tool for `def` as things stand for this caller, or why there is none. */
+async function storeToolNow(services: MatbotMachine, def: StoreDef): Promise<Tool | string> {
+  const meta = services.createStore<StoreDef>(META_NAMESPACE);
+  const over = (d: StoreDef): Tool => makeStoreTool(services.self?.name, d, services.createStore<StoreRecord>(d.namespace));
+  for (let attempt = 0; attempt < MAX_MOVE_ATTEMPTS; attempt++) {
+    const current = await meta.get(def.id);
+    // Nothing to move, and the namespace named after the store may be a plugin's: this caller's documents go
+    // where a store it created would keep them.
+    if (current === null) return over({ ...def, namespace: OWN_PREFIX + def.id });
+    if (current.owner !== undefined && current.owner !== services.self?.name) {
+      return `Store "${current.id}" belongs to the plugin "${current.owner}", which exposes it; it is not available here.`;
+    }
+    if (!isLegacy(current)) return over(current);
+    const moved = await moveStore(services, meta, current);
+    if (moved !== undefined) return over(moved);
+  }
+  throw new Error(`Store "${def.id}" keeps being redefined while it is moved out of the namespace "${def.id}"; try again.`);
+}
+
+/** Copy a legacy def's documents to its own namespace, then record that. Undefined if the def lost its CAS. */
+async function moveStore(services: MatbotMachine, meta: Store<StoreDef>, current: StoreDef): Promise<StoreDef | undefined> {
+  const from = services.createStore<StoreRecord>(current.namespace);
+  const to   = services.createStore<StoreRecord>(OWN_PREFIX + current.id);
+  let copied = 0;
+  for (let cursor: string | undefined, first = true; first || cursor !== undefined; first = false) {
+    const page = await from.query(cursor !== undefined ? { cursor } : {});
+    for (const doc of page.items) {
+      if (await to.get(doc.id) === null) { await to.set(doc.id, doc); copied++; }
+    }
+    cursor = page.cursor;
+  }
+  const next: StoreDef = { ...current, namespace: OWN_PREFIX + current.id, version: crypto.randomUUID(), updatedAt: now() };
+  try {
+    const r = await meta.cas(current.id, current.version, next);
+    if (!r.ok) return undefined;
+  } catch (e) {
+    // A def shared in from another principal, which only its owner can rewrite. The call still moves off the
+    // old namespace, on this caller's own copy, so a document it deleted returns until the owner has moved it.
+    if (isReadOnlyError(e)) return next;
+    throw e;
+  }
+  console.warn(`[tool-store] Store "${current.id}" was defined before 0.5.0 over the namespace "${current.namespace}" itself. ` +
+               `It now keeps its documents in "${next.namespace}" (${copied} copied); the originals stay in "${current.namespace}".`);
+  return next;
+}
+
+async function saveDef(
   services: MatbotMachine,
-  spec: { namespace: string; description: string; shape: string },
+  spec: { id: string; namespace: string; description: string; shape: string; owner?: string },
 ): Promise<StoreDef> {
   const meta = services.createStore<StoreDef>(META_NAMESPACE);
-  const existing = await meta.get(spec.namespace);
+  const existing = await meta.get(spec.id);
   const def: StoreDef = {
-    id:          spec.namespace,
+    ...spec,
     version:     crypto.randomUUID(),
-    namespace:   spec.namespace,
-    description: spec.description,
-    shape:       spec.shape,
     createdAt:   existing?.createdAt ?? now(),
     updatedAt:   now(),
   };
@@ -70,15 +158,40 @@ export async function defineStore(
   return def;
 }
 
-// A namespace is LLM-supplied here, and this is the boundary it enters through — so it is checked
-// here rather than defended against in every backend. It is not an opaque key: the filesystem backend
-// makes it a directory name verbatim (document *ids* are percent-encoded, namespaces never were), so a
-// `/` or `..` would write outside `.data` entirely, and SQLite makes it a table name. Restricting the
-// character set at the one place untrusted names arrive is what lets each backend keep using it
-// directly. The set admits every namespace matbot itself uses, punctuation included
-// (`profile-registry`, `plugin-manifest`, `remembered_facts`).
-const NAMESPACE_RE  = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const NAMESPACE_MAX = 64;
+/**
+ * Expose a plugin's OWN store through a generated `<namespace>_action` tool — the owner's opt-in, for
+ * a plugin whose store a model should read and write directly (cognition's `remembered_facts`). Called
+ * from that plugin's setup(), never on a model's behalf: which namespaces a plugin holds is that
+ * plugin's knowledge, so only it can say one is safe to hand over. Idempotent: re-defining preserves
+ * `createdAt` and re-registers the tool, matching the restart behaviour. An owner's def replaces a
+ * model's of the same name, whose documents stay in its own `store-` namespace.
+ */
+export async function defineStore(
+  services: MatbotMachine,
+  spec: { namespace: string; description: string; shape: string },
+): Promise<StoreDef> {
+  const owner = services.self?.name;
+  // A def with no owner has its tool registered by this plugin's boot, under this plugin's name: one from
+  // before 0.5.0, one a model created, one already moved to `store-<name>`. The owner could not remove that
+  // tool, and registering over it was a collision. Handed back here: the def is rewritten below with its owner,
+  // who registers the tool, and a model's documents stay where they are. Another plugin's def is not unowned,
+  // and stays a collision for the host to decide.
+  const held = await services.createStore<StoreDef>(META_NAMESPACE).get(spec.namespace);
+  if (held?.owner === undefined) own?.tools.remove(actionToolName(spec.namespace));
+  return saveDef(services, { id: spec.namespace, ...spec, ...(owner !== undefined ? { owner } : {}) });
+}
+
+// This plugin's own machine, for the one thing another plugin's `defineStore` needs it for: removing a tool
+// this plugin registered, which only its own machine may.
+let own: MatbotMachine | undefined;
+
+// A store's name is LLM-supplied, and this is the boundary it enters through — so it is checked here
+// rather than defended against in every backend. It becomes part of a namespace, which is not an opaque
+// key: the filesystem backend makes it a directory name verbatim (document *ids* are percent-encoded,
+// namespaces never were), so a `/` or `..` would write outside `.data` entirely, and SQLite makes it a
+// table name. It also becomes the tool name `<name>_action`, which providers cap at 64 characters.
+const NAME_RE  = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const NAME_MAX = 64 - actionToolName('').length;
 
 /**
  * The shape is LLM-authored TypeScript and this is where it arrives, so it is read here rather than
@@ -94,36 +207,27 @@ function shapeFault(shape: unknown): string | undefined {
     : `The "shape" could not be read as a document type: ${fault}`;
 }
 
-function namespaceError(namespace: string): string | undefined {
-  if (namespace.length > NAMESPACE_MAX)
-    return `"${namespace}" is too long — a namespace is at most ${NAMESPACE_MAX} characters.`;
-  if (!NAMESPACE_RE.test(namespace))
-    return `"${namespace}" is not a valid namespace. Use letters, digits, "_" and "-", starting with a letter or digit (e.g. "meeting_notes").`;
+function nameError(name: string): string | undefined {
+  if (name.length > NAME_MAX)
+    return `"${name}" is too long — a store name is at most ${NAME_MAX} characters.`;
+  if (!NAME_RE.test(name))
+    return `"${name}" is not a valid store name. Use letters, digits, "_" and "-", starting with a letter or digit (e.g. "meeting_notes").`;
   return undefined;
 }
 
 /**
- * An existing namespace this one would collide with, compared case-INSENSITIVELY: a namespace becomes
- * a directory on the filesystem backend, and `Sessions` and `sessions` are one directory on macOS and
- * Windows. Asks the backend what it holds rather than probing this one name, which is the only way to
- * see a namespace some plugin owns — `sessions` itself is the case worth stopping, and the meta store
- * cannot know about it because no `store_action` created it.
- *
- * Backends that cannot enumerate simply contribute nothing, and a namespace holding no documents is
- * not reported, so this is one check among several rather than an oracle.
+ * A namespace differing from this one only by case: a namespace becomes a directory on the filesystem
+ * backend, and `store-Notes` and `store-notes` are one directory on macOS and Windows. The defs give the
+ * ones this plugin governs; the backend's listing adds a removed store's, whose documents stay behind.
+ * A backend that cannot enumerate contributes nothing, so this is one check rather than an oracle.
  */
-async function collidingNamespace(services: MatbotMachine, namespace: string): Promise<string | undefined> {
-  const existing = await services.StorageBackend?.namespaces?.() ?? [];
-  const wanted   = namespace.toLowerCase();
-  return existing.find(ns => ns.toLowerCase() === wanted);
-}
-
-// A namespace "exists" if we already govern it, or it already holds documents (a store created by
-// other means). createStore is lazy, so an untouched namespace queries empty.
-async function storeHasData(services: MatbotMachine, namespace: string): Promise<boolean> {
-  const store = services.createStore<StoreRecord>(namespace);
-  const res = await store.query({ limit: 1 });
-  return res.items.length > 0;
+async function caseVariant(services: MatbotMachine, meta: Store<StoreDef>, namespace: string): Promise<string | undefined> {
+  const held = [
+    ...(await listDefs(meta)).map(d => d.namespace),
+    ...(await services.StorageBackend?.namespaces?.() ?? []),
+  ];
+  const wanted = namespace.toLowerCase();
+  return held.find(ns => ns !== namespace && ns.toLowerCase() === wanted);
 }
 
 /**
@@ -206,10 +310,10 @@ export function storeToolContract(shape: string): string {
 function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Store<StoreRecord>): Tool {
   const typeGuess = shapeName(def.shape) ?? 'Record<string, unknown>';   // the shape's NAME, for prose
   return {
-    name: actionToolName(def.namespace),
+    name: actionToolName(def.id),
     ...(pluginName !== undefined ? { pluginName } : {}),
     description:
-      `Access the "${def.namespace}" store — ${def.description}\n\n` +
+      `Access the "${def.id}" store — ${def.description}\n\n` +
       'Documents have this shape:\n' +
       '```ts\n' + def.shape + '\n```\n\n' +
       'Actions map onto the matbot `Store<' + typeGuess + '>` interface (get/set/cas/delete/query); ' +
@@ -225,8 +329,8 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       'you read, pass its `id` as the top-level `id`. To COPY it — to a new document, or to another id ' +
       '— blank the one it carries:\n' +
       '```ts\n' +
-      "await tool." + actionToolName(def.namespace) + "({ action: 'set', data: { ...doc, id: undefined } });          // copy to a new id\n" +
-      "await tool." + actionToolName(def.namespace) + "({ action: 'set', id: 'other', data: { ...doc, id: undefined } });  // copy to \"other\"\n" +
+      "await tool." + actionToolName(def.id) + "({ action: 'set', data: { ...doc, id: undefined } });          // copy to a new id\n" +
+      "await tool." + actionToolName(def.id) + "({ action: 'set', id: 'other', data: { ...doc, id: undefined } });  // copy to \"other\"\n" +
       '```\n\n' +
       'The `query` action takes the entire grammar in ONE `query` parameter. Every key below nests ' +
       'inside it and never sits beside `action`:\n' +
@@ -260,8 +364,8 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
       'stripping anything. Pass the value you last read as `expected` to cas/delete for safe ' +
       'concurrent updates:\n' +
       '```ts\n' +
-      "const doc = await tool." + actionToolName(def.namespace) + "({ action: 'get', id });\n" +
-      "if (doc !== null) await tool." + actionToolName(def.namespace) + "({ action: 'set', id, data: { ...doc, someField: next } });\n" +
+      "const doc = await tool." + actionToolName(def.id) + "({ action: 'get', id });\n" +
+      "if (doc !== null) await tool." + actionToolName(def.id) + "({ action: 'set', id, data: { ...doc, someField: next } });\n" +
       '```\n',
     inputSchema: {
       type: 'object',
@@ -356,7 +460,7 @@ function makeStoreTool(pluginName: string | undefined, def: StoreDef, store: Sto
 
 interface StoreActionInput {
   action:       string;
-  namespace?:   string;
+  name?:        string;
   description?: string;
   shape?:       string;
 }
@@ -364,26 +468,16 @@ interface StoreActionInput {
 function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): Tool<ToolResultOf<'store_action'>> {
   const pluginName = services.self?.name;
 
-  // Shared by create and expose: persist the def and (re)register its tool. Caller has already
-  // settled the create-vs-expose existence check.
-  async function define(input: StoreActionInput): Promise<ToolEvent<ToolResultOf<'store_action'>>> {
-    if (!input.namespace)   return { type: 'error', message: 'requires "namespace".' };
-    if (!input.description) return { type: 'error', message: 'requires "description" (what the store holds).' };
-    if (!input.shape)       return { type: 'error', message: 'requires "shape" (a flattened TypeScript type/interface).' };
-    const def = await defineStore(services, { namespace: input.namespace, description: input.description, shape: input.shape });
-    return { type: 'result', value: def };
-  }
-
   return {
     name: 'store_action',
     ...(pluginName !== undefined ? { pluginName } : {}),
     description:
-      'Define named persistent stores and expose a generated tool over each.\n\n' +
+      'Define named persistent stores and a generated tool over each.\n\n' +
       'A "store" is a typed key-value collection (documents keyed by id — the matbot `Store` ' +
-      'interface). Exposing a store mints a `<namespace>_action` tool the model can use to ' +
+      'interface). Creating one mints a `<name>_action` tool the model can use to ' +
       'get/set/cas/delete/query its documents. This tool keeps its own record of every store it ' +
       'manages (the document shape and description), so those tools are re-registered on restart.\n\n' +
-      'Both `create` and `expose` require a plain-English `description` of what the store holds and ' +
+      '`create` requires a plain-English `description` of what the store holds and ' +
       'a `shape` — the document type written as a flattened TypeScript type/interface — which is ' +
       'shown to the model in the generated tool.\n\n' +
       'ONE store may hold SEVERAL KINDS of document: write the shape as a discriminated union and each ' +
@@ -394,18 +488,18 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
       "  | { kind: 'state'; where: string };\n" +
       '```\n' +
       'A read narrows on the discriminant (`if (doc.kind === \'site\') doc.endpoint`), and a write of one ' +
-      'arm mixed with another\u2019s fields is rejected against the arm you meant. The shape must be one ' +
+      'arm mixed with another’s fields is rejected against the arm you meant. The shape must be one ' +
       'declaration and inline its members: `extends` is not resolved and a type declared elsewhere ' +
       'cannot be referenced by name.\n\n' +
-      '`create` mints a new store + tool and fails if one already exists; `expose` mints a tool over an ' +
-      'EXISTING store (including one created elsewhere) and fails if absent; `remove` drops the ' +
-      "definition and its tool but leaves the store's data intact; `get` reads one definition; `list` " +
-      'returns them all.',
+      '`create` makes a store of this tool\'s own — it cannot open a store some plugin keeps, and fails ' +
+      'if the name is already defined or its tool name is taken. `remove` drops the definition and its ' +
+      "tool but leaves the store's documents intact; creating the same name again re-attaches them. " +
+      '`get` reads one definition; `list` returns them all.',
     inputSchema: {
       type: 'object',
       properties: {
-        action:      { type: 'string', enum: ['create', 'expose', 'get', 'remove', 'list'] },
-        namespace:   { type: 'string' },
+        action:      { type: 'string', enum: ['create', 'get', 'remove', 'list'] },
+        name:        { type: 'string' },
         description: { type: 'string' },
         shape:       { type: 'string' },
       },
@@ -417,56 +511,56 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
 
         switch (input.action) {
           case 'create': {
-            if (!input.namespace) { yield { type: 'error', message: 'create requires "namespace".' }; return; }
-            const invalid = namespaceError(input.namespace);
+            const { name } = input;
+            if (!name) { yield { type: 'error', message: 'create requires "name".' }; return; }
+            const invalid = nameError(name);
             if (invalid !== undefined) { yield { type: 'error', message: invalid }; return; }
+            if (!input.description) { yield { type: 'error', message: 'create requires "description" (what the store holds).' }; return; }
             const badShape = shapeFault(input.shape);
             if (badShape !== undefined) { yield { type: 'error', message: badShape }; return; }
-            if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
-            if (await meta.get(input.namespace) || await storeHasData(services, input.namespace)) {
-              yield { type: 'error', message: `Store "${input.namespace}" already exists. Use action "expose".` };
+            if (await meta.get(name)) { yield { type: 'error', message: `Store "${name}" already exists.` }; return; }
+            const toolName = actionToolName(name);
+            const holder = services.tools.resolve(toolName);
+            if (holder !== null) {
+              yield { type: 'error', message: `"${name}" would generate the tool "${toolName}", which ${holder.pluginName === undefined ? 'the host' : `"${holder.pluginName}"`} already provides. Pick another name.` };
               return;
             }
-            // A namespace already in the backend that no store_action created — a plugin's own store
-            // (`sessions`), or one differing only by case, which is the SAME directory on a
-            // case-insensitive filesystem. Creating over either would quietly share its storage.
-            const clash = await collidingNamespace(services, input.namespace);
+            const namespace = OWN_PREFIX + name;
+            const clash = await caseVariant(services, meta, namespace);
             if (clash !== undefined) {
-              yield { type: 'error', message: clash === input.namespace
-                ? `"${input.namespace}" already exists in storage (it belongs to a plugin, not to this tool). Use action "expose" to manage it, or pick another name.`
-                : `"${input.namespace}" collides with the existing namespace "${clash}" — namespaces differing only by case share one store on macOS and Windows. Pick a distinct name.` };
+              yield { type: 'error', message: `"${name}" collides with the existing namespace "${clash}" — names differing only by case share one store on macOS and Windows. Pick a distinct name.` };
               return;
             }
-            yield await define(input);
-            return;
-          }
-
-          case 'expose': {
-            if (!input.namespace) { yield { type: 'error', message: 'expose requires "namespace".' }; return; }
-            const badExpose = namespaceError(input.namespace);
-            if (badExpose !== undefined) { yield { type: 'error', message: badExpose }; return; }
-            const badExposeShape = shapeFault(input.shape);
-            if (badExposeShape !== undefined) { yield { type: 'error', message: badExposeShape }; return; }
-            if (input.namespace === META_NAMESPACE) { yield { type: 'error', message: `"${META_NAMESPACE}" is reserved.` }; return; }
-            if (!(await meta.get(input.namespace)) && !(await storeHasData(services, input.namespace))) {
-              yield { type: 'error', message: `No store "${input.namespace}" found. Use action "create" to make a new one.` };
-              return;
-            }
-            yield await define(input);
+            yield { type: 'result', value: await saveDef(services, { id: name, namespace, description: input.description, shape: input.shape! }) };
             return;
           }
 
           case 'get': {
-            if (!input.namespace) { yield { type: 'error', message: 'get requires "namespace".' }; return; }
-            yield { type: 'result', value: await meta.get(input.namespace) };
+            if (!input.name) { yield { type: 'error', message: 'get requires "name".' }; return; }
+            yield { type: 'result', value: await meta.get(input.name) };
             return;
           }
 
           case 'remove': {
-            if (!input.namespace) { yield { type: 'error', message: 'remove requires "namespace".' }; return; }
-            const ok = await meta.delete(input.namespace);
-            services.tools.remove(actionToolName(input.namespace));
-            yield { type: 'result', value: { removed: ok } };
+            if (!input.name) { yield { type: 'error', message: 'remove requires "name".' }; return; }
+            // A plugin's own store is that plugin's to withdraw: the def would go and its tool, which the
+            // owner holds, would stay, until its next setup defined both again. Once the owner is no longer
+            // loaded the def is a leftover, and removing it is housekeeping.
+            const def = await meta.get(input.name);
+            const owner = def?.owner;
+            if (owner !== undefined && services.tools.resolve(actionToolName(input.name))?.pluginName === owner) {
+              yield { type: 'error', message: `Store "${input.name}" belongs to the plugin "${owner}", which exposes it; it is not this tool's to remove.` };
+              return;
+            }
+            const removed = await meta.delete(input.name);
+            if (removed) services.tools.remove(actionToolName(input.name));
+            // Never used since 0.5.0, so never moved (see `migratedOnUse`): a `create` of the name lands in
+            // `store-<name>` and does not find these.
+            if (removed && def !== null && isLegacy(def)) {
+              console.warn(`[tool-store] Store "${def.id}" was removed before it moved out of the namespace "${def.namespace}", ` +
+                           `so its documents there are orphaned: creating "${def.id}" again will not find them.`);
+            }
+            yield { type: 'result', value: { removed } };
             return;
           }
 
@@ -476,7 +570,7 @@ function makeStoreActionTool(services: MatbotMachine, meta: Store<StoreDef>): To
           }
 
           default:
-            yield { type: 'error', message: `Unknown action "${String(input.action)}". Expected: create, expose, get, remove, list.` };
+            yield { type: 'error', message: `Unknown action "${String(input.action)}". Expected: create, get, remove, list.` };
         }
       },
     },
@@ -496,8 +590,11 @@ export const plugin: MatbotPluginSpec = {
 
     services.tools.register(makeStoreActionTool(services, meta));
 
-    // Re-register a tool for every managed store, so definitions survive a restart.
+    own = services;
+    // Re-register a tool for every managed store, so definitions survive a restart — except a plugin's own,
+    // which that plugin registers from its own setup, and only while it is loaded.
     for (const def of await listDefs(meta)) {
+      if (def.owner !== undefined && def.owner !== services.self?.name) continue;
       registerStoreTool(services, def);
     }
   },

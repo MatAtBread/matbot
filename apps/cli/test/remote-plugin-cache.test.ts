@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
-import { mirrorPath } from '@matatbread/matbot-tool-plugin/cache-layout';
+import { materializeRemote, remoteDependencyNotes, restoreRemote, discardRestore } from '../src/plugins/remote-cache.js';
+import { missingPackageOf } from '../src/plugins/tools/plugin/add.js';
+import { planProvision, applyProvision } from '../src/plugins/provision.js';
+import { mirrorPath } from '../src/plugins/cache-layout.js';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -260,8 +261,8 @@ test('a declared dependency nothing satisfies is reported, named well enough to 
 // SUBDIRECTORY of a repo. No package manager can do it usefully here — npm ignores the fragment and
 // installs the whole monorepo under the repo's name (reporting success), pnpm extracts the right
 // package but leaves its `workspace:` peers unmet — and matbot needs neither, because the http route
-// fetches one package's files and resolves bare imports against the host. So the fragment is only a
-// spelling, and this is the mechanism under it.
+// fetches one package's files and resolves bare imports against the host. The fragment is refused since
+// 0.5.0; this is the mechanism under the `github:owner/repo/sub` form that replaces it.
 test('a plugin in a repo subdirectory is fetched as a package, workspace peers and all', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-subdir-'));
   const dotPlugins = join(dir, '.plugins');

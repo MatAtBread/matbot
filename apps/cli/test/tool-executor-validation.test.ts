@@ -146,7 +146,7 @@ test('the wrapper is applied once, so tool identity is stable', async () => {
 });
 
 test('builtins seeded through the constructor are guarded too', async () => {
-  // The CLI seeds `createBuiltinTools()` this way, so a constructor-seeded tool that skipped the
+  // `assembleMachine` seeds a host's `builtinTools` this way, so a constructor-seeded tool that skipped the
   // wrapper would leave `about_matbot`/`single_turn` unvalidated while everything else was checked.
   const { tool, calls } = stubTool();
   const reg = new ToolRegistryImpl([tool], undefined,

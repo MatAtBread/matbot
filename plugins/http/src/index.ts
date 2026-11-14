@@ -5,13 +5,18 @@ import { PLUGIN_API_VERSION, REFERENCEABLE_KEY_RULE, originGatedFetch, refusalMe
 // params are inlined structurally (not a `HttpInput` reference) so the derived wire text shows real fields.
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    http: ToolContract<unknown, { url: string; method?: string; headers?: Record<string, string | { Vault: string }>; body?: string; responseType?: 'text' | 'json' }>;
+    http: ToolContract<unknown, { url: string; method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS'; headers?: Record<string, string | { Vault: string }>; body?: string; responseType?: 'text' | 'json' }>;
   }
 }
 
+// The schema's `method` enum, as a type, and spelled out again in the contract above. Validation runs at
+// the executor, so the enum binds every caller, a composition included; were the contract `string`,
+// `method: 'PROPFIND'` would type-check and then be refused.
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
+
 interface HttpInput {
   url:           string;
-  method?:       string;
+  method?:       HttpMethod;
   headers?:      Record<string, string | { Vault: string }>;
   body?:         string;
   responseType?: 'text' | 'json';
@@ -100,8 +105,8 @@ async function resolveHeaders(
     const permit = await ctx.gate({
       gate: 'secret', subject: `${origin} ${key}`, label, fallback: false,
       standing: [
-        { subject: `${origin} ${key}`, label: `Always allow sending ${key} to ${origin}` },
-        { subject: origin,            label: `Always allow sending any vault key to ${origin}` },
+        { subject: `${origin} ${key}`, label: `sending ${key} to ${origin}` },
+        { subject: origin,            label: `sending any vault key to ${origin}` },
       ],
     });
     if (!permit.allowed) return { ok: false, message: refusalMessage(permit, `Sending ${key} to ${origin}`) };
@@ -138,7 +143,7 @@ function originGate(ctx: ToolContext): (url: URL) => Promise<void> {
   const decide = async (origin: string): Promise<void> => {
     const permit = await ctx.gate({
       gate: 'request', subject: origin, label: `Send an HTTP request to **${origin}**?`, fallback: false,
-      standing: [{ subject: origin, label: `Always allow requests to ${origin}` }],
+      standing: [{ subject: origin, label: `requests to ${origin}` }],
     });
     if (!permit.allowed) throw new Error(refusalMessage(permit, `A request to ${origin}`));
   };
@@ -238,9 +243,8 @@ export const httpTool: Tool = {
     required:   ['url'],
     properties: {
       url:          { type: 'string', description: 'The URL to request.' },
-      // The executor hands `method` straight to `fetch`, which takes any verb; this enum is the model's
-      // guardrail, not the tool's limit, so it lists the ones worth offering rather than the ones that work.
-      // It was five, which made `json-validation` reject the HEAD and OPTIONS requests the tool supports.
+      // `fetch` takes any verb, but this enum is the tool's limit for every caller (validation is at the
+      // executor), so it must list exactly `HttpMethod`. It was five, which rejected HEAD and OPTIONS.
       method:       { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], default: 'GET' },
       // Each header value is a string or `{ Vault }`. No `anyOf`: the object keywords apply only to an
       // object, so this is both arms in keywords every validator enforces. `additionalProperties: false`

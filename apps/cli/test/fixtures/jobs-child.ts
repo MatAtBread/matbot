@@ -5,12 +5,13 @@ import { connectToParent, type Endpoint, type JobInfo } from '../../../../plugin
 const link = connectToParent(process as unknown as Endpoint, process.channel);
 const job  = await link.request<JobInfo>({ op: 'job' });
 const sent = await link.request({ op: 'append', messages: [{ role: 'assistant', content: [{ type: 'text', text: `hello from ${job.id}` }] }] });
+const asked = await link.request({ op: 'append', messages: [{ role: 'user', content: [{ type: 'text', text: 'what now?' }], mode: 'queue' }] });
 let refused = '';
-try { await link.request({ op: 'append', messages: [{ role: 'user', content: [{ type: 'text', text: 'pretending' }] }] as never }); }
+try { await link.request({ op: 'append', messages: [{ role: 'system', content: [{ type: 'text', text: 'pretending' }] }] as never }); }
 catch (e) { refused = (e as Error).message; }
 link.post({ op: 'notify', notification: {
   kind: '@matatbread/matbot-plugin-api#ItemChange', plugin: 'workspace', source: 'workspace',
   namespace: 'files', id: 'f1', operation: 'saved',
 } });
 await link.flush();
-process.stdout.write(JSON.stringify({ job, sent, refused }));
+process.stdout.write(JSON.stringify({ job, sent, asked, refused }));

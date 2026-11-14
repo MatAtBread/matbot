@@ -2,13 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type {
   MatbotPlugin, Principal, Session, Store, Tool, ToolRegistry, FileStore, MediaStore, Vault,
   FormField, PromptFn, SessionRunner, WatchVisibility, VisibilityQuery, FilePartition, SteeringMode,
-  Notifier, Notification, UserContent, MimeType, MediaRejectedError, PermissionGate,
+  Notifier, Notification, UserContent, MimeType, MediaRejectedError, PermissionGate, PipelineEvent, SessionPrompter,
 } from '@matatbread/matbot-core';
 import {
   createSession, promptCancelledError, runAs, tryCurrentPrincipal, ItemChangeKind, RegistryChangeKind,
-  isMediaRejectedError,
+  isMediaRejectedError, failureOf, FAILURE_STATUS,
 } from '@matatbread/matbot-core';
-import { bindGate } from '@matatbread/matbot-plugin-api';
+import { bindGate, HTTP_TOOL_SESSION } from '@matatbread/matbot-plugin-api';
 import { sseComment, sseEvent } from './sse-writer.js';
 import { makeWebEnvTool } from './web-env.js';
 import { trackOwnConnections } from './own-connections.js';
@@ -57,7 +57,6 @@ export interface WebServerDeps {
    *  non-interactive, so a privileged tool reached through it gets whatever the policy decides with no
    *  `ask` channel: a standing answer, or the call site's own `fallback`. */
   permissionGate?: () => PermissionGate | undefined;
-  configPath?:    string;
   /** Derives the security principal for each request. Defaults to {@link defaultWebPrincipal}. */
   resolvePrincipal?: WebPrincipalResolver;
   /** How often to write a keep-alive comment on each SSE stream, in ms. Default 20s — comfortably inside
@@ -451,6 +450,106 @@ export function createWebServer(deps: WebServerDeps) {
     } catch { /* no version header; the client simply doesn't check */ }
   })();
 
+  // The prompt for one turn of a session: it parks on `pendingPrompts`, is shown to every browser attached to
+  // the session, and is answered via POST /sessions/:id/prompt.
+  function makePrompt(targetId: string, traceId: string): PromptFn {
+    // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
+    // reach the client over its persistent GET /events/sessions/:id stream, not this request.
+    // Answered via POST /sessions/:id/prompt, naming the prompt by its `promptId`.
+    return ((p: string | FormField, defaultValue?: string): Promise<string> =>
+      new Promise<string>((resolve, reject) => {
+        const def = typeof p === 'string' ? defaultValue : p.default;
+        const promptId = crypto.randomUUID();
+        // Every settle path funnels through these two, so announcing here covers all of them: an answer
+        // from any viewer, an abort, and the no-viewers-left release. The dialog is drawn in EVERY
+        // browser attached to the session but can only be answered once — without this the other
+        // browsers would sit on a dead prompt forever. False when already settled, so a second answer
+        // racing the first is not announced twice.
+        // Only the shown prompt was ever drawn, so only it is retired — and the next in the queue is
+        // shown in its place.
+        const settled = (): boolean => {
+          const parked = pendingPrompts.get(targetId);
+          const shown  = shownIn(targetId) === parked?.get(promptId);
+          if (parked?.delete(promptId) !== true) return false;
+          if (shown) {
+            sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId, promptId }));
+            const next = shownIn(targetId);
+            if (next !== undefined) sendToSession(targetId, next.event);
+          }
+          if (parked.size === 0) pendingPrompts.delete(targetId);
+          updateBusy(targetId);
+          return true;
+        };
+        // Built once and kept, so a stream that connects later is told about it (see pendingPrompts).
+        const event = sseEvent('prompt', {
+          type: 'prompt',
+          traceId,
+          promptId,
+          question: typeof p === 'string' ? p : p.label,
+          ...(def !== undefined ? { defaultValue: def } : {}),
+          ...(typeof p === 'string' ? {} : { field: p }),
+        });
+        let parked = pendingPrompts.get(targetId);
+        if (parked === undefined) { parked = new Map(); pendingPrompts.set(targetId, parked); }
+        parked.set(promptId, {
+          traceId,
+          event,
+          resolve: answer => { if (settled()) resolve(answer || def || ''); },
+          cancel:  ()     => { if (settled()) reject(promptCancelledError()); },
+        });
+        if (parked.size === 1) sendToSession(targetId, event);
+        updateBusy(targetId);
+      })) as PromptFn;
+  }
+
+  // Server-owned busy tracker. The busy:false broadcast requires *someone* draining this
+  // session's stream when the turn ends — but a client's GET /events/sessions/:id consumer may
+  // not be attached (user switched away). So whoever turns busy ON owns turning it OFF: drain
+  // this submission's own view until the runner's deterministic `idle` event, driving updateBusy.
+  // The view was subscribed (the `events` getter) before pump can run, so it can't miss even a
+  // fast/erroring turn; one tracker per busy period, so cost is bounded by concurrent running
+  // turns, nothing on idle sessions.
+  function track(targetId: string, events: AsyncIterable<PipelineEvent>, trackAc: AbortController): void {
+    void (async () => {
+      try {
+        for await (const ev of events) {
+          // A turn that has ended waits on nothing, so its prompts are released at its terminal.
+          // A turn cannot end while a tool awaits a prompt, but a tool or a body can ask without
+          // awaiting (a `fetch` nobody awaits), and its question then outlives the turn — at the
+          // head of the queue, holding every later turn's prompts behind it for good.
+          if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') {
+            for (const parked of parkedIn(targetId, ev.traceId)) parked.cancel();
+          }
+          updateBusy(targetId);
+          // Tear down only on a *genuine* idle. `idle` fires after `running` flips false, so
+          // status() is authoritative here: if a back-to-back submit has already re-armed the
+          // session (running again, or freshly queued), keep tracking — this same view stays
+          // subscribed across pump restarts and will see the next idle. Nothing runs then, so a
+          // prompt still parked has nobody waiting on it.
+          if (ev.type === 'idle' && !deps.run.status(targetId).busy) {
+            for (const parked of parkedIn(targetId)) parked.cancel();
+            break;
+          }
+        }
+      } catch { /* stream torn down */ }
+      finally { busyTrackers.delete(targetId); trackAc.abort(); }
+    })();
+  }
+
+  // A turn nobody submitted from here — a robo-submit — asks through this, so its questions are put to
+  // whoever views the session, as a submitter's would be. Busy is tracked as for a submission, since no
+  // submit handler is here to do it: a tracker is armed if none is, and lets go at the next real idle.
+  function promptFor(sessionId: string, traceId: string): PromptFn {
+    const prompt = makePrompt(sessionId, traceId);
+    if (!busyTrackers.has(sessionId)) {
+      busyTrackers.add(sessionId);
+      const trackAc = new AbortController();
+      void deps.run.open({ sessionId, signal: trackAc.signal })
+        .then(view => track(sessionId, view.events, trackAc), () => { busyTrackers.delete(sessionId); });
+    }
+    return prompt;
+  }
+
   // Broadcast a session's busy/idle/prompting transition to the global status listeners (sidebar),
   // deduped against the last value. Authoritative busy comes from the runner (running || queued > 0).
   function updateBusy(sessionId: string): void {
@@ -510,8 +609,11 @@ export function createWebServer(deps: WebServerDeps) {
 
   function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'pluginName'>) {
     const now = new Date().toISOString();
+    // One fixed id rather than one per request: it is what a permission answer for this door is held
+    // against (`#http` under a gate id in the default policy's settings), and a fresh id per request would be
+    // a session nobody could ever have answered for.
     const stubSession: Session = {
-      id: crypto.randomUUID(), version: crypto.randomUUID(),
+      id: HTTP_TOOL_SESSION, version: crypto.randomUUID(),
       status: 'active', messages: [],
       createdAt: now, updatedAt: now,
     };
@@ -525,10 +627,9 @@ export function createWebServer(deps: WebServerDeps) {
       prompt:       nonInteractivePrompt,
       // `undefined`, never `nonInteractivePrompt`: the stand-in answers with a field's own default, so a
       // gate handed it could not tell "nobody is here" from "a human answered". This route has no human.
-      ...bindGate(deps.permissionGate?.(), tool, undefined, deps.tools),
+      ...bindGate(deps.permissionGate?.(), tool, undefined, { session: stubSession.id }, deps.tools),
       ...(deps.workdir    !== undefined ? { workdir:    deps.workdir    } : {}),
       ...(deps.files      !== undefined ? { files:      deps.files      } : {}),
-      ...(deps.configPath !== undefined ? { configPath: deps.configPath } : {}),
     };
   }
 
@@ -720,53 +821,7 @@ export function createWebServer(deps: WebServerDeps) {
         if (contentArr.length === 0) { json(res, 400, { error: 'A submission must carry at least one content block.' }); return; }
       }
 
-      // Fire-and-forget: we enqueue and return immediately. The turn's output — and this prompt —
-      // reach the client over its persistent GET /events/sessions/:id stream, not this request.
-      // Answered via POST /sessions/:id/prompt, naming the prompt by its `promptId`.
-      const promptFn = ((p: string | FormField, defaultValue?: string): Promise<string> =>
-        new Promise<string>((resolve, reject) => {
-          const def = typeof p === 'string' ? defaultValue : p.default;
-          const promptId = crypto.randomUUID();
-          // Every settle path funnels through these two, so announcing here covers all of them: an answer
-          // from any viewer, an abort, and the no-viewers-left release. The dialog is drawn in EVERY
-          // browser attached to the session but can only be answered once — without this the other
-          // browsers would sit on a dead prompt forever. False when already settled, so a second answer
-          // racing the first is not announced twice.
-          // Only the shown prompt was ever drawn, so only it is retired — and the next in the queue is
-          // shown in its place.
-          const settled = (): boolean => {
-            const parked = pendingPrompts.get(targetId);
-            const shown  = shownIn(targetId) === parked?.get(promptId);
-            if (parked?.delete(promptId) !== true) return false;
-            if (shown) {
-              sendToSession(targetId, sseEvent('prompt-resolved', { type: 'prompt-resolved', traceId, promptId }));
-              const next = shownIn(targetId);
-              if (next !== undefined) sendToSession(targetId, next.event);
-            }
-            if (parked.size === 0) pendingPrompts.delete(targetId);
-            updateBusy(targetId);
-            return true;
-          };
-          // Built once and kept, so a stream that connects later is told about it (see pendingPrompts).
-          const event = sseEvent('prompt', {
-            type: 'prompt',
-            traceId,
-            promptId,
-            question: typeof p === 'string' ? p : p.label,
-            ...(def !== undefined ? { defaultValue: def } : {}),
-            ...(typeof p === 'string' ? {} : { field: p }),
-          });
-          let parked = pendingPrompts.get(targetId);
-          if (parked === undefined) { parked = new Map(); pendingPrompts.set(targetId, parked); }
-          parked.set(promptId, {
-            traceId,
-            event,
-            resolve: answer => { if (settled()) resolve(answer || def || ''); },
-            cancel:  ()     => { if (settled()) reject(promptCancelledError()); },
-          });
-          if (parked.size === 1) sendToSession(targetId, event);
-          updateBusy(targetId);
-        })) as PromptFn;
+      const promptFn = makePrompt(targetId, traceId);
 
       // The first submit of a busy period anchors the server-owned busy tracker on its OWN view
       // (claimed synchronously here, before any await, so two near-simultaneous submits can't both
@@ -789,39 +844,7 @@ export function createWebServer(deps: WebServerDeps) {
         updateBusy(targetId);
         json(res, 200, { queued: view.queued, traceId: view.traceId });
 
-        // Server-owned busy tracker. The busy:false broadcast requires *someone* draining this
-        // session's stream when the turn ends — but a client's GET /events/sessions/:id consumer may
-        // not be attached (user switched away). So whoever turns busy ON owns turning it OFF: drain
-        // this submission's own view until the runner's deterministic `idle` event, driving updateBusy.
-        // The view was subscribed (the `events` getter) before pump can run, so it can't miss even a
-        // fast/erroring turn; one tracker per busy period, so cost is bounded by concurrent running
-        // turns, nothing on idle sessions.
-        if (isTracker) {
-          void (async () => {
-            try {
-              for await (const ev of view.events) {
-                // A turn that has ended waits on nothing, so its prompts are released at its terminal.
-                // A turn cannot end while a tool awaits a prompt, but a tool or a body can ask without
-                // awaiting (a `fetch` nobody awaits), and its question then outlives the turn — at the
-                // head of the queue, holding every later turn's prompts behind it for good.
-                if (ev.type === 'done' || ev.type === 'aborted' || ev.type === 'error' || ev.type === 'cancelled') {
-                  for (const parked of parkedIn(targetId, ev.traceId)) parked.cancel();
-                }
-                updateBusy(targetId);
-                // Tear down only on a *genuine* idle. `idle` fires after `running` flips false, so
-                // status() is authoritative here: if a back-to-back submit has already re-armed the
-                // session (running again, or freshly queued), keep tracking — this same view stays
-                // subscribed across pump restarts and will see the next idle. Nothing runs then, so a
-                // prompt still parked has nobody waiting on it.
-                if (ev.type === 'idle' && !deps.run.status(targetId).busy) {
-                  for (const parked of parkedIn(targetId)) parked.cancel();
-                  break;
-                }
-              }
-            } catch { /* stream torn down */ }
-            finally { busyTrackers.delete(targetId); trackAc.abort(); }
-          })();
-        }
+        if (isTracker) track(targetId, view.events, trackAc);
       } catch (e) {
         if (isTracker) busyTrackers.delete(targetId);
         // A refused attachment is the CLIENT's problem to fix (drop the file, attach a smaller one), not
@@ -843,7 +866,10 @@ export function createWebServer(deps: WebServerDeps) {
           json(res, status, { error: e.message, reason: e.reason, ...(e.file !== undefined ? { file: e.file } : {}) });
           return;
         }
-        json(res, 500, { error: String(e) });
+        // Nothing was queued: `open()` throws only before it queues a submission. Its class says whether
+        // sending it again could help, and the status says the same to a client that reads only that.
+        const failure = failureOf(e);
+        json(res, failure !== undefined ? FAILURE_STATUS[failure] : 500, { error: String(e), ...(failure !== undefined ? { failure } : {}) });
       }
       return;
     }
@@ -965,11 +991,14 @@ export function createWebServer(deps: WebServerDeps) {
             // A tool that reports a 4xx code is naming a CLIENT error, so answer with it rather than
             // 500 — input rejected by the executor's validator arrives this way (TOOL_INPUT_INVALID).
             // Safe to read as a status: a process exit code cannot exceed 255, so `bash` and friends
-            // can never land in this range.
-            const status = ev.code !== undefined && ev.code >= 400 && ev.code <= 499 ? ev.code : 500;
+            // can never land in this range. Otherwise its class, if it gave one: 503 tells a client that
+            // asking again later may work, which a 500 never could.
+            const status = ev.code !== undefined && ev.code >= 400 && ev.code <= 499 ? ev.code
+                         : ev.failure !== undefined ? FAILURE_STATUS[ev.failure] : 500;
             json(res, status, {
               error: ev.message,
               ...(ev.code !== undefined ? { code: ev.code } : {}),
+              ...(ev.failure !== undefined ? { failure: ev.failure } : {}),
               ...(stdout               ? { stdout }         : {}),
               ...(stderr               ? { stderr }         : {}),
             });
@@ -978,7 +1007,10 @@ export function createWebServer(deps: WebServerDeps) {
         }
         json(res, 500, { error: 'Tool returned no result' });
       } catch (e) {
-        json(res, 500, { error: String(e), ...(stdout ? { stdout } : {}), ...(stderr ? { stderr } : {}) });
+        const failure = failureOf(e);
+        json(res, failure !== undefined ? FAILURE_STATUS[failure] : 500, {
+          error: String(e), ...(failure !== undefined ? { failure } : {}), ...(stdout ? { stdout } : {}), ...(stderr ? { stderr } : {}),
+        });
       }
       return;
     }
@@ -1180,6 +1212,6 @@ export function createWebServer(deps: WebServerDeps) {
     );
   }
 
-  return { server, close, webEnvTool };
+  return { server, close, webEnvTool, prompter: { promptFor } satisfies SessionPrompter };
 }
 

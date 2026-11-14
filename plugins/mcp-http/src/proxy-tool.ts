@@ -1,5 +1,6 @@
 import type { Tool, ToolEvent, ToolContext } from '@matatbread/matbot-plugin-api';
 import type { MCPClient, MCPToolDef } from './types.js';
+import { failureOf } from '@matatbread/matbot-plugin-api';
 
 /**
  * The matbot tool name a server's tool is registered under. `prefix` overrides the default
@@ -34,7 +35,9 @@ export function makeProxyTool(
         try {
           result = await client.callTool(toolDef.name, input, ctx.signal);
         } catch (e) {
-          yield { type: 'error', message: `MCP tool call failed: ${String(e)}` };
+          // The server's status, classified (a 503 is worth trying again, a 401 is not), goes to the model.
+          const failure = failureOf(e);
+          yield { type: 'error', message: `MCP tool call failed: ${String(e)}`, ...(failure !== undefined ? { failure } : {}) };
           return;
         }
         if (!result?.content) { yield { type: 'result', value: result }; return; }
