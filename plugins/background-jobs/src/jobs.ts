@@ -1,7 +1,9 @@
 import type {
   MatbotPluginSpec, MatbotMachine, Tool, ToolContract, ToolResultOf, ToolContext, Store, Principal,
-  AppendMessage, AppendResult,
+  AppendMessage, AppendResult, Session,
 } from '@matatbread/matbot-plugin-api';
+// Brings the `TriggerFilter` augmentation of MatbotServices into this compilation; triggers is discovered, not owned.
+import type { TriggerFilter } from '@matatbread/matbot-triggers';
 import { PLUGIN_API_VERSION, currentPrincipal, isReadOnlyError, runAs, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 
 // The successor to `@matatbread/matbot-tool-background` (removed in 0.5.0), with one change of meaning: a job's reply is
@@ -29,6 +31,16 @@ interface SkippedJob { id: string; kind: SkipKind; reason: string }
  * asserted in exactly one place: `isDuration` for one, `isoAt` for the other.
  */
 type Duration   = `${number}${'ms' | 's' | 'm' | 'h' | 'd'}`;
+
+/**
+ * Which parts of a job's OWN turn the triggers judge. Its prompt is the turn's user message, and is the same
+ * text at every run, so a trigger that matches it matches every time: a job every ten minutes whose prompt
+ * named three IP addresses had them remembered three hundred times a day. Its reply is new each run, and may
+ * carry something fetched from outside worth a trigger's attention. Absent is `all`, as a conversation's turn.
+ */
+export type JobTriggers = 'all' | 'reply' | 'none';
+const JOB_TRIGGERS: readonly JobTriggers[] = ['all', 'reply', 'none'];
+const isJobTriggers = (v: unknown): v is JobTriggers => (JOB_TRIGGERS as readonly unknown[]).includes(v);
 type IsoInstant = `${number}-${number}-${number}` | `${number}-${number}-${number}T${string}`;
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -37,11 +49,12 @@ declare module '@matatbread/matbot-plugin-api' {
     // `at` a single run at a stated time, neither a single run starting now. `session` in every result is
     // the conversation the job reports to, resolved at creation — absent when there is none.
     background_job:
-      | ToolContract<{ id: string; interval: Duration; name?: string; session?: string }, { prompt: string; interval: Duration; name?: string; session?: string; provider?: string }>
-      | ToolContract<{ id: string; at: IsoInstant; name?: string; session?: string }, { prompt: string; at: Duration | IsoInstant; name?: string; session?: string; provider?: string }>
-      | ToolContract<{ status: 'started'; id: string; name?: string; session?: string }, { prompt: string; interval?: 'once' | null; name?: string; session?: string; provider?: string }>;
+      | ToolContract<{ id: string; interval: Duration; name?: string; session?: string }, { prompt: string; interval: Duration; name?: string; session?: string; provider?: string; triggers?: JobTriggers }>
+      | ToolContract<{ id: string; at: IsoInstant; name?: string; session?: string }, { prompt: string; at: Duration | IsoInstant; name?: string; session?: string; provider?: string; triggers?: JobTriggers }>
+      | ToolContract<{ status: 'started'; id: string; name?: string; session?: string }, { prompt: string; interval?: 'once' | null; name?: string; session?: string; provider?: string; triggers?: JobTriggers }>;
     background_job_action:
       | ToolContract<JobListing[], { action: 'list' }>
+      | ToolContract<{ updated: true; id: string; triggers: JobTriggers }, { action: 'update'; id: string; triggers: JobTriggers }>
       | ToolContract<{ resumed:   true; count: number; ids: string[]; skipped?: SkippedJob[] } | { resumed:   true; id: string }, { action: 'resume';  id: string }>
       | ToolContract<{ suspended: true; count: number; ids: string[]; skipped?: SkippedJob[] } | { suspended: true; id: string }, { action: 'suspend'; id: string }>
       | ToolContract<{ cancelled: true; id: string }, { action: 'cancel'; id: string }>;
@@ -107,6 +120,7 @@ interface JobBase {
   provider?:  string;
   /** Creator identity, replayed each fire so a recurring job runs as the user who scheduled it. */
   principal?: Principal;
+  triggers?:  JobTriggers;
 }
 
 /** Fires every `intervalMs` until suspended or cancelled. */
@@ -152,6 +166,7 @@ export interface RunSpec {
   session?:   string;
   provider?:  string;
   principal?: Principal;
+  triggers?:  JobTriggers;
 }
 
 /** How a run ended, as far as the scheduler cares. */
@@ -177,8 +192,9 @@ export interface BackgroundJobsHost {
   /** What `plugin list` shows for the package — each specialisation says where its jobs run. */
   description: string;
   /** The runner for this machine, or `undefined` if jobs cannot run here (so no scheduler ticks). */
-  runner(machine: MatbotMachine): JobRunner | undefined;
-  /** Setup in a process that IS a job (`isSubAgent()`), instead of running a scheduler. */
+  runner(machine: MatbotMachine): JobRunner | undefined | Promise<JobRunner | undefined>;
+  /** Setup in a process that IS a job (`isSubAgent()`), instead of running a scheduler. A process that IS
+   *  a job applies its {@link JobInfo.triggers} with {@link filterJobTriggers}. */
   inJob?(machine: MatbotMachine, signal: AbortSignal): Promise<void>;
   /** Runs first in teardown — a job's last announcements may still be in flight. */
   teardown?(): Promise<void>;
@@ -204,6 +220,7 @@ export interface JobInfo {
   /** The conversation the job reports to, and its title — for the job's own context. */
   session?:      string;
   sessionTitle?: string;
+  triggers?:     JobTriggers;
 }
 
 export async function jobInfo(machine: MatbotMachine, job: RunSpec): Promise<JobInfo> {
@@ -219,7 +236,30 @@ export async function jobInfo(machine: MatbotMachine, job: RunSpec): Promise<Job
     ...(job.name     !== undefined ? { name: job.name }       : {}),
     ...(job.session  !== undefined ? { session: job.session } : {}),
     ...(sessionTitle !== undefined ? { sessionTitle }         : {}),
+    ...(job.triggers !== undefined ? { triggers: job.triggers } : {}),
   };
+}
+
+/**
+ * Withholds triggers from a job's own turn, as its {@link JobTriggers} says: the prompt is the `user`
+ * surface, the reply the `agent` one. `settingFor` answers for the session being judged, `undefined` for
+ * one that is not a job's. Registered as the machine's `TriggerFilter`, composing with the one it displaces
+ * by narrowing that one's answer, so neither has to know the other. Without the triggers plugin it is never
+ * asked, and costs nothing.
+ */
+export async function filterJobTriggers(
+  machine: MatbotMachine, settingFor: (session: Session) => JobTriggers | undefined,
+): Promise<void> {
+  const displaced = machine.TriggerFilter;
+  const filter: TriggerFilter = {
+    async admit(triggers, ctx) {
+      const setting = settingFor(ctx.session) ?? 'all';
+      const judged  = setting === 'all' || (setting === 'reply' && ctx.surface === 'agent');
+      if (!judged) return [];
+      return displaced === undefined ? triggers : displaced.admit(triggers, ctx);
+    },
+  };
+  await machine.register('TriggerFilter', filter);
 }
 
 // An append from a job runs as the job's creator — whose session it is — and is labelled with the job
@@ -345,6 +385,7 @@ const runSpec = (job: Job): RunSpec => ({
   ...(job.session   !== undefined ? { session: job.session }     : {}),
   ...(job.provider  !== undefined ? { provider: job.provider }   : {}),
   ...(job.principal !== undefined ? { principal: job.principal } : {}),
+  ...(job.triggers  !== undefined ? { triggers: job.triggers }   : {}),
 });
 
 /**
@@ -484,7 +525,16 @@ async function scheduler(signal: AbortSignal): Promise<void> {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
-interface BackgroundInput { prompt: string; interval?: string | null; at?: string | null; name?: string; session?: string; provider?: string }
+interface BackgroundInput { prompt: string; interval?: string | null; at?: string | null; name?: string; session?: string; provider?: string; triggers?: unknown }
+
+const TRIGGERS_DESCRIPTION =
+  'Which parts of the job\'s own turn the triggers judge (remembering facts, injecting skills, and so on). ' +
+  '"all" (the default): its prompt and its reply, as in a conversation. "reply": only its reply — the prompt ' +
+  'is the same text every run, so a trigger that matches it matches every run; use this for a frequent job ' +
+  'whose prompt states fixed details. "none": neither, and no classifier is called for the job\'s turn. ' +
+  'A message the job appends to a conversation is judged there regardless.';
+const badTriggers = (v: unknown): string =>
+  `Invalid "triggers" ${JSON.stringify(v)}: expected one of ${JOB_TRIGGERS.map(t => `"${t}"`).join(', ')}.`;
 
 // How late an `at` may already be at CREATION and still be accepted. A model that got the date or the
 // year wrong would otherwise fire instantly; refusing names the instant it resolved to.
@@ -494,6 +544,7 @@ const CANNOT_RUN = 'Background jobs cannot run in this matbot: no job runner cou
 
 type EveryAction =
   | { action: 'list' }
+  | { action: 'update';  id: string; triggers: unknown }
   | { action: 'suspend'; id: string }
   | { action: 'resume';  id: string }
   | { action: 'cancel';  id: string };
@@ -585,11 +636,13 @@ Do not wait for a job's result: tell the user it has started, and which conversa
         type:        'string',
         description: 'Provider key to use (e.g. "claude-sonnet-4-6"). Defaults to the provider of the current turn.',
       },
+      triggers: { type: 'string', enum: [...JOB_TRIGGERS], description: TRIGGERS_DESCRIPTION },
     },
   },
   executor: {
     async *execute(input: unknown, ctx: ToolContext) {
-      const { prompt, interval, at, name, session, provider } = input as BackgroundInput;
+      const { prompt, interval, at, name, session, provider, triggers } = input as BackgroundInput;
+      if (triggers !== undefined && !isJobTriggers(triggers)) { yield { type: 'error', message: badTriggers(triggers) }; return; }
       // The provider driving this turn, not the config default, unless the call names one.
       const effectiveProvider = provider ?? ctx.provider;
       const timed = typeof at === 'string' && at.trim() !== '';
@@ -607,6 +660,7 @@ Do not wait for a job's result: tell the user it has started, and which conversa
         ...(name              !== undefined ? { name }                        : {}),
         ...(target            !== undefined ? { session: target }             : {}),
         ...(effectiveProvider !== undefined ? { provider: effectiveProvider } : {}),
+        ...(triggers          !== undefined ? { triggers }                    : {}),
       };
       const echoed = {
         ...(name   !== undefined ? { name }            : {}),
@@ -774,6 +828,8 @@ ACTIONS
             reports to (its \`session\`), and whether a run of it is in flight. Read the session rather
             than assuming a job's output lands in the conversation you happen to be in: it is fixed when
             the job is created.
+  update  — Change a stored job's \`triggers\` (see background_job): which parts of its own turn the triggers
+            judge. Takes effect from its next run.
   suspend — Pause a job (preserved, stops running until resumed). Not a run-now job: it has no schedule to pause.
   resume  — Resume a suspended job (runs nearly immediately, then on its interval).
   cancel  — Permanently delete a job, and stop a run of it in flight here. This is how to stop a run-now job.
@@ -792,13 +848,14 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
     properties: {
       action: {
         type:        'string',
-        enum:        ['list', 'suspend', 'resume', 'cancel'],
-        description: 'list: show all jobs. suspend/resume: pause or re-enable. cancel: permanently delete.',
+        enum:        ['list', 'update', 'suspend', 'resume', 'cancel'],
+        description: 'list: show all jobs. update: change a job\'s triggers. suspend/resume: pause or re-enable. cancel: permanently delete.',
       },
       id: {
         type:        'string',
-        description: 'Job id (suspend/resume/cancel). Use "*" with suspend/resume to act on all; cancel needs a specific id.',
+        description: 'Job id (update/suspend/resume/cancel). Use "*" with suspend/resume to act on all; update and cancel need a specific id.',
       },
+      triggers: { type: 'string', enum: [...JOB_TRIGGERS], description: 'update only. ' + TRIGGERS_DESCRIPTION },
     },
   },
   executor: {
@@ -821,6 +878,20 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
             });
           }
           yield { type: 'result', value: listed };
+          return;
+        }
+
+        case 'update': {
+          if (!isJobTriggers(act.triggers)) { yield { type: 'error', message: badTriggers(act.triggers) }; return; }
+          const triggers = act.triggers;
+          const written  = await mutate(act.id, job => ({ ...job, triggers }));
+          if (!written.done) {
+            yield { type: 'error', message: written.kind === 'contended'
+              ? `Job ${act.id} is being written concurrently (a run of it is starting or finishing) — ask again.`
+              : `Job ${act.id} not found. A run-now job has no stored row to update.` };
+            return;
+          }
+          yield { type: 'result', value: { updated: true, id: act.id, triggers } };
           return;
         }
 
@@ -876,7 +947,7 @@ carries a \`kind\` saying what to do about it — do not read this out of the \`
         }
 
         default:
-          yield { type: 'error', message: `Unknown background_job_action "${(act as { action: string }).action}". Expected one of: list, suspend, resume, cancel.` };
+          yield { type: 'error', message: `Unknown background_job_action "${(act as { action: string }).action}". Expected one of: list, update, suspend, resume, cancel.` };
       }
     },
   },
@@ -918,7 +989,7 @@ export function createBackgroundJobsPlugin(host: BackgroundJobsHost): MatbotPlug
       // A job must not run a scheduler of its own — that would cascade.
       if (services.isSubAgent()) { await host.inJob?.(services, pluginAc.signal); return; }
       machine      = services;
-      activeRunner = host.runner(services);
+      activeRunner = await host.runner(services);
       jobStore     = services.createStore<Job>('jobs');
 
       const legacy = (await services.createStore<{ id: string; version: string }>(LEGACY_NAMESPACE).query({})).items.length;

@@ -6,7 +6,7 @@ import { pathToFileURL }    from 'node:url';
 import type { MatbotMachine, MatbotPluginSpec, AppendResult } from '@matatbread/matbot-plugin-api';
 import { ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import {
-  createBackgroundJobsPlugin, appendFor, jobContext, jobInfo, REPLY_TAIL,
+  createBackgroundJobsPlugin, appendFor, filterJobTriggers, jobContext, jobInfo, REPLY_TAIL,
   type JobInfo, type JobRunner, type RunOutcome, type RunSpec,
 } from '@matatbread/matbot-background-jobs';
 import { connectToParent, relayable, serveJob, type Endpoint, type ParentLink } from './channel.js';
@@ -174,6 +174,11 @@ async function setupJob(services: MatbotMachine, signal: AbortSignal): Promise<v
     }),
   });
   services.systemContext.register(() => jobContext(job));
+  // This process runs nothing but the job's turn, so every session it judges is the job's.
+  if (job.triggers !== undefined && job.triggers !== 'all') {
+    const triggers = job.triggers;
+    await filterJobTriggers(services, () => triggers);
+  }
   // What this job changes, announced where someone is listening. Locally produced only — a relayed one
   // carries an `instance`, and relaying it back would be the loop the field exists to break.
   services.Notifier.consume(

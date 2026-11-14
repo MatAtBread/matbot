@@ -657,6 +657,12 @@ a second host's needs.
   longer repointed at `remember_fact`. Startup names any that are left; delete them with `trigger_action`.
   Nor is the Inner Voice trigger's cool-down backfilled onto one seeded before 0.3.8; set it with
   `trigger_action` if that trigger fires repeatedly.
+- **`background-jobs` / `background-jobs-node`** — a job takes `triggers: 'all' | 'reply' | 'none'`, which
+  parts of its own turn the triggers judge, and `background_job_action update` changes it on a stored job.
+  A job's prompt is its turn's user message and the same text at every run, so a trigger that matched it
+  matched every run: a job every ten minutes whose prompt named three IP addresses had them remembered about
+  300 times a day. `reply` judges only what the job said; `none` neither, with no classifier call. Absent is
+  `all`, as before. It is applied through `TriggerFilter`, composing with any filter already registered.
 - **`function-tools`** exports its source scanner as `@matatbread/matbot-function-tools/scan`
   (`inertEnd`, `withoutComments`, `matchParen`, `matchBrace`). A `'` or `"` that reaches the end of its
   line is no longer read as a string, so an apostrophe in a definition outside a comment cannot swallow

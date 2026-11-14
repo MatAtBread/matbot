@@ -177,6 +177,9 @@ importers:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
         version: link:../../plugin-api
+      '@matatbread/matbot-triggers':
+        specifier: workspace:^
+        version: link:../triggers
       typescript:
         specifier: 'catalog:'
         version: 6.0.3
