@@ -70,18 +70,20 @@ export function serveJob(child: Endpoint, handlers: JobHandlers): void {
 // `origin: 'robo'`.
 function jobText(raw: unknown): AppendMessage[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('Nothing to append.');
-  return raw.map((m: unknown) => {
-    const msg = m as { role?: unknown; content?: unknown };
+  return raw.map((m: unknown): AppendMessage => {
+    const msg = m as { role?: unknown; content?: unknown; mode?: unknown };
     if (msg.role !== 'assistant' && msg.role !== 'user') throw new Error('A background job may append only assistant or user messages.');
     if (!Array.isArray(msg.content) || msg.content.length === 0) throw new Error('An appended message needs content.');
-    return {
-      role:    msg.role,
-      content: msg.content.map((c: unknown) => {
-        const block = c as { type?: unknown; text?: unknown };
-        if (block.type !== 'text' || typeof block.text !== 'string') throw new Error('An appended message may carry text only.');
-        return { type: 'text' as const, text: block.text, origin: 'robo' as const };
-      }),
-    };
+    const content = msg.content.map((c: unknown) => {
+      const block = c as { type?: unknown; text?: unknown };
+      if (block.type !== 'text' || typeof block.text !== 'string') throw new Error('An appended message may carry text only.');
+      return { type: 'text' as const, text: block.text, origin: 'robo' as const };
+    });
+    if (msg.role === 'assistant') return { role: 'assistant', content };
+    if (msg.mode !== 'queue' && msg.mode !== 'parallel' && msg.mode !== 'interrupt') {
+      throw new Error('A user message is submitted as a turn, and needs a mode for meeting a running one: "queue", "parallel" or "interrupt".');
+    }
+    return { role: 'user', content, mode: msg.mode };
   });
 }
 

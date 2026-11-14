@@ -22,7 +22,7 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ id: string; status: 'archived';   deferred?: true }, { action: 'hide'; sessionId: string }>
       | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>
       // `deferred` while it waits for a turn of that session, which may be this one.
-      | ToolContract<{ id: string; messageIds: string[]; deferred?: true; traceId?: string }, { action: 'append'; sessionId?: string; text: string; submit?: boolean }>;
+      | ToolContract<{ id: string; messageIds: string[]; deferred?: true; traceId?: string }, { action: 'append'; sessionId?: string; text: string; submit?: 'queue' | 'parallel' | 'interrupt' }>;
   }
 }
 
@@ -128,7 +128,9 @@ type SessionInput =
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string }
   | { action: 'unhide'; sessionId: string }
-  | { action: 'append'; sessionId?: string; text: string; submit?: boolean };
+  | { action: 'append'; sessionId?: string; text: string; submit?: 'queue' | 'parallel' | 'interrupt' };
+
+const SUBMIT_MODES: readonly unknown[] = ['queue', 'parallel', 'interrupt'];
 
 function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool<ToolResultOf<'session_action'>> {
   const isSubAgent = env.isSubAgent ?? (() => false);
@@ -184,9 +186,17 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       'that conversation — at once if none is — and while it waits the result says "deferred": true (always, ' +
       'for this conversation). A bare notification that needs no follow-up is telegram_send\'s job; ' +
       'append is the one that keeps context.\n\n' +
-      'With "submit": true, "text" is not said but ASKED: it is posted as a request to that conversation, ' +
-      'which answers it at once as it would a person\'s message — with its own tools, and beside anything ' +
-      'already running there — and the result carries the answering turn\'s "traceId". Use it when what you ' +
+      'With "submit", "text" is not said but ASKED: it is posted as a request to that conversation, which ' +
+      'answers it as it would a person\'s message, with its own tools, and the result carries the answering ' +
+      'turn\'s "traceId". "submit" says what happens if a turn is running there when it arrives (with none, ' +
+      'all three answer at once), and only you know which you need, because it turns on whether your request ' +
+      'depends on messages appended before it: ' +
+      '"queue" waits for that turn to end and is answered with everything appended meanwhile in front of it — ' +
+      'use it when the request is about what you (or turns you started) appended; ' +
+      '"parallel" answers at once, beside that turn, on a copy holding neither that turn\'s work nor anything ' +
+      'appended while it runs — use it only for a request that stands alone; ' +
+      '"interrupt" stops that turn, keeping what it finished, and answers this next, after the appends — ' +
+      'made from that very turn, it ends the turn making the call. Use it when what you ' +
       'found needs that conversation to act or decide, e.g. "The email 123 from virginmedia.com announces a ' +
       'planned outage on Friday. What mitigation should we put in place?" — not for a report, which needs ' +
       'no answer. Write it to stand alone: the conversation sees your words, not your working.\n\n' +
@@ -211,7 +221,7 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
         action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide', 'append'], description: 'The operation to perform.' },
         sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide. For append it is optional, and when given it wins outright; when omitted the default is the conversation the run reports to — never a background job\'s own session, which is a throwaway.' },
         text:            { type: 'string', description: 'append only: the message to post.' },
-        submit:          { type: 'boolean', description: 'append only: post "text" as a request the conversation answers, rather than as a message from you. Default false.' },
+        submit:          { type: 'string', enum: ['queue', 'parallel', 'interrupt'], description: 'append only: post "text" as a request the conversation answers, rather than as a message from you, and say how it meets a turn running there: "queue" (after it, and after everything appended meanwhile), "parallel" (at once, beside it, without what was appended) or "interrupt" (stop it, then this). Omit to post a message without starting a turn.' },
         title:           { type: 'string', description: 'New title — required for action "rename".' },
         markRead:        { type: 'boolean', description: 'get only: record that the returned session has been shown to its reader. Default false.' },
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
@@ -362,6 +372,10 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
           case 'append': {
             const { sessionId, text, submit } = args as Extract<SessionInput, { action: 'append' }>;
             if (typeof text !== 'string' || text.trim() === '') { yield { type: 'error', message: 'action "append" requires "text".' }; return; }
+            if (submit !== undefined && !SUBMIT_MODES.includes(submit)) {
+              yield { type: 'error', message: `"submit" is one of ${SUBMIT_MODES.map(m => `"${m}"`).join(', ')}, or omitted to post a message without starting a turn; got ${JSON.stringify(submit)}.`, failure: 'invalid' };
+              return;
+            }
             const appender = ctx.appender ?? env.appender?.();
             if (appender === undefined) { yield { type: 'error', message: 'Nothing here can append to a session.' }; return; }
             // A background job's own session — in its own process, or an ephemeral run's here — is a throwaway
@@ -374,8 +388,9 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
               return;
             }
             try {
+              const content = [{ type: 'text' as const, text, origin: 'robo' as const }];
               const { sessionId: id, messageIds, deferred, traceId } = await appender.append(target, [
-                { role: submit === true ? 'user' : 'assistant', content: [{ type: 'text', text, origin: 'robo' }] },
+                submit === undefined ? { role: 'assistant', content } : { role: 'user', content, mode: submit },
               ]);
               yield { type: 'result', value: { id, messageIds, ...(deferred ? { deferred } : {}), ...(traceId !== undefined ? { traceId } : {}) } };
             } catch (e) {

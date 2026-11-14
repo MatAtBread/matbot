@@ -1529,13 +1529,21 @@ never the system context, which is machine-wide.
 **An appended user message is answered.** It used to be written and left: a user message nothing answered,
 which providers fold into whatever the person types next (adjacent user messages merge on the wire), so the
 model read the two as one request, and a redo re-ran the job's message instead of theirs. No caller has a
-use for that, so the role is the switch and there is no flag: `role: 'user'` hands the message to the
-runner as a submission (`run.open`), which persists it when its turn starts and answers it, and the append
-settles on acceptance with the turn's `traceId`. It is how a job that found something asks the conversation
-what to do about it, rather than only saying so (`session_action append` with `submit: true`).
+use for that, so the role is the switch: `role: 'user'` hands the message to the runner as a submission
+(`run.open`), which persists it when its turn starts and answers it, and the append settles on acceptance
+with the turn's `traceId`. It is how a job that found something asks the conversation what to do about it,
+rather than only saying so (`session_action append` with `submit: 'queue'`, or another mode).
 
 Each property of it is the default that keeps a person in charge:
-- **`parallel`.** Any other mode stops or waits on the turn a person is having; parallel answers beside it.
+- **Its author says how it meets a running turn** (`AppendSubmit.mode`, required: `queue`, `parallel` or
+  `interrupt`; `session_action`'s `submit`, where absent means no turn at all). What decides it is whether
+  the request depends on messages appended before it. A parallel turn runs on a copy cut when it was
+  asked, holding neither the running turn's work nor the appends waiting for that turn, whereas a queued
+  or interrupting one starts after the runner has written every pending append. Only the request's author
+  knows which it needs: not the appender, and not a job, which cannot even tell whether the session is
+  busy. It was always `parallel`, on the reasoning that anything else stops or waits on a person's turn,
+  and then `queue` when the target was the caller's own session; both guessed at a fact only the author
+  has, and a delegated worker's appended results then went unseen by the request about them.
 - **Robo-authored, run as the appender's caller** (a job's creator, whose session it is) **on the session's
   own model** (the last message's `providerName` still configured, else the first configured). A job never
   chooses an identity or a model. Its blocks are `origin: 'robo'` whatever the caller says.

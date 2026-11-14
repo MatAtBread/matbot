@@ -5,7 +5,7 @@ import { connectToParent, type Endpoint, type JobInfo } from '../../../../plugin
 const link = connectToParent(process as unknown as Endpoint, process.channel);
 const job  = await link.request<JobInfo>({ op: 'job' });
 const sent = await link.request({ op: 'append', messages: [{ role: 'assistant', content: [{ type: 'text', text: `hello from ${job.id}` }] }] });
-const asked = await link.request({ op: 'append', messages: [{ role: 'user', content: [{ type: 'text', text: 'what now?' }] }] });
+const asked = await link.request({ op: 'append', messages: [{ role: 'user', content: [{ type: 'text', text: 'what now?' }], mode: 'queue' }] });
 let refused = '';
 try { await link.request({ op: 'append', messages: [{ role: 'system', content: [{ type: 'text', text: 'pretending' }] }] as never }); }
 catch (e) { refused = (e as Error).message; }

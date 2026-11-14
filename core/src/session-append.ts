@@ -1,5 +1,5 @@
 import type {
-  AppendMessage, AppendResult, Notifier, ProviderRegistry, Session, SessionAppender, SessionPrompter, SessionRunner, Store,
+  AppendMessage, AppendResult, AppendSubmit, Notifier, ProviderRegistry, Session, SessionAppender, SessionPrompter, SessionRunner, Store, SteeringDecision,
 } from './types.js';
 import { tryCurrentPrincipal, isReadOnlyError, SessionAppendKind, ROBO_SUBMIT } from '@matatbread/matbot-plugin-api';
 import { appendMessage, createMessage } from './session.js';
@@ -16,6 +16,8 @@ import { appendMessage, createMessage } from './session.js';
  * Seeded in every process, and refuses in a background job — whose store is the parent's medium with none
  * of the parent's turns behind it — until the job registers one that forwards to its parent.
  */
+const SUBMIT_MODES: ReadonlySet<unknown> = new Set<SteeringDecision>(['queue', 'parallel', 'interrupt']);
+
 export function createSessionAppender(deps: {
   sessions:   () => Store<Session> | undefined;
   run:        () => SessionRunner | undefined;
@@ -38,9 +40,13 @@ export function createSessionAppender(deps: {
       const session = await store.get(sessionId);
       if (session === null) throw new Error(`Session "${sessionId}" not found.`);
 
-      if (messages.some(m => m.role === 'user')) {
+      const asked = messages.find((m): m is AppendSubmit => m.role === 'user');
+      if (asked !== undefined) {
         if (messages.length > 1) throw new Error('A user message is submitted as a turn, and goes alone: append it by itself.');
-        return submit(sessionId, session, messages[0]!, run);
+        if (!SUBMIT_MODES.has(asked.mode)) {
+          throw new Error('A user message is submitted as a turn, and needs a mode for meeting a running one: "queue", "parallel" or "interrupt".');
+        }
+        return submit(sessionId, session, asked, run);
       }
 
       const principal = tryCurrentPrincipal();
@@ -86,9 +92,10 @@ export function createSessionAppender(deps: {
   };
 
   // A robo-submit: the message goes to the runner as a submission, which persists it when its turn starts
-  // and answers it — beside a running turn rather than stopping it. As whoever is appending (a job's
-  // creator), with the session's own model, and asking through whatever frontend can reach the session.
-  async function submit(sessionId: string, session: Session, message: AppendMessage, run: SessionRunner): Promise<AppendResult> {
+  // and answers it, meeting a running turn as its author chose (`AppendSubmit.mode`). As whoever is
+  // appending (a job's creator), with the session's own model, and asking through whatever frontend can
+  // reach the session.
+  async function submit(sessionId: string, session: Session, message: AppendSubmit, run: SessionRunner): Promise<AppendResult> {
     const principal = tryCurrentPrincipal();
     if (principal === undefined) throw new Error('A user message is submitted as a turn, which needs a principal to run as.');
     const provider = providerFor(session);
@@ -98,7 +105,7 @@ export function createSessionAppender(deps: {
       sessionId, traceId, principal, provider,
       signal:   new AbortController().signal,
       content:  message.content.map(c => ({ type: 'text' as const, text: c.text, origin: 'robo' as const })),
-      mode:     'parallel',
+      mode:     message.mode,
       metadata: { ...message.metadata, [ROBO_SUBMIT]: message.from !== undefined ? { from: message.from } : {} },
       ...(prompt !== undefined ? { prompt } : {}),
     });

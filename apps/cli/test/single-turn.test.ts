@@ -303,7 +303,7 @@ test('a turn may ask the calling conversation something: a user message is a rob
   const results: unknown[] = [];
   const ask = tool('ask', async function* (_i, ctx) {
     // No session named: a sub-turn's appender defaults to the conversation it was called from.
-    results.push(await ctx.appender!.append(undefined, [{ role: 'user', content: [{ type: 'text', text: 'what time is it?' }] }]));
+    results.push(await ctx.appender!.append(undefined, [{ role: 'user', content: [{ type: 'text', text: 'what time is it?' }], mode: 'parallel' }]));
     yield { type: 'result', value: 1 };
   });
   const m: M = await machine(t, (prompt, messages) => prompt === 'what time is it?' ? says('noon') : answered(messages) ? says('done') : calls(prompt), [ask]);

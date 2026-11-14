@@ -222,8 +222,9 @@ a second host's needs.
   throws: it is an `error` on the submission's `events`, with `failure: 'invalid'`.
 - <a id="robo-submit"></a>**An appended user message is a robo-submit, and runs a turn.** `SessionAppender.append` with a
   `role: 'user'` message no longer just writes it. The message is submitted to the session as a turn,
-  which answers it beside any running turn (`parallel`), as the caller (a job's creator) and on the
-  session's own model. It is persisted when its turn starts, so the result's `messageIds` is empty and
+  which meets any running turn as its `mode` says (`queue`, `parallel` or `interrupt`, required: only the
+  request's author knows whether it depends on messages appended before it), as the caller (a job's
+  creator) and on the session's own model. `AppendMessage` is a union, `AppendSaid | AppendSubmit`. It is persisted when its turn starts, so the result's `messageIds` is empty and
   `traceId` names the turn. A user message must be the only message in its append, and needs a principal
   in scope. A user message nothing answered had no use: providers fold it into whatever the person types
   next. Nothing in matbot appended one before this. A downstream caller that did now starts a turn, so
@@ -713,9 +714,11 @@ a second host's needs.
   takes `markRead: true`, which records that the returned session has been shown to its reader. It marks
   only what it returned, so a mark that waits behind a running turn never marks that turn's reply as read.
   It never moves `readAt` backwards.
-- **`sessions`** — `session_action append` takes `submit: true`, which posts `text` as a robo-submit (a
-  request the conversation answers) rather than as a message from the caller. The result carries the
-  turn's `traceId`.
+- **`sessions`** — `session_action append` takes `submit: 'queue' | 'parallel' | 'interrupt'`, which posts
+  `text` as a robo-submit (a request the conversation answers) rather than as a message from the caller,
+  meeting a running turn as named; omitted, nothing runs. `queue` is the one for a request about results
+  appended before it (turns delegated with `single_turn`, say), which a `parallel` turn cannot see. The
+  result carries the turn's `traceId`.
 - **`triggers`** — robo-submits are judged like a person's message. Every test for "a genuine user turn" is
   now `isRequest`, so `followup` resubmits are still skipped.
 - **`background-jobs-node`** — a job may append a user message, a robo-submit, over its channel. Its blocks

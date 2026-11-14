@@ -70,7 +70,7 @@ test('a person\'s message and a robo-submit are requests; a followup resubmit is
   assert.equal(isRequest(reply('d')), false);
 });
 
-test('an appended user message is submitted as a turn, in parallel, as robo, on the session\'s own model', async () => {
+test('an appended user message is submitted as a turn, in its sender\'s mode, as robo, on the session\'s own model', async () => {
   const session = { ...createSession(), messages: [user('u', 'hello'), { ...reply('a'), providerName: 'claude' } as Message] };
   const { store, docs } = casStore(session);
   const { run, opened } = recordingRun();
@@ -83,12 +83,12 @@ test('an appended user message is submitted as a turn, in parallel, as robo, on 
   });
 
   const result = await runAs(principal, () => appender.append(session.id, [
-    { role: 'user', content: [{ type: 'text', text: 'The email from virginmedia.com says there is a planned outage. What mitigation?' }], metadata: { job: { id: 'j1' } }, from: 'background job "mail"' },
+    { role: 'user', content: [{ type: 'text', text: 'The email from virginmedia.com says there is a planned outage. What mitigation?' }], metadata: { job: { id: 'j1' } }, from: 'background job "mail"', mode: 'parallel' },
   ]));
 
   assert.equal(opened.length, 1);
   const o = opened[0]!;
-  assert.equal(o.mode, 'parallel', 'never stops a turn a person is having');
+  assert.equal(o.mode, 'parallel', 'as its sender chose');
   assert.equal(o.provider, 'claude', 'the model the conversation last used');
   assert.deepEqual(o.principal, principal);
   assert.deepEqual(o.content, [{ type: 'text', text: 'The email from virginmedia.com says there is a planned outage. What mitigation?', origin: 'robo' }]);
@@ -108,9 +108,14 @@ test('a user message goes alone, and needs a principal', async () => {
   await assert.rejects(
     runAs(principal, () => appender.append(session.id, [
       { role: 'assistant', content: [{ type: 'text', text: 'found it' }] },
-      { role: 'user', content: [{ type: 'text', text: 'what now?' }] },
+      { role: 'user', content: [{ type: 'text', text: 'what now?' }], mode: 'queue' },
     ])),
     /goes alone/,
+  );
+  await assert.rejects(
+    runAs(principal, () => appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'what now?' }] } as never])),
+    /needs a mode/,
+    'only its author knows whether it depends on what was appended before it',
   );
 });
 
@@ -119,7 +124,7 @@ test('with no model the session used, the first configured answers', async () =>
   const { store } = casStore(session);
   const { run, opened } = recordingRun();
   const appender = createSessionAppender({ sessions: () => store, run: () => run, notifier: () => notifier, isSubAgent: () => false, providers: providers('first', 'second') });
-  await runAs(principal, () => appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'q' }] }]));
+  await runAs(principal, () => appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'q' }], mode: 'parallel' }]));
   assert.equal(opened[0]!.provider, 'first');
 });
 
@@ -200,22 +205,91 @@ test(`past ${UNATTENDED_ROBO_SUBMITS} in a row a person is asked whether to cont
   assert.equal(refused.docs.get(session.id)!.messages.length, session.messages.length, 'and nothing of it is written');
 });
 
-test('session_action append with submit posts a request the conversation answers', async () => {
+test('session_action append with submit posts a request in the mode it names; without, a message and no turn', async () => {
   const session = createSession();
-  const { store } = casStore(session);
+  const { store, docs } = casStore(session);
   const { run, opened } = recordingRun();
-  const appender = createSessionAppender({ sessions: () => store, run: () => run, notifier: () => notifier, isSubAgent: () => false, providers: providers('fake') });
-  const [tool] = makeSessionTools(store, { run: () => run, appender: () => appender });
-  const ctx = { callId: 'c', signal: new AbortController().signal, session: { id: 'other', messages: [] } } as unknown as ToolContext;
-  const result = await runAs(principal, async () => {
-    for await (const ev of (tool as Tool).executor.execute({ action: 'append', sessionId: session.id, text: 'what now?', submit: true }, ctx)) {
+  const runWrites = { ...run, write: (_id: string, attempt: () => Promise<boolean>) => ({ deferred: false, done: attempt().then(() => {}) }) } as unknown as SessionRunner;
+  const appender = createSessionAppender({ sessions: () => store, run: () => runWrites, notifier: () => notifier, isSubAgent: () => false, providers: providers('fake') });
+  const [tool] = makeSessionTools(store, { run: () => runWrites, appender: () => appender });
+  const ctx = { callId: 'c', signal: new AbortController().signal, session: { id: session.id, messages: [] } } as unknown as ToolContext;
+  const call = (params: Record<string, unknown>) => runAs(principal, async () => {
+    for await (const ev of (tool as Tool).executor.execute({ action: 'append', sessionId: session.id, text: 'what now?', ...params } as never, ctx)) {
       if (ev.type === 'result') return ev.value as { traceId?: string };
       if (ev.type === 'error') throw new Error(ev.message);
     }
     throw new Error('no result');
   });
-  assert.equal(opened.length, 1);
-  assert.equal(result.traceId, opened[0]!.traceId);
+
+  for (const mode of ['queue', 'parallel', 'interrupt'] as const) {
+    const result = await call({ submit: mode });
+    assert.equal(opened.at(-1)!.mode, mode);
+    assert.equal(result.traceId, opened.at(-1)!.traceId);
+  }
+  assert.equal(docs.get(session.id)!.messages.length, 0, 'a request is persisted by its turn');
+
+  await call({});
+  assert.equal(opened.length, 3, 'no turn');
+  assert.deepEqual(docs.get(session.id)!.messages.map(m => m.role), ['assistant']);
+
+  await assert.rejects(call({ submit: true }), /"submit" is one of "queue", "parallel", "interrupt"/);
+  assert.equal(opened.length, 3);
+});
+
+test('a queued robo-submit is answered after the turn it waited for, on a session holding the appends made meanwhile', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const { store, docs } = casStore(session);
+  let entered: () => void = () => {};
+  const enteredP = new Promise<void>(r => { entered = r; });
+  let release: () => void = () => {};
+  const releaseP = new Promise<void>(r => { release = r; });
+  const sent: Message[][] = [];
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(messages): AsyncIterable<CompletionEvent> {
+      sent.push([...messages]);
+      const held = messages.findLast(m => m.role === 'user')?.content.some(c => c.type === 'text' && c.text === 'manager');
+      return (async function* () {
+        if (held) { entered(); await releaseP; }
+        yield { type: 'text-delta', delta: held ? 'delegated' : 'calendar' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter, config }),
+    loadPlugin:      async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin:    async () => false,
+  });
+  const manager = await runAs(principal, () => runner.open({
+    sessionId: session.id, signal: new AbortController().signal, provider: 'fake', principal,
+    content: [{ type: 'text', text: 'manager' }],
+  }));
+  void (async () => { for await (const ev of manager.events) if (ev.type === 'idle') break; })();
+  await enteredP;
+
+  const appender = createSessionAppender({
+    sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false, providers: providers('fake'),
+  });
+  const said = (text: string) => ({ role: 'assistant' as const, content: [{ type: 'text' as const, text }] });
+  await runAs(principal, async () => {
+    assert.equal((await appender.append(session.id, [said('grapes: winter')])).deferred, true);
+    await appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'calendar, please' }], mode: 'queue' }]);
+    await appender.append(session.id, [said('roses: spring')]);
+  });
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(sent.length, 1, 'nothing is answered while the turn it waits for runs');
+  release();
+  for (let i = 0; i < 200 && !docs.get(session.id)!.messages.some(m => m.content.some(c => c.type === 'text' && c.text === 'calendar')); i++) {
+    await new Promise(r => setTimeout(r, 10));
+  }
+
+  // The last block: on the wire a robo-submit opens with a note saying who sent it.
+  const texts = (ms: readonly Message[]) => ms.map(m => { const c = m.content.at(-1); return c?.type === 'text' ? c.text : ''; });
+  assert.deepEqual(texts(sent[1]!).slice(-3), ['grapes: winter', 'roses: spring', 'calendar, please'], 'it saw every append, even one made after it was asked');
+  assert.deepEqual(texts(docs.get(session.id)!.messages), ['manager', 'delegated', 'grapes: winter', 'roses: spring', 'calendar, please', 'calendar']);
 });
 
 test('a robo-submit arriving during a person\'s turn runs beside it, and keeps its mark through the merge', { timeout: 15000 }, async () => {
@@ -253,7 +327,7 @@ test('a robo-submit arriving during a person\'s turn runs beside it, and keeps i
   const appender = createSessionAppender({
     sessions: () => store, run: () => runner, notifier: () => notifier, isSubAgent: () => false, providers: providers('fake'),
   });
-  await runAs(principal, () => appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'job asks' }] }]));
+  await runAs(principal, () => appender.append(session.id, [{ role: 'user', content: [{ type: 'text', text: 'job asks' }], mode: 'parallel' }]));
   // The job's turn is answered while the person's is still held.
   for (let i = 0; i < 100 && !docs.get(session.id)!.messages.some(isRoboSubmit); i++) await new Promise(r => setTimeout(r, 10));
   release();
