@@ -124,8 +124,8 @@ export type DreamRunOutcome = 'no-facts' | 'no-match' | 'merged' | 'error';
 
 /** Per-call telemetry: which interface was invoked, how big the input was, how long it took. */
 export interface JudgementCallStat {
-  role:        'rank' | 'merge';
-  inputSize:   number;   // facts × skills for rank; 1 for merge
+  role:        'rank' | 'merge' | 'cluster' | 'write';
+  inputSize:   number;   // facts × skills for rank; facts for merge, cluster and write
   ms:          number;
 }
 
@@ -160,6 +160,25 @@ export interface DreamRun {
   /** How many facts were retired this pass as already stated ({@link DREAM_SKILL_KNOWN}). Absent from runs
    *  recorded before that existed. */
   known?:              number;
+  /** Facts returned to the backlog this pass because the skill they were filed in no longer exists. */
+  orphaned?:           number;
+  /** Backlogged facts given one more ranking this pass because a skill was added since the last. */
+  released?:           number;
+  /** What the clustering step did, when it ran this pass (see `settings.clusterAfterBacklogGrowth`). */
+  clustering?: {
+    /** Backlogged facts offered to the clusterer. */
+    backlog:     number;
+    /** Candidate skills created, each from a group of backlogged facts. */
+    candidates:  string[];
+    /** Existing skills a group was merged into, in one call each. */
+    mergedInto:  string[];
+    /** Backlogged facts filed into a candidate or an existing skill. */
+    filed:       number;
+    /** New groups the writer declined to make a skill of, none of their facts being skill material. Their
+     *  facts stay in the backlog. */
+    declined?:   string[];
+    errors?:     string[];
+  };
   /** How many facts were retired this pass as restatements of one already decided, or of one decided in this
    *  pass ({@link DREAM_SKILL_DUPLICATE}). Absent from runs recorded before duplicates were retired. */
   duplicates?:         number;
@@ -215,6 +234,10 @@ export interface RememberedFact {
    *  a fact no skill fits (a low score everywhere) from one a skill already says in other words (a score
    *  just under the strong threshold against a skill that covers it), without ranking it again. */
   lastVerdict?:  { skill: string; score: number; reasoning: string };
+  /** The skill this fact was filed in when a pass found that skill gone (deleted, or a candidate rejected)
+   *  and returned the fact to the backlog. Clustering is told these names so as not to propose a rejected
+   *  candidate again. */
+  orphanedFrom?: string;
 }
 
 /** Sentinel `dreamSkill` value for facts the pipeline triaged and durably declined to route — the
@@ -285,6 +308,12 @@ export interface DreamSettings {
   /** How many weak verdicts a fact gets before it moves to the backlog ({@link DREAM_SKILL_BACKLOG})
    *  instead of being deferred again (default 4: about six days at the default deferral). */
   weakVerdictsBeforeBacklog: number;
+  /** How many facts the backlog must have gained since the last clustering before a pass clusters it
+   *  again (default 30). The first clustering runs once the backlog first holds this many. */
+  clusterAfterBacklogGrowth: number;
+  /** The fewest backlogged facts a group needs to become a candidate skill (default 8). A group whose
+   *  home is an existing skill is merged into it whatever its size. */
+  minClusterSize: number;
 }
 
 export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
@@ -296,6 +325,8 @@ export const DEFAULT_DREAM_SETTINGS: DreamSettings = {
   maxMergesPerPass:      20,
   maxEnrichmentsPerPass: 10,
   weakVerdictsBeforeBacklog: 4,
+  clusterAfterBacklogGrowth: 30,
+  minClusterSize: 8,
 };
 
 /** Storage key for the persisted (partial) {@link DreamSettings} override. Shared by `runOnce`'s
@@ -332,5 +363,11 @@ export function validateDreamSettings(s: DreamSettings): void {
   }
   if (!Number.isInteger(s.weakVerdictsBeforeBacklog) || s.weakVerdictsBeforeBacklog < 1) {
     throw new Error(`weakVerdictsBeforeBacklog (${s.weakVerdictsBeforeBacklog}) must be an integer >= 1.`);
+  }
+  if (!Number.isInteger(s.clusterAfterBacklogGrowth) || s.clusterAfterBacklogGrowth < 1) {
+    throw new Error(`clusterAfterBacklogGrowth (${s.clusterAfterBacklogGrowth}) must be an integer >= 1.`);
+  }
+  if (!Number.isInteger(s.minClusterSize) || s.minClusterSize < 2) {
+    throw new Error(`minClusterSize (${s.minClusterSize}) must be an integer >= 2.`);
   }
 }

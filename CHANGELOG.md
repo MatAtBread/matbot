@@ -684,6 +684,41 @@ a second host's needs.
   nothing once it lapses. A pass that finds the lease held is skipped (`unavailable`), not queued. The
   in-process mutex it replaces let a scheduled pass, in a job's own process, run beside one started in the
   server: one merged a fact while the other ranked and retired it.
+- **`skills`** — a skill can be a `candidate`: proposed by a process (dream-time's clustering) and awaiting
+  adoption. It is withheld from the model as a hidden skill is (out of the knowledge index and the catalogue),
+  but unlike one it is analysed, since dream-time ranks facts against its metadata. `save` takes
+  `{ candidate: true }` for a skill it creates; `setCandidate` and `skill_action adopt` clear it; `list` and
+  `metadata` report it.
+- **`frontend-web`** — the skills panel lists candidates in a band of their own, between visible and hidden
+  skills, with an Adopt button; deleting one says its facts go back to dream-time's backlog.
+- **`cognition`** — dream-time clusters its backlog. Once the backlog has grown by `clusterAfterBacklogGrowth`
+  (default 30) since the last clustering, one call groups it by topic: a group that belongs in an existing skill
+  is merged into it in one call, and a new group of at least `minClusterSize` facts (default 8) is written up
+  as a candidate skill. Their facts are filed in that skill. A fact filed in a skill that no longer exists (a
+  candidate rejected by deleting it, or any deleted skill) returns to the backlog with `orphanedFrom`, and the
+  clusterer is told those names so as not to propose them again. When the ranker's roster gains a skill, every
+  backlogged fact gets one more ranking. The `Merger` interface takes several facts; `Clusterer` and
+  `SkillWriter` are new, with LLM implementations on the merger's provider. `DreamRun` records `orphaned`,
+  `released` and `clustering`.
+- **`cognition`** — dream-time's prompts share one definition of a skill, stated by how a skill is reached:
+  information on one subject a user's message could name, or a procedure, and kept specific, because a skill
+  found is read whole into a conversation and cannot be taken out. Not skill material: what the software can
+  report about itself (its tools, settings, providers, versions, bugs — even when the user develops it),
+  status, tasks and plans, history. The ranker scores such a fact low everywhere, so it is retired one fact at
+  a time (`__none__`); the merger treats it as a poor fit. The clusterer must give each new group a message a
+  user might send that would call for it (`FactGroup.asked`), or the group is not made a skill, and the writer
+  declines a group with no skill material in it (`SkillWriter.write` returns `undefined`,
+  `clustering.declined`), leaving its facts in the backlog. Clustering retires nothing: one call judging
+  hundreds of facts discarded sound ones in blocks. `remember_fact` no longer captures facts about the
+  assistant's own software, plans and work in progress, readings at a moment, or dated history.
+- **`cognition`** — from an assistant message, `remember_fact` extracts only the facts it commits to or the
+  corrections it owns. A followup condition (the assistant owning a mistake) fires on the message, and the
+  extractor then took every figure in the analysis around it: one reply yielded 15 readings. An element
+  written as `{ "fact": … }` instead of a string is kept rather than silently dropped.
+- **`cognition`** — the merger removes a `(!) Note:` contradiction marker when a new fact settles it (a
+  correction, typically). Nothing else removes one: which version is true is the user's or the system's to
+  say, not a model's reading the two.
+- **`skills`** — `skill_action`'s description says what a skill is and how one is reached.
 - **`cognition`** — `dream_time` runs with no calling turn (`POST /tools/dream_time`) when both
   `dreamRankerProvider` and `dreamMergerProvider` are pinned. A skill with no metadata yet is left out of a
   pass, with a warning, instead of failing it: a pass failed from a skill's creation until its detached

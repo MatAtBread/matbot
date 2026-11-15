@@ -1166,16 +1166,18 @@ function renderSkills(skills) {
   if (!el) return;
   el.innerHTML = '';
 
-  // Visible skills first, hidden (withheld from the model) beneath; alphabetical within each band.
+  // Visible skills first, then candidates (proposed by dream-time, awaiting adoption), then hidden ones
+  // (withheld from the model); alphabetical within each band.
+  const band = (s) => (s.hidden ? 2 : s.candidate ? 1 : 0);
   skills = [...skills].sort((a, b) => {
-    const ah = a.hidden ? 1 : 0, bh = b.hidden ? 1 : 0;
-    if (ah !== bh) return ah - bh;
+    if (band(a) !== band(b)) return band(a) - band(b);
     return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
   });
 
   for (const s of skills) {
     const row = document.createElement('div');
-    row.className = s.hidden ? 'skill-entry skill-entry-hidden' : 'skill-entry';
+    row.className = 'skill-entry' + (s.hidden ? ' skill-entry-hidden' : '') + (s.candidate ? ' skill-entry-candidate' : '');
+    if (s.candidate) row.title = 'Candidate skill, proposed by dream-time: withheld from the model until adopted';
     row.onclick = () => openSkillEditor(s.name);
 
     // Skill names are short phrases, not long unbreakable identifiers — place them
@@ -1187,6 +1189,24 @@ function renderSkills(skills) {
 
     const actions = document.createElement('div');
     actions.className = 'plugin-actions';
+
+    if (s.candidate) {
+      const adoptBtn = document.createElement('button');
+      adoptBtn.className = 'plugin-action-btn';
+      adoptBtn.textContent = '✓';
+      adoptBtn.title = 'Adopt this candidate (make it an ordinary skill the model can use)';
+      adoptBtn.onclick = async (e) => {
+        e.stopPropagation();
+        try {
+          await callTool('skill_action', { action: 'adopt', name: s.name });
+        } catch (err) {
+          alert('Failed to adopt skill: ' + (err?.message ?? err));
+          return;
+        }
+        loadSkills();
+      };
+      actions.appendChild(adoptBtn);
+    }
 
     const hideBtn = document.createElement('button');
     hideBtn.className = 'plugin-action-btn';
@@ -1217,7 +1237,9 @@ function renderSkills(skills) {
     removeBtn.title = 'Delete skill';
     removeBtn.onclick = async (e) => {
       e.stopPropagation();
-      if (!confirm(`Delete skill "${s.name}"?`)) return;
+      if (!confirm(s.candidate
+        ? `Reject candidate "${s.name}"? It is deleted, and its facts go back to dream-time's backlog.`
+        : `Delete skill "${s.name}"?`)) return;
       try {
         await callTool('skill_action', { action: 'delete', name: s.name });
       } catch (err) {

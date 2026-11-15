@@ -34,6 +34,7 @@ import type { MatbotMachine, Tool, ToolExecutor, ToolContract, NoParams, ToolRes
 import { runOnce } from './runOnce.js';
 import { createLlmRanker } from './llmRanker.js';
 import { createLlmMerger } from './llmMerger.js';
+import { createLlmClusterer, createLlmSkillWriter } from './llmClusterer.js';
 import type { DreamRun } from './types.js';
 import { acquireLease, type DreamLease } from './lease.js';
 import { DREAM_RANKER_PROVIDER_KEY, DREAM_MERGER_PROVIDER_KEY } from '../inner-voice/tool.js';
@@ -90,7 +91,9 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
         // Drain the pipeline generator, streaming its progress out as tool progress events so a long
         // pass (a backlog of merges is many sequential LLM calls) isn't a silent wait. The generator's
         // RETURN value (step.value once done) is the fully-assembled DreamRun.
-        const gen = runOnce(services, ranker, merger, AbortSignal.any([ctx.signal, lease.lost]));
+        // Clustering and writing candidates are prose work of the merger's kind, on its provider.
+        const grouping = { clusterer: createLlmClusterer(services, mergerProvider), writer: createLlmSkillWriter(services, mergerProvider) };
+        const gen = runOnce(services, ranker, merger, AbortSignal.any([ctx.signal, lease.lost]), grouping);
         let step = await gen.next();
         while (!step.done) {
           yield { type: 'progress', pct: step.value.pct, message: step.value.message };
@@ -140,7 +143,14 @@ export function createDreamTimeTool(services: MatbotMachine): Tool<ToolResultOf<
       '`weakVerdictsBeforeBacklog` weak verdicts (default 4) a fact moves to the backlog (`__backlog__`) ' +
       'and is not re-ranked, awaiting clustering into new skills — unless every address, number and ' +
       'quoted identifier in it already appears in that skill, when it is retired as already known (`__known__`). ' +
-      'One pass runs at a time, across processes: a call made while another pass is running is skipped. A merge that ' +
+      'One pass runs at a time, across processes: a call made while another pass is running is skipped. ' +
+      'Once the backlog has grown by `clusterAfterBacklogGrowth` (default 30) since the last clustering, the pass ' +
+      'groups it by subject: a group belonging to an existing skill is merged into it, and a new group of at least ' +
+      '`minClusterSize` facts (default 8) that a user\'s message could name is written up as a CANDIDATE skill — withheld from the model until a ' +
+      'person adopts it (skill_action adopt), and deleted to reject it, which returns its facts to the backlog. ' +
+      'A group none of whose facts is skill material (the software\'s own configuration, status, tasks, ' +
+      'history) is declined, and its facts stay in the backlog. ' +
+      'When a skill is added, every backlogged fact gets one more ranking. A merge that ' +
       'fails outright (unparseable response, truncation) quarantines the culprit fact so it stops ' +
       'blocking the queue (needs a config fix, e.g. a provider swap, not an automatic retry) and ' +
       'the pass carries on with the other skills. A fact that restates one already merged or retired ' +

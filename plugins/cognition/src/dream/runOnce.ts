@@ -28,8 +28,9 @@
  * `./service.ts` when added, or the tool executor when added — not here.
  */
 
-import type { MatbotMachine, Message, MessageContent, Store } from '@matatbread/matbot-plugin-api';
-import type { Ranker, Merger } from './ranker.js';
+import type { MatbotMachine, Message, MessageContent, Store, Filter } from '@matatbread/matbot-plugin-api';
+import type { SkillManager } from '@matatbread/matbot-skills';
+import type { Ranker, Merger, Clusterer, SkillWriter, FactGroup } from './ranker.js';
 import {
   type DreamRun,
   type DreamRunOutcome,
@@ -140,18 +141,28 @@ export function factKey(text: string): string {
  * text once, for whatever clusters it. A quarantined fact ({@link DREAM_SKILL_ERROR}) decided nothing about its text — its merge
  * failed — so a later copy of it is ranked rather than retired.
  */
-async function fetchDecidedKeys(store: Store<RememberedFact>): Promise<Set<string>> {
+function decidedKeys(filed: readonly RememberedFact[]): Set<string> {
   const keys = new Set<string>();
-  let cursor: string | undefined;
-  do {
-    const page = await store.query(
-      cursor !== undefined ? { cursor } : { where: { op: 'exists', field: 'dreamSkill', value: true } },
-    );
-    for (const f of page.items) if (f.dreamSkill !== DREAM_SKILL_ERROR) keys.add(factKey(f.fact));
-    cursor = page.cursor;
-  } while (cursor !== undefined);
+  for (const f of filed) if (f.dreamSkill !== undefined && f.dreamSkill !== DREAM_SKILL_ERROR) keys.add(factKey(f.fact));
   return keys;
 }
+
+/** Every fact matching `where`, paged through to the end, oldest first. */
+async function fetchAll(store: Store<RememberedFact>, where: Filter): Promise<RememberedFact[]> {
+  const out: RememberedFact[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await store.query(cursor !== undefined ? { cursor }
+      : { where, sort: [{ field: 'createdAt', dir: 'asc' }, { field: 'id', dir: 'asc' }] });
+    out.push(...page.items);
+    cursor = page.cursor;
+  } while (cursor !== undefined);
+  return out;
+}
+
+const SENTINELS: ReadonlySet<string> = new Set([
+  DREAM_SKILL_NONE, DREAM_SKILL_ERROR, DREAM_SKILL_DUPLICATE, DREAM_SKILL_BACKLOG, DREAM_SKILL_KNOWN,
+]);
 
 /**
  * The parts of a fact a paraphrase does not change, and that do not recur in a skill by coincidence:
@@ -284,7 +295,7 @@ function indexScoresByFact(scores: readonly Score[]): Map<string, Score[]> {
  * of the fresh read, so a retry recomputes it. Returns the patch that landed, `undefined` when the fact
  * was deleted underneath us.
  */
-type FactPatch = Partial<Pick<RememberedFact, 'dreamSkill' | 'ignoreUntil' | 'weakVerdicts' | 'lastVerdict'>>;
+type FactPatch = Partial<Pick<RememberedFact, 'dreamSkill' | 'ignoreUntil' | 'weakVerdicts' | 'lastVerdict' | 'orphanedFrom'>>;
 async function patchFact(
   store:  Store<RememberedFact>,
   factId: string,
@@ -372,24 +383,73 @@ export interface DreamProgress { pct: number; message: string }
 const PROGRESS_RANK_FRONT = 10;
 const PROGRESS_TAIL       = 5;
 
+/** What {@link runOnce} prepares once and the stages of a pass share. */
+interface PassContext {
+  services:   MatbotMachine;
+  settings:   DreamSettings;
+  manager:    SkillManager;
+  facts:      Store<RememberedFact>;
+  candidates: SkillCandidate[];
+  /** Every fact with a `dreamSkill`, read once at the start of the pass. */
+  filed:      RememberedFact[];
+  calls:      JudgementCallStat[];
+  startedAt:  string;
+  runId:      string;
+}
+
 export async function* runOnce(
   services: MatbotMachine,
   ranker:   Ranker,
   merger:   Merger,
   signal:   AbortSignal,
+  grouping?: { clusterer: Clusterer; writer: SkillWriter },
 ): AsyncGenerator<DreamProgress, DreamRun, void> {
-  const startedAt = new Date().toISOString();
-  const runId     = cryptoRandomId();
-  const calls: JudgementCallStat[] = [];
-
   // Setup-shaped failures throw; everything past here is caught into the run record.
   const settings = await loadSettings(services);
   const manager  = services.SkillManager;
   if (manager === undefined) {
     throw new Error('dream-time requires a SkillManager service; none is registered.');
   }
-  const facts      = services.createStore<RememberedFact>('remembered_facts');
-  const candidates = await buildCandidates(services, settings.blocklist);
+  const facts = services.createStore<RememberedFact>('remembered_facts');
+  const ctx: PassContext = {
+    services, settings, manager, facts,
+    candidates: await buildCandidates(services, settings.blocklist),
+    filed:      await fetchAll(facts, { op: 'exists', field: 'dreamSkill', value: true }),
+    calls:      [],
+    startedAt:  new Date().toISOString(),
+    runId:      cryptoRandomId(),
+  };
+
+  // Before ranking, so a fact returned to the backlog or released from it is ranked in this very pass.
+  const tended: string[] = [];
+  let tending = { orphaned: 0, released: 0 };
+  try { tending = await tendBacklog(ctx); }
+  catch (e) { tended.push(`tending the backlog failed: ${(e as Error).message ?? String(e)}`); }
+
+  const run = yield* rankAndMerge(ctx, ranker, merger, signal);
+
+  let clustering: DreamRun['clustering'];
+  if (grouping !== undefined && run.outcome !== 'error') {
+    clustering = yield* clusterBacklog(ctx, grouping, merger, signal);
+  }
+  const errors = [...tended, ...(run.errors ?? [])];
+  return {
+    ...run,
+    endedAt: new Date().toISOString(),
+    ...(tending.orphaned > 0 ? { orphaned: tending.orphaned } : {}),
+    ...(tending.released > 0 ? { released: tending.released } : {}),
+    ...(clustering !== undefined ? { clustering } : {}),
+    ...(errors.length > 0 ? { errors } : {}),
+  };
+}
+
+async function* rankAndMerge(
+  ctx:    PassContext,
+  ranker: Ranker,
+  merger: Merger,
+  signal: AbortSignal,
+): AsyncGenerator<DreamProgress, DreamRun, void> {
+  const { services, settings, manager, facts, candidates, calls, startedAt, runId } = ctx;
 
   // Helpers that finalise a run record. All exits go through one of these.
   const finish = (
@@ -423,7 +483,7 @@ export async function* runOnce(
     //    duplicate of it, and of several eligible facts sharing one text only the oldest (the
     //    representative) is ranked — the rest follow its disposition below. `eligible` is oldest-first, so
     //    the representative is the oldest copy. ──
-    const decidedKeys = await fetchDecidedKeys(facts);
+    const decided = decidedKeys(ctx.filed);
     const unassigned: RememberedFact[] = [];
     const followers = new Map<string, RememberedFact[]>();
     const byKey     = new Map<string, RememberedFact>();
@@ -433,7 +493,7 @@ export async function* runOnce(
     };
     for (const f of eligible) {
       const key = factKey(f.fact);
-      if (decidedKeys.has(key)) { await retireDuplicate(f); continue; }
+      if (decided.has(key)) { await retireDuplicate(f); continue; }
       const rep = byKey.get(key);
       if (rep === undefined) { byKey.set(key, f); unassigned.push(f); continue; }
       const behind = followers.get(rep.id);
@@ -604,7 +664,7 @@ export async function* runOnce(
         yield { pct: bar(), message: `Merging into "${skill}"…` };
         const mergeStart = Date.now();
         try {
-          const result: MergeResult = await merger.merge(skill, content, f, signal);
+          const result: MergeResult = await merger.merge(skill, content, [f], signal);
           calls.push({ role: 'merge', inputSize: 1, ms: Date.now() - mergeStart });
           content = result.content;
           for (const c of result.contradictions) allContradictions.push({ skill, location: c.location, note: c.note });
@@ -667,6 +727,162 @@ export async function* runOnce(
     // Catch-all for anything we didn't anticipate. The run is recorded; the tool surfaces it.
     return finish('error', -1, { error: (e as Error).message ?? String(e) });
   }
+}
+
+// ── The backlog ───────────────────────────────────────────────────────────────
+
+/** Settings keys for what a pass remembers between passes. Not tunables, so not in `DreamSettings`. */
+const ROSTER_KEY     = 'dream-roster';
+const CLUSTERING_KEY = 'dream-clustering';
+
+/** The most backlogged facts one clustering call is shown, oldest first: a few hundred short facts is a
+ *  few thousand tokens, and the rest wait for the next clustering. */
+const MAX_CLUSTER_INPUT = 400;
+/** At most this many candidates created, and groups merged into existing skills, by one clustering. Each
+ *  is a whole-document LLM call, and a person reviews each candidate. */
+const MAX_NEW_CANDIDATES = 3;
+const MAX_HOMED_MERGES   = 5;
+
+/** Replace a fact without its `dreamSkill` and deferral, ready to be ranked again. */
+async function releaseFact(store: Store<RememberedFact>, id: string, weakVerdicts: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const fresh = await store.get(id);
+    if (fresh === null) return false;
+    const { dreamSkill: _skill, ignoreUntil: _until, ...rest } = fresh;
+    if ((await store.cas(id, fresh.version, { ...rest, weakVerdicts })).ok) return true;
+  }
+  return false;
+}
+
+/**
+ * Before a pass ranks anything:
+ *
+ * - A fact filed in a skill that no longer exists (deleted, or a candidate rejected) goes back to the
+ *   backlog, recording the name it was filed under. Not when the skill list is empty, which says more
+ *   about the skills service than about any fact.
+ * - When the ranker's roster has gained a name since the last pass, every backlogged fact gets one more
+ *   ranking against it: released with one weak verdict to go, so a single weak answer sends it back. A
+ *   name lost frees no fact a home, so only a gain does this. The first pass to see a roster records it.
+ */
+async function tendBacklog(ctx: PassContext): Promise<{ orphaned: number; released: number }> {
+  const { services, manager, facts, candidates, settings } = ctx;
+  let orphaned = 0, released = 0;
+
+  const skills = await manager.all();
+  if (skills.length > 0) {
+    const names = new Set(skills.map(s => s.name.toLowerCase()));
+    for (const f of ctx.filed) {
+      const skill = f.dreamSkill;
+      if (skill === undefined || SENTINELS.has(skill) || names.has(skill.toLowerCase())) continue;
+      try {
+        await patchFact(facts, f.id, { dreamSkill: DREAM_SKILL_BACKLOG, orphanedFrom: skill });
+        f.dreamSkill = DREAM_SKILL_BACKLOG;
+        orphaned++;
+      } catch { /* raced edit */ }
+    }
+  }
+
+  const roster = candidates.map(c => c.name.toLowerCase()).sort();
+  const seen   = await services.settings().get<string[]>(ROSTER_KEY);
+  if (seen !== undefined && roster.some(n => !seen.includes(n))) {
+    for (const f of ctx.filed) {
+      if (f.dreamSkill !== DREAM_SKILL_BACKLOG) continue;
+      if (!(await releaseFact(facts, f.id, Math.max(0, settings.weakVerdictsBeforeBacklog - 1)))) continue;
+      delete f.dreamSkill;   // no longer decided: the dedup below must not retire it as a copy of itself
+      released++;
+    }
+  }
+  if (seen === undefined || seen.join('\n') !== roster.join('\n')) await services.settings().set(ROSTER_KEY, roster);
+  return { orphaned, released };
+}
+
+/**
+ * After a pass has ranked and merged: once the backlog has grown by `clusterAfterBacklogGrowth` since the
+ * last clustering, group it. A group whose home is an existing skill is merged into it in one call; a new
+ * group of at least `minClusterSize` facts is written up as a candidate skill. Either way its facts are filed
+ * in that skill, being in its text. The growth is measured from what the last clustering left, so a backlog
+ * that clusters into nothing is not offered again until it has grown again.
+ */
+async function* clusterBacklog(
+  ctx:      PassContext,
+  grouping: { clusterer: Clusterer; writer: SkillWriter },
+  merger:   Merger,
+  signal:   AbortSignal,
+): AsyncGenerator<DreamProgress, DreamRun['clustering'], void> {
+  const { services, settings, manager, facts, candidates, calls } = ctx;
+  const backlog = await fetchAll(facts, { op: 'eq', field: 'dreamSkill', value: DREAM_SKILL_BACKLOG });
+  const state   = await services.settings().get<{ lastBacklog: number }>(CLUSTERING_KEY);
+  if (backlog.length < settings.minClusterSize
+      || backlog.length - (state?.lastBacklog ?? 0) < settings.clusterAfterBacklogGrowth) return undefined;
+
+  yield { pct: 96, message: `Clustering ${Math.min(backlog.length, MAX_CLUSTER_INPUT)} backlogged fact(s)…` };
+  const input    = backlog.slice(0, MAX_CLUSTER_INPUT);
+  const byId     = new Map(input.map(f => [f.id, f]));
+  const rejected = [...new Set(input.flatMap(f => (f.orphanedFrom !== undefined ? [f.orphanedFrom] : [])))];
+  const created: string[] = [], mergedInto: string[] = [], declined: string[] = [], errors: string[] = [];
+  let filed = 0;
+
+  const fileUnder = async (skill: string, members: readonly RememberedFact[]): Promise<void> => {
+    for (const f of members) {
+      try { await patchFact(facts, f.id, { dreamSkill: skill }); filed++; } catch { /* raced edit; stays backlogged */ }
+    }
+  };
+
+  try {
+    const t0 = Date.now();
+    let groups: readonly FactGroup[];
+    try { groups = await grouping.clusterer.cluster(input, candidates, rejected, signal); }
+    finally { calls.push({ role: 'cluster', inputSize: input.length, ms: Date.now() - t0 }); }
+
+    const skills = new Map((await manager.all()).map(d => [d.name.toLowerCase(), d.name]));
+    const used   = new Set<string>();
+    for (const g of groups) {
+      const members = [...new Set(g.members)].filter(id => byId.has(id) && !used.has(id)).map(id => byId.get(id)!);
+      if (members.length === 0) continue;
+      // A "new" group named as an existing skill is that skill's: never a second skill of one name.
+      const home = skills.get((g.home ?? g.name).toLowerCase());
+      try {
+        if (home !== undefined) {
+          if (mergedInto.length >= MAX_HOMED_MERGES) continue;
+          const doc = await manager.get(home);
+          if (doc === undefined) continue;
+          const t1 = Date.now();
+          let result: MergeResult;
+          try { result = await merger.merge(home, doc.content, members, signal); }
+          finally { calls.push({ role: 'merge', inputSize: members.length, ms: Date.now() - t1 }); }
+          await manager.save(home, result.content);
+          await fileUnder(home, members);
+          mergedInto.push(home);
+        } else {
+          const name = g.name.slice(0, 80);
+          if (members.length < settings.minClusterSize || created.length >= MAX_NEW_CANDIDATES || name === '' || g.asked === '') continue;
+          yield { pct: 98, message: `Writing candidate skill "${name}"…` };
+          const t1 = Date.now();
+          let content: string | undefined;
+          try { content = await grouping.writer.write({ ...g, name }, members, signal); }
+          finally { calls.push({ role: 'write', inputSize: members.length, ms: Date.now() - t1 }); }
+          if (content === undefined) { declined.push(name); continue; }
+          await manager.save(name, content, undefined, { candidate: true });
+          skills.set(name.toLowerCase(), name);
+          await fileUnder(name, members);
+          created.push(name);
+        }
+        for (const f of members) used.add(f.id);
+      } catch (e) {
+        errors.push(`group "${g.name}" (${members.length} facts): ${(e as Error).message ?? String(e)}`);
+      }
+    }
+  } catch (e) {
+    errors.push(`clustering failed: ${(e as Error).message ?? String(e)}`);
+  }
+
+  // Recorded whatever happened, failure included: a clusterer that fails must not be retried every pass.
+  await services.settings().set(CLUSTERING_KEY, { lastBacklog: backlog.length - filed, at: new Date().toISOString() });
+  return {
+    backlog: input.length, candidates: created, mergedInto, filed,
+    ...(declined.length > 0 ? { declined } : {}),
+    ...(errors.length > 0 ? { errors } : {}),
+  };
 }
 
 // ── Tiny utilities ────────────────────────────────────────────────────────────

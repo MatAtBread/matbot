@@ -26,12 +26,16 @@
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Ranker } from './ranker.js';
 import type { RememberedFact, Score, SkillCandidate } from './types.js';
+import { SKILL_DEFINITION } from './skillDefinition.js';
 
 const RANKER_SYSTEM =
   'You are a ranking judge. The message you are sent is ONE remembered fact; the candidate skills are ' +
   'listed at the end of these instructions. ' +
   'For each candidate, decide how well the fact belongs in that skill — i.e. how naturally a ' +
   'reader looking up the skill would expect to find this fact recorded there.\n' +
+  SKILL_DEFINITION + '\n' +
+  'A fact that is not skill material belongs in no skill, however closely its topic matches one: score it ' +
+  'low for every candidate.\n' +
   '\n' +
   'Return ONLY a JSON object on the last line of your reply, in this shape:\n' +
   '  {\n' +

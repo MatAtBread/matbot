@@ -1,11 +1,15 @@
 /**
  * LLM-backed implementation of {@link Merger}.
  *
- * One `singleTurn` call per fact-to-merge. The model is shown the full current skill markdown and
- * the fact, and is asked to return the COMPLETE updated markdown plus a structured list of any
+ * One `singleTurn` call per merge — one fact on the ranking path, a whole group from clustering. The model
+ * is shown the full current skill markdown and the facts, and is asked to return the COMPLETE updated markdown plus a structured list of any
  * `(!) Note:` contradiction markers it inserted. The pipeline calls this once per fact in the
  * cluster (primary plus mates), threading each call's output as the next call's input — so a
  * contradiction added in fact N is visible when fact N+1 is considered.
+ *
+ * A marker is removed only by a fact that settles it — typically a correction, which is how a person
+ * resolves one. No pass resolves markers by itself: which version is true is known to the user or the
+ * system, not to a model reading the two, and recency does not decide it.
  *
  * Prose editing is the one step in dream-time that genuinely needs an LLM. No near-term
  * non-LLM implementation is on the horizon; the {@link Merger} interface exists for symmetry and
@@ -26,9 +30,12 @@
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Merger } from './ranker.js';
 import type { MergeResult, RememberedFact } from './types.js';
+import { SKILL_DEFINITION } from './skillDefinition.js';
 
 const MERGER_SYSTEM = `
-You are the merge stage of a memory-consolidation pass. You are given the FULL markdown of an existing skill and ONE remembered fact. Splice the fact into the skill while preserving everything else.
+You are the merge stage of a memory-consolidation pass. You are given the FULL markdown of an existing skill and one or more remembered facts. Splice the facts into the skill while preserving everything else. With several facts, apply every rule below to each of them, and fold facts that say the same thing into one statement.
+${SKILL_DEFINITION}
+Write each fact as durable knowledge about the skill's subject, in the terms a user would use for it. A fact that is not skill material is a POOR FIT (below), however closely its topic matches.
 
 Return ONLY a JSON object on the last line of your reply, in this shape: 
 { 
@@ -39,7 +46,7 @@ Return ONLY a JSON object on the last line of your reply, in this shape:
 
 Rules:
 
-* PRESERVE all existing material. Never drop a heading, a section, or a fact. The one exception is the deduplication rule below: folding a near-duplicate into an existing passage means rewriting that passage, which can leave the skill shorter than it started. Do not pad to make up the difference.
+* PRESERVE all existing material. Never drop a heading, a section, or a fact. The exceptions are settling a contradiction marker and the deduplication rule below: folding a near-duplicate into an existing passage means rewriting that passage, which can leave the skill shorter than it started. Do not pad to make up the difference.
 
 * FIRST, decide where the fact belongs: 
   1. GOOD FIT — the fact is about the skill's domain and fits under an existing heading. Add it as a new subsection under that heading. Add a new heading if needed, in a natural place — do not just append to the bottom unless that genuinely fits the skill's structure. 
@@ -49,7 +56,9 @@ Rules:
 
 * If the new fact is a duplicate or near-duplicate of an existing fact, do not add it again. Instead, update the existing content in place to reflect the new fact's information — replacing a vague statement with a precise one is the point, and a net-shorter skill is the correct outcome, not a loss.
 
-* If the new fact CONTRADICTS existing content, insert an inline marker at the contradiction site using this EXACT format (the literal "(!) Note:" prefix matters; a later tool scans for it):
+* If the new fact SETTLES an existing "(!) Note:" marker — it states which of the conflicting versions is true, or corrects one of them — rewrite that passage to say what is now known and remove the marker. Settling a note is the only way one is ever removed: a note the facts do not settle stays.
+
+* If the new fact CONTRADICTS existing content, insert an inline marker at the contradiction site using this EXACT format:
 
   (!) Note: The new fact says "<short summary of new>", but existing content says
   "<short summary of existing>". May need human review to reconcile.
@@ -130,14 +139,14 @@ export function createLlmMerger(services: MatbotMachine, provider: string): Merg
     async merge(
       skillName:    string,
       skillContent: string,
-      fact:         RememberedFact,
+      facts:        readonly RememberedFact[],
       signal:       AbortSignal,
     ): Promise<MergeResult> {
+      const listed = facts.map(f => `- (id ${f.id}, from session ${f.sessionId}, recorded ${f.createdAt}) ${f.fact}`).join('\n');
       const prompt =
         `Skill: ${skillName}\n` +
         `---begin current skill markdown---\n${skillContent}\n---end current skill markdown---\n\n` +
-        `Fact to merge (id ${fact.id}, from session ${fact.sessionId}, recorded ${fact.createdAt}):\n` +
-        `${fact.fact}\n\n` +
+        `${facts.length === 1 ? 'Fact' : `Facts (${facts.length})`} to merge:\n${listed}\n\n` +
         `Return the complete updated markdown.`;
 
       // Two attempts. An abort or provider error propagates from singleTurn on the first attempt
@@ -160,7 +169,7 @@ export function createLlmMerger(services: MatbotMachine, provider: string): Merg
       }
 
       throw new Error(
-        `dream-time merger failed twice on fact ${fact.id}; refusing to overwrite. ${lastFailure}`,
+        `dream-time merger failed twice on ${facts.length === 1 ? `fact ${facts[0]?.id}` : `${facts.length} facts`}; refusing to overwrite. ${lastFailure}`,
       );
     },
   };

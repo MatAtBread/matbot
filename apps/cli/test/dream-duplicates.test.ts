@@ -46,7 +46,7 @@ test('a pass retires restatements unranked, and ranks one copy of several', asyn
     },
   };
   const merged: string[] = [];
-  const merger: Merger = { async merge(_skill, content, f) { merged.push(f.id); return { content: `${content}\n${f.fact}`, contradictions: [] }; } };
+  const merger: Merger = { async merge(_skill, content, fs) { merged.push(...fs.map(f => f.id)); return { content: `${content}\n${fs.map(f => f.fact).join('\n')}`, contradictions: [] }; } };
 
   const services = {
     settings:     () => ({ get: async () => undefined }),

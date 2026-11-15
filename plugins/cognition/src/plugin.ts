@@ -73,8 +73,11 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
         duplicates?:         number;
         backlogged?:         number;
         known?:              number;
+        orphaned?:           number;
+        released?:           number;
+        clustering?:         { backlog: number; candidates: string[]; mergedInto: string[]; filed: number; declined?: string[]; errors?: string[] };
         unassignedRemaining: number;
-        judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
+        judgementCalls:      { role: 'rank'|'merge'|'cluster'|'write'; inputSize: number; ms: number }[];
         enriched?:           boolean;
         errors?:             string[];
         error?:              string;
@@ -160,7 +163,9 @@ text restates one already decided is retired as a duplicate (\`__duplicate__\`) 
 routed weakly \`weakVerdictsBeforeBacklog\` times (default 4) moves to the backlog (\`__backlog__\`), which
 passes no longer re-rank; a weak fact whose addresses, numbers and quoted identifiers all appear in that skill
 already is retired as \`__known__\`. One pass runs at a time, across processes, by a lease in the
-\`dream_lease\` store. Each pass
+\`dream_lease\` store. Once the backlog has grown enough, a pass clusters it: a group that belongs in an existing
+skill is merged into it, and a new group becomes a CANDIDATE skill, withheld from the model until adopted
+(\`skill_action adopt\`); deleting a candidate returns its facts to the backlog. Each pass
 writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be invoked via the
 \`background\` tool on a schedule, never inline.
 
@@ -191,6 +196,7 @@ it is purely a data maintenance function.
             ignoreUntil?: string;
             weakVerdicts?: number;
             lastVerdict?: { skill: string; score: number; reasoning: string };
+            orphanedFrom?: string;
           }`,
       });
 
