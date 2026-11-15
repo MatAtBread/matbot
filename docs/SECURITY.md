@@ -65,7 +65,9 @@ the ones with no human behind them, and it can be withdrawn with `gate_action`.
 | `http.secret` | The `http` tool sends a vault key to an origin |
 | `tool_function.import` | A function body imports a module |
 | `tool_function.connect` | A function body's `fetch` or `WebSocket` reaches an origin, including by redirect |
-| `tool_function.edit` | A function or package that uses `import(`, `fetch` or `WebSocket` is redefined: may the new version keep the grants? |
+| `tool_function.write-secret` | A function body stores a value in the vault under a key that does not exist yet (`context.writeSecret`) |
+| `tool_function.replace-secret` | A function body overwrites an existing vault key. Asked every time: no standing answer decides it, so with nobody to ask it is refused |
+| `tool_function.edit` | A function or package that uses `import(`, `fetch`, `WebSocket` or `writeSecret` is redefined: may the new version keep the grants? |
 | `function_runner_config.set` | The function runner's time bound is changed |
 | `telegram_open_door.open` | The Telegram door is opened to new chats |
 | `tools.overwrite` | A plugin registers a tool another plugin owns |

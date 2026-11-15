@@ -875,15 +875,20 @@ Three names are injected — use them directly, and do NOT declare them as param
 (a parameter of the same name is rejected, because it would shadow the injection):
   tool           \`await tool.<tool_name>(params)\` — any registered tool, inheriting this call's context.
   toolInContext  \`await toolInContext({ provider }).<tool_name>(params)\` — one call under an override.
-  context        \`{ callId, sessionId, provider?, workdir?, signal, progress(pct, message?) }\` — the call
-                 you are running under. \`context.sessionId\` is THIS conversation; pass \`context.signal\`
-                 to any \`fetch\` so a long run stays cancellable; \`context.progress\` draws a progress bar
-                 for the person waiting, costs you no context and is never sent back to you.
+  context        \`{ callId, sessionId, provider?, workdir?, signal, progress(pct, message?),
+                 writeSecret(name, value) }\` — the call you are running under. \`context.sessionId\` is THIS
+                 conversation; pass \`context.signal\` to any \`fetch\` so a long run stays cancellable;
+                 \`context.progress\` draws a progress bar for the person waiting, costs you no context and
+                 is never sent back to you.
 A \`tool\` call is a promise, so await each one the result depends on, a function calling itself included.
 Like any promise it runs to completion whether or not it is awaited; to stop one you no longer need (a
 \`Promise.race\` loser), give it an AbortController's signal: \`toolInContext({ signal }).<tool_name>(...)\`.
 Return a JSON-serialisable value; that becomes the result the model sees. Each tool call is echoed to
 stdout, so the run is observable.
+SECRETS. When a server ISSUES a credential (an API key in a tool result or response), store it from the body
+with \`await context.writeSecret('NAME', value)\` and return only that it was stored: the value never reaches
+you, and is used afterwards as \`{ Vault: 'NAME' }\` (an \`http\` or \`mcp_action\` header). The user is asked
+first. A value in the body's own text is refused — a key the user has goes in with \`plugin\` \`store-key\`.
 
 WHERE A BODY RUNS
 By default a body is a plain async function inside matbot's own process: nothing bounds how long it runs,

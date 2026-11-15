@@ -608,6 +608,15 @@ a second host's needs.
   with `store-key` is sent from the next one), is redacted from what the server sends back, and is never
   sent on through a redirect. `http` exports the pieces (`vaultHeaderKeys`, `gateVaultKeys`,
   `readVaultHeaders`, `redactor`, `headersSchema`), and `mcp-http` depends on it.
+- **`function-tools`** — `context.writeSecret(name, value)` stores a credential a body OBTAINED (a key a
+  server issued in a tool result or response) in the vault without the value reaching the model, for use
+  afterwards as `{ Vault: name }`. Creating a key asks `tool_function.write-secret`, which may be remembered
+  per function version; replacing one asks `tool_function.replace-secret` every time, so with nobody to ask
+  it is refused. Refused without asking: an empty value (a body cannot remove a key), control characters,
+  over 8192 characters, an unusable name, and a value written in the function's own text (a key the user
+  has goes in with `plugin store-key`). Once written, the value is redacted from everything the call yields
+  after that. A function using `writeSecret` asks `tool_function.edit` when redefined, as one using
+  `fetch` does. `ComposedCallContext` (plugin-api) gains the method.
 
 - <a id="old-migrations-removed"></a>**Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):

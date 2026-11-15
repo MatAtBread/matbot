@@ -1,6 +1,7 @@
 import { FUNCTION_TIMEOUT, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
 import { DefinitionError, stripLeadingTrivia } from './signature.js';
 import { gatedNetwork, type Asker } from './network.js';
+import { gatedSecretWriter } from './secrets.js';
 import type { MatbotMachine, ComposedCallContext, FunctionCall, FunctionRunSettings, FunctionRunner, ImportCaller, PermissionRequest, ToolContext, ToolEvent } from '@matatbread/matbot-plugin-api';
 
 /** The invocation's own part first — the gated loader and the settings read for it, which are the
@@ -366,6 +367,12 @@ export async function* runFunction(
   // refused.
   const lifetime = new AbortController();
   const signal = AbortSignal.any([ctx.signal, lifetime.signal]);
+  // `gateSubject` marks an `execute` body, whose label is prose ("tool_function execute"), not a name.
+  const asker = await askerFor(label === undefined || label.gateSubject !== undefined ? undefined
+                               : { tool: label.tool, compiled: label.compiled ?? label.source, ...(label.resolve !== undefined ? { resolve: label.resolve } : {}) });
+  // Every value the body stores is redacted from what leaves this call from then on: its events, its result
+  // and its error.
+  const secrets = gatedSecretWriter(ctx, asker, `${label?.source ?? ''}\n${label?.compiled ?? ''}`);
   const { tool, toolInContext } = makeToolBox(machine, {
     session: ctx.session,
     signal,
@@ -397,6 +404,8 @@ export async function* runFunction(
       // whoever draws the event, running the body's `toString` as theirs.
       ...(message !== undefined && message !== '' ? { message: String(message) } : {}),
     }),
+    // Host work done for the body, as its tool calls are: the arguments are primitives, checked inside.
+    writeSecret: (name, value) => runner?.hostCall !== undefined ? runner.hostCall(() => secrets.write(name, value)) : secrets.write(name, value),
     ...(ctx.provider !== undefined ? { provider: ctx.provider } : {}),
     ...(ctx.workdir  !== undefined ? { workdir:  ctx.workdir  } : {}),
   };
@@ -407,9 +416,6 @@ export async function* runFunction(
   // by principal or not at all — and the next invocation may be someone else's. Read ahead of the abort
   // check and the listener, so an abort during the read still stops the body starting, and a read that
   // throws has no listener to leave behind.
-  // `gateSubject` marks an `execute` body, whose label is prose ("tool_function execute"), not a name.
-  const asker = await askerFor(label === undefined || label.gateSubject !== undefined ? undefined
-                               : { tool: label.tool, compiled: label.compiled ?? label.source, ...(label.resolve !== undefined ? { resolve: label.resolve } : {}) });
   let settings: FunctionRunSettings | undefined;
   try { settings = await machine.FunctionRunner?.settings?.(); }
   catch (e) { yield { type: 'error', message: `could not read the function runner's settings (${msg(e)})` }; return; }
@@ -433,7 +439,7 @@ export async function* runFunction(
 
   try {
     for (;;) {
-      while (queue.length > 0) { const ev = queue.shift(); if (ev !== undefined) yield ev; }
+      while (queue.length > 0) { const ev = queue.shift(); if (ev !== undefined) yield secrets.redact(ev); }
       if (done || cancelled) break;
       await new Promise<void>(r => { wake = r; });
     }
@@ -451,7 +457,7 @@ export async function* runFunction(
       const first = (label?.source.trim().split('\n')[0] ?? '').slice(0, 160);
       console.warn(`[function-tools] stopped ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}): ${msg(error)}${first !== '' ? ` Definition: \`${first}\`` : ''}`);
     }
-    yield { type: 'error', message: msg(error) };
+    yield { type: 'error', message: secrets.redact(msg(error)) };
     return;
   }
   // `undefined` is "no result", not "a result that is undefined": a composition that returns nothing
@@ -459,5 +465,5 @@ export async function* runFunction(
   // difference between a silent verdict and a noisy one — the triggers dispatcher fires only on a
   // yielded result, so a composition used as a trigger's `invoke` could not stay silent while it always
   // yielded. Downstream already expects result-less tools (the Anthropic converter names one).
-  if (result !== undefined) yield { type: 'result', value: result };
+  if (result !== undefined) yield { type: 'result', value: secrets.redact(result) };
 }

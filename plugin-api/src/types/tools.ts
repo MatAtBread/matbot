@@ -301,8 +301,11 @@ export interface ToolContext {
  * `files`, `prompt` and plugin (un)loading stay off a surface authored by a model and reachable only
  * through the tool contracts. A tool with real source takes `ToolContext` and needs none of this.
  *
- * `progress` is the one method here and does not breach that, because the reason capabilities are kept
- * off this surface is authority: it carries none — write-only, reading nothing and reaching nothing.
+ * `progress` does not breach that, because the reason capabilities are kept off this surface is authority:
+ * it carries none — write-only, reading nothing and reaching nothing. `writeSecret` is the one capability
+ * here, and is here because a body is the only place it can be safe: it stores a value the body OBTAINED
+ * without the value passing through the model, which a tool taking it as a parameter cannot do. It is
+ * write-only (nothing on this surface reads the vault) and gated per function version.
  *
  * Not `ToolCallContext` — that name belongs to the `toolcall` hook's context; this is the composed
  * caller's own view, not a hook's view of a call about to run.
@@ -321,6 +324,15 @@ export interface ComposedCallContext {
    * its own nested `tool.x(…)` calls already stream on unreachable from the one place a long run happens.
    */
   readonly progress:  (pct: number, message?: string) => void;
+  /**
+   * Store `value` in the vault as `name`, for a credential the body obtained — a key a server issued — so it
+   * can be used as `{ Vault: name }` (an `http` or `mcp_action` header) without ever reaching the model.
+   * The user is asked first (`tool_function.write-secret`); replacing a key that exists is asked every time
+   * (`tool_function.replace-secret`). Refused: an empty value (a body cannot remove a key), and one written
+   * in the function's own text, which is already in the conversation. Once stored, the value is redacted
+   * from everything this call returns or reports.
+   */
+  readonly writeSecret: (name: string, value: string) => Promise<void>;
 }
 
 /**

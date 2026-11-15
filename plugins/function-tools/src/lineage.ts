@@ -18,7 +18,7 @@ import { TOOL_NAME, versionedSubject } from './compile.js';
 // from the compiled text at the call, never read back from anywhere.
 
 /** Something a body can use to reach past itself, and so something a grant may have been given for. */
-const CAPABILITY = /\bimport\s*\(|\bfetch\b|\bWebSocket\b/;
+const CAPABILITY = /\bimport\s*\(|\bfetch\b|\bWebSocket\b|\bwriteSecret\b/;
 
 const linksKey = (name: string): string => `lineage:${name}`;
 

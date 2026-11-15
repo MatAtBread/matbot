@@ -1254,12 +1254,12 @@ name it inherited what the reviewed version had been granted; keyed on the diges
 development asked for its imports and connections again at every edit. So the two questions are separate:
 the GRANTS are general (they hold wherever the function runs, a background job included), and whether an
 edit KEEPS them is its own gate, `tool_function.edit`, asked at a redefinition of a function that uses
-`import(`, `fetch` or `WebSocket`, with "always, for edits to this function in this session" among the
+`import(`, `fetch`, `WebSocket` or `writeSecret`, with "always, for edits to this function in this session" among the
 answers. A permitted edit links the new digest to the lineage in function-tools' SETTINGS — never on the
 stored definition, which a `docker-bash` script can write while settings are read-only there — so text
 written any other way is a lineage of its own. The "any function" standing answer is unversioned. `#execute` is unversioned too, having no identity,
 and its label already says a standing answer covers every one-off body. The same subject keys a body's
-network gate (`tool_function.connect`).
+network gate (`tool_function.connect`) and its secret gates (below).
 
 **Types follow the reachable set, via `paths`** — one entry per module, never `types: ['node']`: every
 builtin less those the gate refuses, so a body can be graded on what it may legitimately ask for. Each
@@ -1281,6 +1281,34 @@ package.json to install into and the environment is the runner's, so the finding
 repair is rewritten. No second list of names does it — the trigger is tsc's own code, so it cannot drift
 out of step with what the runner withholds. Only a literal specifier can be checked; a computed one is the gate's at the call,
 which is where it was always going to be decided.
+
+### Secrets a body obtains (`context.writeSecret`)
+
+A server may ISSUE a credential — an API key in a tool result, a registration response — and the place to
+store it is the body that received it: the model writes the code, the body holds the value, and only what the
+body returns enters the transcript. So it is a method on `context`, the one capability there, and not a tool:
+a tool's params are the model's own output (and echoed in a body's call trace), and a tool cannot tell a
+body's call from the model's, so a `vault_store` tool would be the model's way to store whatever it had read.
+`function-tools` implements it over the call's `ctx.vault`; nothing on `context` reads the vault.
+
+- **Two gates, by what the write does.** `tool_function.write-secret` creates a key and may be remembered
+  (`<function>@<version> <KEY>`, or `* <KEY>` for any function). `tool_function.replace-secret` overwrites one
+  and is asked every time (`lifetimes: []`), because a replaced key is a swapped credential or, a provider's
+  `endpoint` being read from the vault too, every request sent somewhere else. With nobody to ask, a create
+  can proceed on a standing answer and a replace cannot.
+- **`writeSecret`, never `createSecret`**: `createSecret` returns the name an equal value is already stored
+  under, which handed to a body is an oracle for guessing stored secrets.
+- **Refused before asking**: an empty value (which `writeSecret` treats as removal; a body cannot remove a
+  key), control characters, over 8192 characters, a name the vault cannot store or `${}` cannot reference,
+  and a value appearing in the function's own text — already in the conversation, and the commonest misuse,
+  storing a key the user pasted; that is `plugin store-key`. A value already in the session's history is
+  still asked about, the prompt saying it is exposed. The prompt never shows the value, only its length.
+- **Redacted once written**: everything this call yields from then on — events (a callee's markers included,
+  so a `session_data` write of it persists `[REDACTED]`), the result, an error — deeply through arrays and
+  plain objects. Not before: the live stdout trace of the call that RECEIVED the key (`← tool: …`) has
+  already gone out by then — live-only, never persisted or sent to the model, but drawn for whoever is
+  watching. A value passed to another tool in plain text still reaches that tool; the body holds the value,
+  and the aim is a safe path that is the default, not leaking made impossible.
 
 ---
 
