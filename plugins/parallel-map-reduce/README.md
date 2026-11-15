@@ -42,7 +42,8 @@ The conversation is the buffer: the reduce turn reads the answers as history, an
 - **`session`** names the conversation to report to. By default it is the one the call is made from, or for
   a background job the conversation it was created with. A call with no conversation of its own (the HTTP
   tool door) must name one.
-- **Concurrency**: at most 4 turns of a wave run at once; the rest wait.
+- **`concurrency`**: how many of a wave's turns run at once (default 4); the rest wait. They share the
+  provider's rate limits, so more at once can mean more refused calls rather than a faster wave.
 - **Stopping**: the turns run under the calling turn's signal, so stopping that turn stops the wave. What
   finished stays in the conversation, a line says the wave stopped, and the reduce is not asked.
 

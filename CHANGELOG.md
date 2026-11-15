@@ -454,8 +454,9 @@ a second host's needs.
 
 - <a id="parallel-map-reduce"></a>**`parallel-map-reduce`** (new) — `parallel_map_reduce` asks one question
   (`mapPrompt`) of each item of a set (`items`: text, or `{ attach }` for a file to look at), each as its
-  own `single_turn`, at most 4 at once, and returns at once. Each turn is the prompt followed by its item,
-  so the prompt is written once and a list of hundreds can be built in code. As each turn finishes its
+  own `single_turn`, 4 at once unless `concurrency` says otherwise, and returns at once. Each turn is the
+  prompt followed by its item, so the prompt is written once and a list of hundreds can be built in code.
+  As each turn finishes its
   answer is appended to the conversation under its item, a failure included; once all have answered,
   `reducePrompt` is asked there as a queued robo-submit, prefixed with the wave's tally (`[w-ab3k: 25 of 26
   answered; failed: plum]`), so the conversation is the buffer and the reduce turn retrieves nothing. Turns

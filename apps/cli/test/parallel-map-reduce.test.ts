@@ -144,6 +144,20 @@ test(`at most ${MAX_CONCURRENT_TURNS} of a wave's turns run at once`, { timeout:
   assert.ok(texts.some(x => x.includes(`${n} of ${n} answered`)), texts.join('\n'));
 });
 
+test('concurrency sets how many turns run at once', { timeout: 15000 }, async t => {
+  let running = 0, peak = 0;
+  const m = await machine(t, async prompt => {
+    if (isReduce(prompt)) return says('combined');
+    peak = Math.max(peak, ++running);
+    await new Promise(r => setTimeout(r, 20));
+    running--;
+    return says('ok');
+  });
+  await start(m, { mapPrompt: 'Go.', items: Array.from({ length: 6 }, (_, i) => `p${i}`), reducePrompt: 'Combine.', tools: false, concurrency: 2 });
+  await until(m, m.session.id, finished);
+  assert.equal(peak, 2);
+});
+
 test('it reports to a conversation it names, and one with none of its own must name one', { timeout: 15000 }, async t => {
   const m = await machine(t, prompt => says(isReduce(prompt) ? 'combined' : 'ok'));
   const other = createSession();
@@ -168,6 +182,8 @@ test('a bad call is refused before any turn runs', { timeout: 15000 }, async t =
   await refused({ mapPrompt: 'm', items: [{ attach: 'x', label: 'y' }], reducePrompt: 'r' }, /Item 1 is neither text nor/);
   await refused({ mapPrompt: 'm', items: [3], reducePrompt: 'r' }, /Item 1 is neither text nor/);
   await refused({ mapPrompt: 'm', items: ['a'], reducePrompt: 'r', context: 'x' }, /Unknown field "context"/);
+  await refused({ mapPrompt: 'm', items: ['a'], reducePrompt: 'r', concurrency: 0 }, /"concurrency"/);
+  await refused({ mapPrompt: 'm', items: ['a'], reducePrompt: 'r', concurrency: 2.5 }, /"concurrency"/);
   assert.equal(called, 0);
 });
 

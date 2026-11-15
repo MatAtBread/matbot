@@ -3,8 +3,8 @@ import { invokeTool, PLUGIN_API_VERSION, toolResult } from '@matatbread/matbot-p
 
 export const TOOL_NAME = 'parallel_map_reduce';
 
-/** How many of a wave's turns run at once; the rest wait for a free slot. They share a provider's rate
- *  limits, so a larger wave takes longer rather than failing. Per wave. */
+/** How many of a wave's turns run at once unless the call says (`concurrency`); the rest wait for a free
+ *  slot. They share a provider's rate limits, so a larger wave takes longer rather than failing. Per wave. */
 export const MAX_CONCURRENT_TURNS = 4;
 
 /** What one turn is asked about, after `mapPrompt`: text, or a file for it to look at. */
@@ -17,6 +17,7 @@ export interface ParallelMapReduce {
   tools?:       boolean;
   provider?:    string;
   session?:     string;
+  concurrency?: number;
 }
 
 export interface WaveStarted {
@@ -54,20 +55,23 @@ export const DESCRIPTION =
   '    "items": ["/repos/api-server", "/repos/web", …],\n' +
   '    "reducePrompt": "List the repositories above still on Node 18 or older, and what to change in each." }';
 
-const FIELDS = new Set(['mapPrompt', 'items', 'reducePrompt', 'tools', 'provider', 'session']);
+const FIELDS = new Set(['mapPrompt', 'items', 'reducePrompt', 'tools', 'provider', 'session', 'concurrency']);
 
 // Validators are optional and a minimal install has none, so this is the boundary for that install.
 function refusal(input: unknown): string | undefined {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) return 'parallel_map_reduce takes { "mapPrompt": "…", "items": ["…", …], "reducePrompt": "…" }.';
   const a = input as Record<string, unknown>;
   const stray = Object.keys(a).find(k => !FIELDS.has(k));
-  if (stray !== undefined) return `Unknown field "${stray}". It takes mapPrompt, items, reducePrompt, tools, provider and session.`;
+  if (stray !== undefined) return `Unknown field "${stray}". It takes mapPrompt, items, reducePrompt, tools, provider, session and concurrency.`;
   if (typeof a['mapPrompt'] !== 'string' || a['mapPrompt'].trim() === '') return '"mapPrompt" is what each turn is asked, followed by its item: a non-empty string.';
   if (typeof a['reducePrompt'] !== 'string' || a['reducePrompt'].trim() === '') return '"reducePrompt" is the request to ask once every turn has answered: a non-empty string.';
   for (const k of ['provider', 'session'] as const) {
     if (a[k] !== undefined && typeof a[k] !== 'string') return `"${k}" is a string.`;
   }
   if (a['tools'] !== undefined && typeof a['tools'] !== 'boolean') return '"tools" is true or false.';
+  if (a['concurrency'] !== undefined && !(Number.isInteger(a['concurrency']) && (a['concurrency'] as number) >= 1)) {
+    return `"concurrency" is how many turns run at once: a whole number, 1 or more (default ${MAX_CONCURRENT_TURNS}).`;
+  }
   if (!Array.isArray(a['items']) || a['items'].length === 0) return '"items" is a list of at least one item.';
   for (const [i, item] of a['items'].entries()) {
     if (typeof item === 'string') {
@@ -150,7 +154,7 @@ async function runWave(
   const worker = async (): Promise<void> => {
     for (let i = next++; i < n && !ctx.signal.aborted; i = next++) await one(i);
   };
-  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_TURNS, n) }, worker));
+  await Promise.all(Array.from({ length: Math.min(args.concurrency ?? MAX_CONCURRENT_TURNS, n) }, worker));
 
   try {
     // Stopped by the person: what finished is in the conversation, and nothing more is started on their behalf.
@@ -187,6 +191,7 @@ export function makeParallelMapReduceTool(machine: MatbotMachine): Tool<WaveStar
         tools:    { type: 'boolean', description: 'Default true: each turn is a full agent turn that can act with your tools. false: one request with no tools, when mapPrompt and the item hold everything it needs.' },
         provider: { type: 'string', description: 'A configured provider for the turns. Default: the current one.' },
         session:  { type: 'string', description: 'The conversation to append to and ask in. Default: this one.' },
+        concurrency: { type: 'integer', minimum: 1, description: `How many turns run at once; the rest wait. Default ${MAX_CONCURRENT_TURNS}. They share the provider's rate limits.` },
       },
     },
     executor: {
