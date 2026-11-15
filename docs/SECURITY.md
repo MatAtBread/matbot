@@ -60,6 +60,7 @@ the ones with no human behind them, and it can be withdrawn with `gate_action`.
 | `provider.add-unlisted`, `provider.update-unlisted` | The model is not among those the endpoint lists (asked last: listing sends the profile's credential) |
 | `mcp_action.add` | An MCP server is connected or spawned; the prompt names any vault keys a local one is given |
 | `mcp_action.remove` | An MCP server is disconnected |
+| `mcp_action.secret` | A remote MCP server is connected with a header that sends a vault key to its origin |
 | `http.request` | The `http` tool reaches an origin (scheme, host and port), including one a redirect leads to |
 | `http.secret` | The `http` tool sends a vault key to an origin |
 | `tool_function.import` | A function body imports a module |

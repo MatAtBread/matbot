@@ -1,4 +1,4 @@
-import type { Tool, ToolEvent, ToolContext, ToolContract, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
+import type { Tool, ToolEvent, ToolContext, ToolContract, MatbotPluginSpec, Vault } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, REFERENCEABLE_KEY_RULE, originGatedFetch, refusalMessage, unreferenceableKey } from '@matatbread/matbot-plugin-api';
 
 // Single arm: the request params paired with `unknown` (the body is parsed text or arbitrary JSON). The
@@ -17,12 +17,33 @@ type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTION
 interface HttpInput {
   url:           string;
   method?:       HttpMethod;
-  headers?:      Record<string, string | { Vault: string }>;
+  headers?:      Record<string, HeaderValue>;
   body?:         string;
   responseType?: 'text' | 'json';
 }
 
-type Outcome<T> = { ok: true; value: T } | { ok: false; message: string };
+export type Outcome<T> = { ok: true; value: T } | { ok: false; message: string };
+
+/** A header value: literal text, or `{ Vault }` naming the stored secret(s) to send in its place. */
+export type HeaderValue = string | { Vault: string };
+
+/**
+ * The `headers` schema both this tool and a plugin taking headers in the same grammar advertise. No `anyOf`:
+ * the object keywords apply only to an object, so this is both arms in keywords every validator enforces.
+ * `additionalProperties: false` because the likeliest guess, `{ Vault, prefix: 'Bearer ' }`, must fail
+ * rather than drop the prefix.
+ */
+export const headersSchema = {
+  type: 'object',
+  description: 'Header name → value. A value is a literal string, or { "Vault": "KEY_NAME" } to send a stored secret, '
+             + 'or { "Vault": "Bearer ${KEY_NAME}" } to send it inside other text.',
+  additionalProperties: {
+    type: ['string', 'object'],
+    required: ['Vault'],
+    properties: { Vault: { type: 'string', description: 'A vault key name whose value is sent as this header, or text with each key written as ${KEY_NAME}.' } },
+    additionalProperties: false,
+  },
+} as const;
 
 type Part = { literal: string } | { key: string };
 
@@ -57,18 +78,14 @@ function parseVaultValue(spec: string): Outcome<Part[]> {
   return { ok: true, value: parts };
 }
 
-/**
- * Turn `{ Vault }` header values into the values they name, asking first. The keys come straight off the
- * params, so the set the gate is asked about IS the set that is sent — and the read is by name, never a
- * template handed to `resolve`, so there is no grammar for a name to smuggle a second lookup through.
- *
- * One gate call per key, never one per request: the default policy ORs a request's subject with its
- * standing answers, so a batched `A`+`B` would be admitted by an approval only `A` was ever given.
- * Gated before the vault is read, so a refusal reads nothing, and the gate is only ever handed names.
- */
-async function resolveHeaders(
-  url: string, headers: Record<string, string | { Vault: string }>, ctx: ToolContext,
-): Promise<Outcome<{ target: string | URL; headers: Record<string, string>; secrets: string[] }>> {
+/** The vault keys a set of headers names, each with the headers it is sent as. */
+export interface VaultHeaderKeys {
+  readonly templates: ReadonlyMap<string, Part[]>;
+  readonly usedAs:    ReadonlyMap<string, string[]>;
+}
+
+/** Parse every `{ Vault }` value in `headers`. A malformed one fails the whole set, before anything is asked. */
+export function vaultHeaderKeys(headers: Record<string, HeaderValue>): Outcome<VaultHeaderKeys> {
   // The subject is `<origin> <key>`, which a name with whitespace would make ambiguous; no such name is
   // storable, so it could only ever miss anyway. Checked in parsing, before anything is asked.
   const templates = new Map<string, Part[]>();
@@ -82,10 +99,14 @@ async function resolveHeaders(
       if ('key' in p && !usedAs.get(p.key)?.includes(header)) usedAs.set(p.key, [...usedAs.get(p.key) ?? [], header]);
     }
   }
-  if (usedAs.size === 0) return { ok: true, value: { target: url, headers: headers as Record<string, string>, secrets: [] } };
+  return { ok: true, value: { templates, usedAs } };
+}
 
-  // Parsed once, and that parse is what is fetched, so the origin the gate approves is the origin that
-  // receives the key — never a second reading of the caller's string.
+/**
+ * The origin a vault key would be sent to, parsed once: that parse is what is fetched, so the origin the
+ * gate approves is the origin that receives the key — never a second reading of the caller's string.
+ */
+export function secretTarget(url: string): Outcome<URL> {
   let target: URL;
   try { target = new URL(url); }
   catch { return { ok: false, message: `A vault key can only be sent to an absolute URL: ${url}` }; }
@@ -94,9 +115,19 @@ async function resolveHeaders(
   if (target.protocol !== 'https:' && target.protocol !== 'http:') {
     return { ok: false, message: `A vault key can only be sent to an http(s) URL, not ${target.protocol}` };
   }
-  const origin = target.origin;
+  return { ok: true, value: target };
+}
 
-  for (const [key, names] of usedAs) {
+/**
+ * Ask, per key, whether it may be sent to `origin` — under the CALLING tool's `secret` gate, so the
+ * `http` tool asks `http.secret` and another tool asking the same question asks its own.
+ *
+ * One gate call per key, never one per request: the default policy ORs a request's subject with its
+ * standing answers, so a batched `A`+`B` would be admitted by an approval only `A` was ever given.
+ * Gated before the vault is read, so a refusal reads nothing, and the gate is only ever handed names.
+ */
+export async function gateVaultKeys(origin: string, keys: VaultHeaderKeys, ctx: ToolContext): Promise<Outcome<void>> {
+  for (const [key, names] of keys.usedAs) {
     // Key and origin lead: they are what is being decided. The header name is model-chosen, so a rogue
     // call would give it an innocuous one, and it is never the headline. No value, not even masked — a
     // prompt is broadcast to every client attached to the session.
@@ -111,8 +142,19 @@ async function resolveHeaders(
     });
     if (!permit.allowed) return { ok: false, message: refusalMessage(permit, `Sending ${key} to ${origin}`) };
   }
+  return { ok: true, value: undefined };
+}
 
-  const values  = new Map(await Promise.all([...usedAs.keys()].map(async k => [k, await ctx.vault.readSecret(k)] as const)));
+/**
+ * Turn `{ Vault }` header values into the values they name. The keys come straight off the headers, so
+ * the set the gate was asked about IS the set that is read — and the read is by name, never a template
+ * handed to `resolve`, so there is no grammar for a name to smuggle a second lookup through. `secrets` is
+ * the values sent, for redaction.
+ */
+export async function readVaultHeaders(
+  headers: Record<string, HeaderValue>, keys: VaultHeaderKeys, vault: Pick<Vault, 'readSecret'>,
+): Promise<Outcome<{ headers: Record<string, string>; secrets: string[] }>> {
+  const values  = new Map(await Promise.all([...keys.usedAs.keys()].map(async k => [k, await vault.readSecret(k)] as const)));
   const missing = [...values].filter(([, v]) => v === undefined).map(([k]) => k);
   if (missing.length > 0) {
     // Never prompted for here: `store-key` already exists so that the value arrives on a channel the
@@ -122,12 +164,36 @@ async function resolveHeaders(
   return {
     ok: true,
     value: {
-      target,
       headers: Object.fromEntries(Object.entries(headers).map(([h, v]) => [h,
-        typeof v === 'string' ? v : (templates.get(h) ?? []).map(p => 'key' in p ? values.get(p.key) ?? '' : p.literal).join('')])),
+        typeof v === 'string' ? v : (keys.templates.get(h) ?? []).map(p => 'key' in p ? values.get(p.key) ?? '' : p.literal).join('')])),
       secrets: [...values.values()].filter((v): v is string => v !== undefined && v !== ''),
     },
   };
+}
+
+/**
+ * Only the values a request sent: `Vault.scrub` redacts everything the vault holds, which on node is all
+ * of `process.env` — `true`, PIDs, $HOME — and would corrupt any JSON body it touched.
+ */
+export function redactor(secrets: readonly string[]): (s: string) => string {
+  return s => secrets.reduce((t, v) => t.split(v).join('[REDACTED]'), s);
+}
+
+async function resolveHeaders(
+  url: string, headers: Record<string, HeaderValue>, ctx: ToolContext,
+): Promise<Outcome<{ target: string | URL; headers: Record<string, string>; secrets: string[] }>> {
+  const keys = vaultHeaderKeys(headers);
+  if (!keys.ok) return keys;
+  if (keys.value.usedAs.size === 0) return { ok: true, value: { target: url, headers: headers as Record<string, string>, secrets: [] } };
+
+  const target = secretTarget(url);
+  if (!target.ok) return target;
+  const permit = await gateVaultKeys(target.value.origin, keys.value, ctx);
+  if (!permit.ok) return permit;
+
+  const read = await readVaultHeaders(headers, keys.value, ctx.vault);
+  if (!read.ok) return read;
+  return { ok: true, value: { target: target.value, ...read.value } };
 }
 
 const NETWORK = new Set(['http:', 'https:']);
@@ -170,10 +236,8 @@ const executor = {
     if (!resolved.ok) { yield { type: 'error', message: resolved.message }; return; }
     const { target, secrets } = resolved.value;
 
-    // Only the values this request sent: `Vault.scrub` redacts everything the vault holds, which on node
-    // is all of `process.env` — `true`, PIDs, $HOME — and would corrupt any JSON body it touched. Applied
-    // to every string this yields, errors included: fetch quotes an invalid header value in its TypeError.
-    const redact = (s: string): string => secrets.reduce((t, v) => t.split(v).join('[REDACTED]'), s);
+    // Applied to every string this yields, errors included: fetch quotes an invalid header value in its TypeError.
+    const redact = redactor(secrets);
 
     let res: Response;
     try {
@@ -246,20 +310,7 @@ export const httpTool: Tool = {
       // `fetch` takes any verb, but this enum is the tool's limit for every caller (validation is at the
       // executor), so it must list exactly `HttpMethod`. It was five, which rejected HEAD and OPTIONS.
       method:       { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'], default: 'GET' },
-      // Each header value is a string or `{ Vault }`. No `anyOf`: the object keywords apply only to an
-      // object, so this is both arms in keywords every validator enforces. `additionalProperties: false`
-      // because the likeliest guess, `{ Vault, prefix: 'Bearer ' }`, must fail rather than drop the prefix.
-      headers:      {
-        type: 'object',
-        description: 'Header name → value. A value is a literal string, or { "Vault": "KEY_NAME" } to send a stored secret, '
-                   + 'or { "Vault": "Bearer ${KEY_NAME}" } to send it inside other text.',
-        additionalProperties: {
-          type: ['string', 'object'],
-          required: ['Vault'],
-          properties: { Vault: { type: 'string', description: 'A vault key name whose value is sent as this header, or text with each key written as ${KEY_NAME}.' } },
-          additionalProperties: false,
-        },
-      },
+      headers:      headersSchema,
       body:         { type: 'string', description: 'Request body for POST/PUT/PATCH.' },
       responseType: { type: 'string', enum: ['text', 'json'], default: 'text' },
     },

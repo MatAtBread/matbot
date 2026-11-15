@@ -36,7 +36,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@matatbread/matbot-mcp-http": "workspace:^"
+    "@matatbread/matbot-mcp-http": "workspace:^",
+    "@matatbread/matbot-tool-http": "workspace:^"
   },
   "peerDependencies": {
     "@matatbread/matbot-plugin-api": "workspace:^"

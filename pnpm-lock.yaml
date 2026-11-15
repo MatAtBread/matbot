@@ -405,6 +405,9 @@ importers:
       '@matatbread/matbot-mcp-http':
         specifier: workspace:^
         version: link:../mcp-http
+      '@matatbread/matbot-tool-http':
+        specifier: workspace:^
+        version: link:../http
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^
@@ -417,6 +420,10 @@ importers:
         version: 6.0.3
 
   plugins/mcp-http:
+    dependencies:
+      '@matatbread/matbot-tool-http':
+        specifier: workspace:^
+        version: link:../http
     devDependencies:
       '@matatbread/matbot-plugin-api':
         specifier: workspace:^

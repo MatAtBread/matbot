@@ -600,6 +600,14 @@ a second host's needs.
 - **`http`** — the contract's `method` is the schema's seven verbs rather than `string`. Validation runs at
   the executor since 0.5.0, so a composition's `tool.http({ method: 'PROPFIND' })` (or `'get'`) passed the
   type-check and was then refused; it is now a type error at definition.
+- **`mcp-http`** (and `mcp`'s remote servers) — a header can carry a vault key, in the `http` tool's
+  grammar: `{ "Authorization": { "Vault": "Bearer ${ACME_API_KEY}" } }`. A key-authenticated server needed
+  the key pasted into the call, which put it in the conversation and stored it in plain text in the
+  plugin's settings. The key is asked about once, at `add`, as `mcp_action.secret` on `<origin> <key>`. The
+  `{ Vault }` form is what is saved; the value is read from the vault on each request (so a key replaced
+  with `store-key` is sent from the next one), is redacted from what the server sends back, and is never
+  sent on through a redirect. `http` exports the pieces (`vaultHeaderKeys`, `gateVaultKeys`,
+  `readVaultHeaders`, `redactor`, `headersSchema`), and `mcp-http` depends on it.
 
 - <a id="old-migrations-removed"></a>**Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):
