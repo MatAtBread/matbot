@@ -10,13 +10,13 @@ import { usageEntries } from './usage.js';
  *  further. Each level multiplies the fan-out, which is why it is small. */
 export const MAX_SUB_TURN_DEPTH = 2;
 
-export interface SubTurnWork {
-  ok:        true;
+interface SubTurnWork {
   text:      string;
   toolCalls: { name: string; input: unknown; isError: boolean }[];
   messages?: Message[];
 }
-export interface SubTurnFailure { ok: false; error: string }
+// Its text already says how it failed (`withFailureNote`), so it is reported as it stands.
+interface SubTurnFailure { error: string }
 
 // Returning a value to the caller and writing to a conversation are different acts, and a prompt can ask for
 // either ("append the time here and return nothing"), so a sub-turn appends as any turn does: through the
@@ -48,7 +48,7 @@ function reduce(messages: readonly Message[], transcript: boolean): SubTurnWork 
     }
     if (said.length > 0) text = said.join('\n').trim();
   }
-  return { ok: true, text, toolCalls, ...(transcript ? { messages: [...messages] } : {}) };
+  return { text, toolCalls, ...(transcript ? { messages: [...messages] } : {}) };
 }
 
 // A completion inside a sub-turn accrues to that turn's own head, which is thrown away with its transcript,
@@ -112,7 +112,7 @@ export async function runSubTurn(
   signal:  AbortSignal,
   carry:   (markers: MessageContent[]) => void,
 ): Promise<SubTurnWork | SubTurnFailure> {
-  if (signal.aborted) return { ok: false, error: 'Cancelled before it started.' };
+  if (signal.aborted) return { error: 'Cancelled before it started.' };
   try {
     const seeded = new Set(seed.map(m => m.id));
     const { session, failure } = await drainEphemeralTurn(machine.ephemeral!({ appender: fromSubTurn(machine, ctx.session.id) }), {
@@ -125,12 +125,12 @@ export async function runSubTurn(
     });
     const own = session?.messages.filter(m => !seeded.has(m.id)) ?? [];
     chargeToCaller(own);
-    if (failure !== undefined) return { ok: false, error: failure };
-    if (session === undefined) return { ok: false, error: 'The turn left no transcript.' };
+    if (failure !== undefined) return { error: failure };
+    if (session === undefined) return { error: 'The turn left no transcript.' };
     carry(carriedMarkers(own));
     return reduce(own, turn.transcript);
   } catch (e) {
     // Refused media, chiefly, which is raised before the turn exists: its message names the file.
-    return { ok: false, error: withFailureNote(e instanceof Error ? e.message : String(e), failureOf(e)) };
+    return { error: withFailureNote(e instanceof Error ? e.message : String(e), failureOf(e)) };
   }
 }

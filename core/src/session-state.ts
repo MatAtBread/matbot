@@ -73,11 +73,6 @@ export interface SessionState {
   // Events of the *current* turn, replayed to a subscriber that joins mid-turn. Cleared at each
   // turn boundary — committed history comes from the store, not from here.
   replay:      PipelineEvent[];
-  // Accounting entries awaiting a flush, held BY REFERENCE to each turn's usage scope. A completion
-  // can be recorded after its turn commits — a detached trigger classifier, a `followup` hook — and it
-  // appends to the very array captured here, so a late arrival needs no coordination: whatever is in
-  // these arrays at the flush is what gets written, and each entry says which turn caused it.
-  pendingUsage: TurnEntry[][];
   // ── parallel turns (`mode: 'parallel'`) ──
   // Each in flight, by traceId: its own replay (it outlives the running turn's, which is cleared at every
   // boundary) and how to stop it.

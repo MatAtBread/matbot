@@ -622,11 +622,9 @@ it forwards `parameters` verbatim.
 The `single_turn` *tool*, which core registers, does more than this function does. Without `tools` it is
 the same single request. With `tools: true` it is a sub-turn: a full agent turn within the calling
 session, which has that session's id, principal, tools and gate answers, writes nothing to the session,
-and returns `{ ok, text, toolCalls }`. `turns: [...]` runs several turns of either kind at once and
-returns their results in order, with a failed turn as an `ok: false` entry. A field beside `turns`
-applies to every turn. Each position is typed by the call, so `const [a, b] = await
-tool.single_turn({ turns })` knows which results carry tool calls. Use the function when a plugin needs
-a model's answer, and the tool when the work has to act or its pieces can run at once.
+and returns `{ text, toolCalls }` (`messages` too, with `transcript: true`). It runs one turn: several at
+once are several calls, `Promise.all` in a body. Use the function when a plugin needs
+a model's answer, and the tool when the work has to act.
 
 ---
 

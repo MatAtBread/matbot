@@ -14,6 +14,24 @@ import { errorText } from './runner.js';
 // `mediumGuard` refused — and reading again composes with it. The bound only stops a pathological loop.
 export const WRITE_ATTEMPTS = 3;
 
+// How long spend recorded outside any of its session's pumps waits before a pump is started to write it,
+// in case one is about to run anyway. Short enough that a report read after a wave finishes includes it.
+export const LATE_USAGE_FLUSH_MS = 1000;
+
+// A usage scope's `entries` that keeps nothing: each entry goes to `take` as it is recorded, so what a turn
+// records is queued by its session rather than held by the scope, and outlives the scope's holder. A child
+// scope rolls up by pushing here too. Derived arrays (`map`, `slice`) are plain ones.
+class ForwardingEntries extends Array<TurnEntry> {
+  static override get [Symbol.species](): ArrayConstructor { return Array; }
+  #take: (entry: TurnEntry) => void;
+  constructor(take: (entry: TurnEntry) => void) { super(); this.#take = take; }
+  override push(...entries: TurnEntry[]): number {
+    for (const e of entries) this.#take(e);
+    return this.length;
+  }
+}
+export const forwardingEntries = (take: (entry: TurnEntry) => void): TurnEntry[] => new ForwardingEntries(take);
+
 // Folded onto a parallel turn's message in ITS copy only (never written back): without it, a model asked
 // "how's it going?" mid-task sees a history that ends a turn early and answers as though nothing were
 // running. Names the running request so the reply can be about it, and says what happens to the reply.
@@ -46,31 +64,18 @@ export const closedSpan = (msgs: Message[]): Message[] => {
 };
 
 /**
- * Write whatever accounting has accrued onto the turn heads that caused it, then clear it.
- *
- * Entries are drained by SPLICING each pending array, so an entry appended after this point (a
- * classifier still in flight) accumulates afresh and lands on the next flush rather than being
- * written twice. That is the whole concurrency story: no marks, no coordination, and eventual
- * delivery — which is all a log needs, since each entry names the turn that caused it.
+ * Write accounting entries onto the turn heads that caused them. The caller hands over what it has taken
+ * off the session's queue (`createSessionRunner`'s `unflushed`), so an entry recorded after that point (a
+ * classifier still in flight) waits for the next flush rather than being written twice. That is the whole
+ * concurrency story: no marks, no coordination, and eventual delivery — which is all a log needs, since
+ * each entry names the turn that caused it.
  *
  * Anchored on the turn's head (its user message) because that is the message a retract-and-rerun
  * keeps; assistant and tool messages are popped into a retraction marker where no reduction over
  * `session.messages` would find them again. An entry whose turn head has since gone (a session
  * edit, a compaction) is dropped rather than orphaned onto an unrelated message.
  */
-export async function flushUsage(store: Store<Session>, id: string, s: SessionState): Promise<void> {
-  // Splice each array in place and KEEP the references. Dropping a drained array is the obvious
-  // tidy-up and it silently loses exactly the case this exists for: a classifier that settles after
-  // the flush appends to the array its scope captured, so if the pump has stopped holding it, the
-  // write goes nowhere observable. They are left registered for the life of the session state, at a
-  // cost of one empty array per turn.
-  //
-  // The limit of that: `maybeCleanup` disposes the state once the session is quiet and unsubscribed,
-  // so a completion still in flight at THAT point is lost. This is the carrier's stated best-effort
-  // contract rather than a hole to plug — nothing can know what is still pending — and it is bounded
-  // in practice, since the two channels that settle late (a `followup` hook, a user-phase classifier
-  // the runner polls) are both awaited inside the pump iteration this scope wraps.
-  const drained = s.pendingUsage.flatMap(entries => entries.splice(0));
+export async function flushUsage(store: Store<Session>, id: string, drained: readonly TurnEntry[]): Promise<void> {
   if (drained.length === 0) return;
 
   const session = await store.get(id);

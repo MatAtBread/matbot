@@ -118,7 +118,7 @@ skills, workspace files, and provider config all persist in browser storage acro
 - Principal carrier: ambient identity threaded through every layer
 - Vault: secret resolution with `${NAME}` placeholders
 - Permission gate: privileged operations ask first, and can remember the answer ([DEFAULT-GATE.md](docs/DEFAULT-GATE.md))
-- `single_turn`: run a prompt apart from the conversation and get back what it said. Without tools it is one request to a model, for classification or summarization. With `tools: true` it is a full agent turn in the same session, with its tools and permissions, returning its text and the tool calls it made. `turns: [...]` runs several of either kind at the same time and returns their results in order
+- `single_turn`: run a prompt apart from the conversation and get back what it said. Without tools it is one request to a model, for classification or summarization. With `tools: true` it is a full agent turn in the same session, with its tools and permissions, returning its text and the tool calls it made. One turn per call: several at once are several calls, which a function body runs together
 - Basic implementations for storage (files) and UI (CLI) are created by "apps" like the CLI.
 
 ### Plugins
@@ -153,6 +153,8 @@ And a **Status**:
 | | `skill-compiler` | Functional | Compile a procedural skill into a hot-loadable TypeScript tool plugin (`skill_compiler`; Node) |
 | | `background-jobs` | Functional | Run prompts as background jobs — now, at a time, or on an interval — that report by appending to a conversation; jobs run in-process |
 | | `background-jobs-node` | Functional | The same, each job in its own process (Node) |
+| | `parallel-map-reduce` | Functional | Ask one question of each item of a set as concurrent sub-agent turns, append each answer to the conversation, then have the conversation combine them (`parallel_map_reduce`) |
+| | `session-data` | Functional | Keep a tool's output in a conversation and read it back by id, so a later tool takes it without the model reading it (`session_data`) |
 | **tools + hooks** | `function-tools` | Functional | Author & run TypeScript functions that compose other tools in one pass (`tool_function`) |
 | | `triggers` | Functional | Data-driven hooks: fire a tool or skill when an LLM classifier judges a stored condition matched |
 | **hooks** | `hook-logger` | Example | Diagnostic: log every hook-channel firing |
@@ -161,6 +163,7 @@ And a **Status**:
 | **services** | `tool-types` | Functional | `ToolTypeIndex` (Node): derives a typed `.d.ts` of tool results so tool-composing codegen (`function-tools`, `skill-compiler`) is type-checked |
 | | `caching-tool-types` | Functional | `ToolTypeIndex` (Node): `tool-types` with its build kept in settings across restarts; load it instead of `tool-types` |
 | | `function-runner-node` | Functional | `FunctionRunner` (Node, optional): bounds a `tool_function` body's run time, withholds host globals, gates its `import(...)`. Without it a body runs unbounded and ungated |
+| | `gate-fs-node` | Functional | Puts each path a `tool_function` body's `node:fs` names to the permission gate (`fs-read`, `fs-write`, `fs-access`) (Node; needs `function-runner-node`) |
 | | `tool-router` | Functional | `ToolPresenter`: serve the model a bounded per-turn window from a large tool library, with a `tool_search` entry point |
 | | `persist-ki-bge` | Functional | `KnowledgeIndex`: persistent, with optional BGE reranker |
 | | `web-principal-user` | Example | `WebPrincipalResolver`: the web frontend's fallback principal becomes the host OS user (`$USER`) — a template for a real resolver |
@@ -193,6 +196,7 @@ model can get wrong, or get away with:
 | `json-validation` | Refuses a tool call whose params do not match the tool's schema — a wrong type, a missing field, a value outside its set — before the tool runs, and tells the model what to fix. Node and browser |
 | `ts-validation` | The same check against the tool's TypeScript contract, which is stricter than its schema: it also refuses a property the contract does not declare, so `session_id` mis-sent for `sessionId` is a reported mistake rather than a call the tool reads as "no session given". Loads beside `json-validation`; a call either refuses is refused. Node only, and installs `tool-types` itself |
 | `tool-types` (or `caching-tool-types`) | Types the code `function-tools` and `skill-compiler` generate, and refuses what it must not do before it runs: casts that hide a wrong shape, globals and modules the runner withholds, and reaching past the runner (`ESCAPE-GATE`) |
+| `gate-fs-node` | A body granted `node:fs` can otherwise read and write every file the matbot process can, the `.env` vault and `.data` included. This puts each path it names to the permission gate, reading, writing and changing permissions separately. Node only; needs `function-runner-node` |
 | `function-runner-node` | Runs `tool_function` bodies: bounds their run time, withholds `process` and friends, puts every `import(…)`, `fetch` and `WebSocket` to a permission gate, and refuses code built from a string. Without it a body runs unbounded and ungated. One implementation of the `FunctionRunner` seam: a runner that runs each body in a child process is a more secure one, not currently part of this repo |
 
 `tool-types` and `function-runner-node` matter only where model-written code runs — in practice, with
@@ -295,7 +299,7 @@ Tools created by `tool_function` and `skill_compiler` are MUCH more efficient in
 - The cost of generating the code is done once, up-front, and re-used for free. Even if a tool uses a
 `single_turn` tool for LLM classification or summarization, it does so in a low-context, low cost environment.
 The same holds when it hands a step to an agent with tools (`tools: true`), or fans several out at once
-(`turns`): each one starts from just the context the code gives it, not the whole conversation.
+from a function body: each one starts from just the context the code gives it, not the whole conversation.
 Your compiled skills and functional tools don't have to be dumb!
 - Tools which render large volumes of data and aggregate it for presentation to another tool
 _doesn't require that the LLM tokenises all your data_. This is huge win when your tools are

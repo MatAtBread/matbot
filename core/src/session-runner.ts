@@ -2,7 +2,7 @@ import type {
   Session, Message, MessageContent, Principal, PromptFn, PipelineEvent,
   Store, ToolRegistry, SystemContextRegistry, Vault, FileStore, MediaStore, UserContent, Tool,
   ProviderAdapter, ProviderConfig, SessionRunner, SessionView, SubmittedView, OpenOpts, SubmitOpenOpts,
-  SteeringPolicy, SteeringDecision, PermissionGate, FormField, SessionStatusReport,
+  SteeringPolicy, SteeringDecision, PermissionGate, FormField, SessionStatusReport, TurnEntry,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { HookRegistry } from './hooks.js';
@@ -15,7 +15,7 @@ import { ingestMedia } from './media.js';
 import { MemoryStore } from './storage-base/memory-store.js';
 import { createSink, emit, notify, aheadOf, type ParallelReply, type QueuedItem, type SessionState } from './session-state.js';
 import {
-  WRITE_ATTEMPTS, parallelFraming, closedSpan, flushUsage, drainMerges, drainWrites, interjectInto, rewrite, placeNow,
+  WRITE_ATTEMPTS, LATE_USAGE_FLUSH_MS, forwardingEntries, parallelFraming, closedSpan, flushUsage, drainMerges, drainWrites, interjectInto, rewrite, placeNow,
 } from './session-merges.js';
 
 export interface SessionRunnerDeps {
@@ -123,12 +123,45 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
   const stateFor = (id: string): SessionState => {
     let s = states.get(id);
     if (s === undefined) {
-      s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [], pendingUsage: [],
+      s = { queue: [], running: false, runningTraceId: undefined, ac: undefined, subscribers: new Set(), replay: [],
             parallel: new Map(), merges: [], turnHead: undefined, interjected: [], wake: undefined, writes: [] };
       states.set(id, s);
     }
     return s;
   };
+
+  // Spend recorded for a session's turns and not yet written onto their heads, by session. Beside `states`,
+  // not in it: a session's state is dropped once it idles with nobody watching, and spend still arrives after
+  // that — a `parallel_map_reduce` wave's sub-turns run for minutes after the turn that started them, a
+  // detached classifier settles when it settles. Each turn's usage scope used to hold its own array, kept in
+  // the state, so whatever a turn recorded after its session went unwatched went into an array nothing would
+  // flush again. A turn's scope now forwards each entry here as it is recorded (`usageSink`), and nothing is
+  // kept once it is written.
+  const unflushed = new Map<string, TurnEntry[]>();
+  const lateFlush = new Map<string, ReturnType<typeof setTimeout>>();
+  const takeUsage = (id: string): TurnEntry[] => {
+    const entries = unflushed.get(id) ?? [];
+    unflushed.delete(id);
+    return entries;
+  };
+  // Spend that arrives with no pump of the session running would otherwise wait for the session's next turn,
+  // which may never come. A pump flushes on its way out, so one is started — after a pause, because the
+  // spend usually comes just ahead of a write that runs the pump anyway (a wave's sub-turn records its calls,
+  // then its answer is appended), which flushes it at no cost of its own; the pump found here then has
+  // nothing to do and is not started.
+  const flushLater = (id: string): void => {
+    if (lateFlush.has(id)) return;
+    lateFlush.set(id, setTimeout(() => {
+      lateFlush.delete(id);
+      const s = states.get(id);
+      if ((unflushed.get(id)?.length ?? 0) > 0 && s?.running !== true) startPump(id, stateFor(id));
+    }, LATE_USAGE_FLUSH_MS));
+  };
+  const usageSink = (id: string): TurnEntry[] => forwardingEntries(entry => {
+    const list = unflushed.get(id);
+    if (list !== undefined) list.push(entry); else unflushed.set(id, [entry]);
+    if (states.get(id)?.running !== true) flushLater(id);
+  });
 
   // Questions a session's turns have asked and nobody has answered yet, by session. Kept beside `states`,
   // not in it: an entry there is dropped once a session idles, and a question asked without being awaited
@@ -353,10 +386,10 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
             // One usage scope per pump ITERATION rather than per turn. `followup` is post-commit by
             // definition and a detached classifier settles whenever it settles, so a scope that ended at
             // the turn's commit would drop precisely the spend that is hardest to account for otherwise.
-            // The entries array is registered for flush before any work starts, so a late arrival lands
-            // in something already tracked and needs no coordination of its own.
+            // Its entries go to the session's queue as they are recorded, before any work starts, so a late
+            // arrival needs no coordination of its own and outlives this session's state.
             await withUsageScope(async usage => {
-              s.pendingUsage.push(usage.entries);
+              usage.entries = usageSink(id);
               await runAs(head.principal, async () => {
                 for await (const ev of runSession({
                   session,
@@ -550,11 +583,13 @@ export function createSessionRunner(deps: SessionRunnerDeps): SessionRunner {
           // A failure is logged and the entries are gone. Accounting is best-effort by its own contract
           // (see `flushUsage`), nobody downstream decides anything on it, and putting them back would
           // count them twice should the write have landed before its answer was lost.
-          await flushUsage(deps.store, id, s).catch((e: unknown) => {
+          await flushUsage(deps.store, id, takeUsage(id)).catch((e: unknown) => {
             console.error(`[matbot] the usage of session "${id}" was not recorded:`, e instanceof Error ? e : String(e));
           });
         } finally {
           s.running = false;
+          // Spend recorded while the flush was writing found the pump running, so nothing else is coming for it.
+          if ((unflushed.get(id)?.length ?? 0) > 0) flushLater(id);
           // A submission or a write that arrived during the flush found the pump running and did not start
           // one; nor did a parallel reply that settled then — possible only when a throw left the loop above
           // with parallel turns still out, since it otherwise ends only once none are.

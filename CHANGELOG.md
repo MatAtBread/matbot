@@ -22,8 +22,10 @@ Upgrade the CLI and every plugin together: a 0.4.x plugin will not install besid
 - [Tool-generated user prompts](#robo-submit) that can continue a session in your absence. A background
   job or a tool can post a message that the conversation answers. After three in a row with no message
   from a person, matbot asks before going on.
-- [`single_turn` with tools](#single-turn-tools): hand a full agent turn, or several at once, to a
-  sub-turn and get back what each one said.
+- [`single_turn` with tools](#single-turn-tools): hand a full agent turn to a sub-turn and get back
+  what it said.
+- [`parallel-map-reduce`](#parallel-map-reduce): ask one question of each item of a set as concurrent
+  sub-agent turns, and have the conversation combine their answers.
 - [Permissions for this session](#permission-lifetimes): a prompt can be answered for this time, for this
   session or always. [The most specific standing answer wins](#most-specific-wins), so a narrow allow
   can sit inside a broad denial and the reverse.
@@ -265,16 +267,14 @@ a second host's needs.
   made for no session (a global function) sees it empty. `session_data` uses it to type a read by the
   entry's id.
 
-- <a id="single-turn-tools"></a>**`single_turn` runs a turn with tools, and several turns at once.** `tools: true` makes it a full agent
+- <a id="single-turn-tools"></a>**`single_turn` runs a turn with tools.** `tools: true` makes it a full agent
   turn within the calling session: it has the session's id, principal, tools and gate answers, sees none of
-  its conversation, does not add its working to it, and returns its text with the tool calls it made. `turns: [...]`
-  runs several, with tools or without, at the same time, and returns their results in order; one failing
-  does not stop the others (`ok: false` beside the rest). A turn may still append to a conversation, as any
-  turn can (an append naming no session goes to the calling one). At most 4 of a call's turns run at once, and turns
-  with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
-  `messages`. A field beside `turns` (`tools: true`, a shared `context`) applies to every turn. A turn with
-  tools has its spend recorded on the calling turn. The one-turn form is unchanged, and its result gains
-  `ok`. What a turn's tools record in markers (data kept with `session_data`, a session function defined)
+  its conversation, does not add its working to it, and returns its text with the tool calls it made. A turn
+  may still append to a conversation, as any turn can (an append naming no session goes to the calling one).
+  Turns with tools nest at most 2 deep. `context` briefs a turn, and `transcript: true` adds a tool turn's
+  `messages`. A turn with tools has its spend recorded on the calling turn. It runs one turn per call:
+  several at once are several calls (`Promise.all` in a function body). The form without tools is
+  unchanged. What a turn's tools record in markers (data kept with `session_data`, a session function defined)
   comes back as `single_turn`'s own markers, so it is kept in the calling session; core's record of the
   turn itself (its depth, a truncation, a retraction, a hook that threw) is not, and a turn that failed
   brings nothing back.
@@ -416,6 +416,13 @@ a second host's needs.
 
 ### Bug fixes
 
+- **Spend recorded after a turn ends is kept when nobody is watching the session.** A turn's spend was held
+  in the session's runner state, which is dropped once the session is idle with no subscriber, so whatever
+  arrived after that went nowhere: a `parallel_map_reduce` wave's sub-turns (all but the first few calls
+  of a wave started from Telegram, a background job or a closed browser tab), a detached classifier. Each
+  entry is now queued by session as it is recorded, written by the session's next pump, and if none is
+  coming, by one started shortly afterwards for the purpose.
+
 - **A marker a tool yields when called from a composed body is kept.** The `tool` proxy that
   `function-tools` bodies and compiled skills call through (`makeToolBox`) kept a callee's result and
   dropped its markers, so a tool that recorded something reported success and the record was gone. A
@@ -445,6 +452,24 @@ a second host's needs.
 
 ### Optional
 
+- <a id="parallel-map-reduce"></a>**`parallel-map-reduce`** (new) — `parallel_map_reduce` asks one question
+  (`mapPrompt`) of each item of a set (`items`: text, or `{ attach }` for a file to look at), each as its
+  own `single_turn`, at most 4 at once, and returns at once. Each turn is the prompt followed by its item,
+  so the prompt is written once and a list of hundreds can be built in code. As each turn finishes its
+  answer is appended to the conversation under its item, a failure included; once all have answered,
+  `reducePrompt` is asked there as a queued robo-submit, prefixed with the wave's tally (`[w-ab3k: 25 of 26
+  answered; failed: plum]`), so the conversation is the buffer and the reduce turn retrieves nothing. Turns
+  act with tools unless `tools` is false. `session` names the conversation to report to. Stopping the
+  calling turn stops the wave, and the reduce is not asked.
+- **`tool-router`** — searches the model makes together in one message rank as one moment: each search's
+  best matches, then each one's next, then the general-purpose fallbacks. Each result used to count as more
+  recent than the one before it, so a broad search culled the top hit of a search beside it — a tool asked
+  for by name — from the window `tool_search` had just said it was in, and the model went looking for the
+  tool's parameters elsewhere (reading source). A fallback is now marked in the result (`fallback: true`).
+  And a tool is pinned as a fallback only if it could answer a request that names neither it nor what it
+  does (the web, a shell, what the system knows, the person): one operation over any input (`sleep`,
+  `single_turn`, `parallel_map_reduce`) is no longer pinned into every search. A width judged under the
+  earlier rule is judged again once, at the next boot.
 - <a id="session-data"></a>**`session-data`** (new) — `session_data` keeps a JSON value in a conversation and reads it back by a
   short id: a tool's output written from a `tool_function` body (`write { description, data }`) and handed
   to another tool turns later (`read { id }`), without the model reading it. Entries are markers, so they

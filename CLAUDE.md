@@ -70,6 +70,8 @@ plugins/            — one directory per package, flat but for the frontend/pro
     sessions/      — session_action: list/get/rename/hide/append; read state (`Session.readAt`, added by
                      augmentation, so core carries none of it) and each session's `state` for a list
     session-data/  — session_data: intermediate results kept in a session as markers, read back by id
+    parallel-map-reduce/— parallel_map_reduce: one single_turn per item, each answer appended to the session,
+                     then the combining asked there as a queued robo-submit
     cognition/     — inner voice, remembered facts, dream_time consolidation
     provenance/    — determine_provenance: trace a claim to its evidence
     json-validation/— validate hook checking inputs against inputSchema (cross-runtime)
@@ -684,8 +686,8 @@ tool beside them, so the contract stays exactly as written and still resolves, a
 one name never merge. A diagnostic inside such a namespace refuses the tools it serves and no others.
 
 **A result shaped by the call's own params takes a third slot, `Call`.** `ToolContract<Result, Args, Call>`
-carries the exact generic signature `ToolProxy` declares, because a fixed `Result` cannot say "in each
-position, what that turn could return" (`single_turn`'s `turns`). `Result` and `Args` stay the whole contract everywhere else (the executor,
+carries the exact generic signature `ToolProxy` declares, because a fixed `Result` cannot say "what this call could return" (`session_data`'s `read`, typed by
+the id it names). `Result` and `Args` stay the whole contract everywhere else (the executor,
 the wire text, validation), so they must describe every call the signature admits, and a model calling the
 tool directly sees the plain form. Only a source-declared contract can use it: a `toolContract` string is
 still exactly two arguments.
@@ -1184,8 +1186,7 @@ stops it. Stopping them when the body settled was tried and removed: no JavaScri
 to cancel a promise, so model-written fire-and-forget code (`Promise.all` of appends, left running) failed
 at random, and once a call made LATER (from a timer) had to run anyway, the rule bounded nothing and only
 punished the natural spelling. A body that wants a call stopped says so the ordinary way, an
-`AbortController`'s signal through `toolInContext({ signal })`; `single_turn`'s `turns` stops its own
-siblings. The one stop is a body whose CALLER stops reading before it settles: it has been abandoned, and
+`AbortController`'s signal through `toolInContext({ signal })`. The one stop is a body whose CALLER stops reading before it settles: it has been abandoned, and
 every call it starts from then on is refused.
 
 **A failure a body leaves behind is contained, not the process's.** A body can schedule work that outlives
@@ -1396,46 +1397,41 @@ conversation and returns what it said. Without `tools` it is one request to a mo
 no hooks. With `tools: true` it is a **sub-turn**, a full agent turn **executing within the session**, so it
 has the session's id, principal, tools and gate answers. Its working is held in an ephemeral run's private
 store, which is how a tool avoids writing into a session whose own turn is still running. That is an
-implementation detail and not a session of its own: the id is only a key into that store. `turns` runs several
-at the same time and returns their results in order. None of this is the `mode: 'parallel'` submission, which
-merges its reply into the session it runs beside; these merge no messages, and that is what gives them a clean
-return value. What does come back is the **markers its tools recorded**, below.
+implementation detail and not a session of its own: the id is only a key into that store. None of this is the
+`mode: 'parallel'` submission, which merges its reply into the session it runs beside; a sub-turn merges no
+messages, and that is what gives it a clean return value. What does come back is the **markers its tools
+recorded**, below.
 
-**One tool, because the two questions are independent.** Whether a piece of work has to act and whether its
-pieces can run at once have nothing to do with each other: seven capitals "in parallel" need no tools, and a
-code review needs them whether or not anything runs beside it. It was two tools, `single_turn` and
+**One tool, because whether work has to act is a parameter.** It was two tools, `single_turn` and
 `parallel_turns` (every turn an agent turn), and the name did the choosing: a search for "parallel" found the
 agentic one for pure language work, and nothing pointed one delegated agent turn at a tool called
 "parallel". As one tool, choosing is filling in a parameter, and in probes on DeepSeek and Gemini models set
 `tools` correctly from the prompt alone.
 
-**Concurrency is inside one call, and has to be.** The runner executes a message's tool calls one at a time,
-and that is right rather than an omission: the protocols leave the order to the client but warn that calls
-sent together may depend on one another (Anthropic requires its computer-use batches to run in order), so a
-runner cannot run them at once without knowing what each does. Turns listed in one `turns` call are declared
-independent by the caller, which is what makes running them at once sound. It also works from a direct call
-with no `function-tools`, and no sibling is left running after the call returns. In `turns` a failed turn is
-an `ok: false` entry, since the others' results are worth having; one turn alone fails as the tool does.
-`MAX_CONCURRENT_TURNS` queues rather than refuses, per call.
+**One turn per call; running several is composition.** During 0.5.0's development it also took `turns: [...]`
+(never released), several turns run at once with their results returned in order. That gave nothing `Promise.all` over several
+calls in a body does not (positions typed per call, a failure caught per call), and it read as the map-reduce
+primitive while having nowhere to put a result but its own return value — so a model asked to work through
+many items reasoned about how to get the answers back rather than about the task. Where answers go, how many
+run at once and what happens when they have all arrived belong to the code holding the promises, or to a
+plugin built for that (a parallel map-reduce that appends each answer to the session and then asks for the
+combining). The cost is one case: a model with no `function-tools` runs side-by-side calls one after another,
+because the runner executes a message's tool calls in order (calls sent together may depend on one another,
+which nothing in the protocols rules out). That is slower, not wrong.
 
-**One turn's fields or `turns`, at the root**, because every provider requires an object at the top of a
-tool's input schema and Anthropic refuses `anyOf` there; the executor refuses both at once. The one-turn form
-is what `single_turn` always took, so `tool.single_turn({ prompt }).text` still works. Results are positional,
-not keyed by a name the caller chose: against a free-keyed root DeepSeek produced no valid call at all, and a
-provider whose adapter strips `additionalProperties` (Gemini's must) was shown no turn schema. Positions are
-typed through `ToolContract`'s third slot, so `const [review, summary] = await tool.single_turn({ turns })`
-knows which has tool calls and which a transcript. **A field beside `turns` applies to every turn** —
-`context` and `attach` add to each turn's own, the rest are defaults — because that is how a model writes
-"all of these act": Gemini put `tools: true` there unprompted, and refusing it was the one way the flag came
-out wrong. Code sets `tools` per turn, since that is what types each position.
+**The result is `{ text, toolCalls?, messages? }`**, a plain two-argument contract: `toolCalls` comes with
+tools, `messages` with `transcript: true`. It had a generic call signature (`ToolContract`'s third slot)
+narrowing each per call, which existed to type `turns` by position and went with it; for one call it bought
+two `?`s, and a misspelt field is refused anyway by the ordinary excess-property check, which only the
+generic had defeated. A failure is the tool's error, so there is no `ok` to check.
 
 **What a model reads is kept small, and that is a design constraint, not polish.** The description and the
 contract text go out with every turn, and every field named in the result is spelt out in them. So the wire
-form is one flat turn type (the `system`/`transcript` exclusions are in the call signatures and the executor,
-not the wire), and a result is `{ ok, text, toolCalls?, messages? }` or `{ ok: false, error }`, without
-`usage`: spend is accounting, already on the calling turn's ledger. The description is the probed one, word
-for word: without its example neither DeepSeek nor Gemini delegated agentic work at all, and an example whose
-prompts read like commands had Gemini write turns as `bash` calls. Change it only with a probe.
+form is one flat turn type (the `system`/`transcript` exclusions are in the call signature and the executor,
+not the wire), and a result is `{ text, toolCalls?, messages? }`, without `usage`: spend is accounting,
+already on the calling turn's ledger. The description is a probed one: without its example neither DeepSeek
+nor Gemini delegated agentic work at all, and an example whose prompt read like a command had Gemini write a
+turn as a `bash` call. Change it only with a probe.
 
 **No history is passed, because the caller selects.** The caller has already read the conversation, so what a
 turn needs goes in `context`, once, written by the one party who knows the whole task; replaying history would
@@ -1490,6 +1486,48 @@ away, and their roll-up into this tool's scope names a head the calling session 
 drops them. Re-recording them after the turn puts them on the calling turn, attributed to the tool call. The
 other ephemeral callers (a run-now background job, a skill demonstration) lose that spend from the caller's
 ledger today.
+
+## Parallel map-reduce (`parallel_map_reduce`)
+
+`plugins/parallel-map-reduce` asks one question (`mapPrompt`) of each item of a set as concurrent
+`single_turn`s and has the conversation combine the answers. It returns at once with a wave id. Each answer
+is appended to the conversation under its item as it finishes, a failure included, and once all have
+answered `reducePrompt` is asked there as a queued robo-submit, prefixed with the tally (`[w-ab3k: 25 of 26
+answered; failed: plum]`). A plugin, not core: it is composition over `single_turn` and the appender, which
+core already has.
+
+**One prompt, then the item.** A turn is `mapPrompt` followed by its item — text, or `{ attach }` for a file
+to look at — and nothing else. It was a list of turns, each with its own prompt and label plus a shared
+`context`: the model wrote N near-identical prompts (output, which is what takes the time, and at 500 items
+a considerable cost), and wrote the shared context for the reduce though every map turn received it. With
+one prompt it is written once, every turn opens with the same text (so a prefix cache serves it), and a list
+built in code (`items: s.items.map(…)`) never passes through the model's output at all. There is no
+`context`: what a turn needs to know about the wider task is part of what it is asked, so it goes in
+`mapPrompt`, and the conversation is not passed because its history is mostly tool traffic a map turn has no
+use for and would be re-sent on every round of every turn. The item names its answer, so there is no label.
+
+**The conversation is the buffer.** The reduce turn reads the answers as history and retrieves nothing, so a
+model asked to work through many items reasons about the task rather than about how to get the answers back,
+which is what `single_turn`'s `turns` (returned to the caller) made it do. The cost is that the rows stay in
+history, so the map step has to make each answer short; that is the condition for using it at all.
+
+**Completion is causal, not observed.** The reduce is asked from the settling of the appends themselves, so it
+cannot run before them, and `queue` makes it wait for a turn still running there, whose end writes any append
+that turn deferred. No counter, manifest or status read, each of which has the manager infer from state that
+the wave is done. The tally is the host's, because the reduce cannot count hundreds of rows reliably and a
+failure appended as a row is what lets a missing answer be told from one never asked.
+
+**`tools` defaults to true**, because a map turn exists to do reading the caller should not: probed, Gemini
+omitted the flag on every call whose turns had to read a file, each of which would have answered from
+nothing. **Stopping the calling turn stops the wave** (the turns run under its signal): what finished stays,
+a line says so, and nothing more is asked on the person's behalf. Markers a sub-turn's tools record are not
+kept, since the call that could carry them into the session has returned.
+
+Probed against the same guidance written as a pattern in `tool_function`'s description: the tool was used where
+each item needed a model to read it (researching several projects from the web), the pattern hardly at all, and
+neither for trivial or coupled tasks (an itinerary, a portfolio), where a model that fanned out would have split
+one decision into many. Where the items were regular enough to read in code (templated contracts), models did
+that instead, which is cheaper and right.
 
 ## Session appends
 
@@ -1655,7 +1693,12 @@ classifier kicked off detached in `screen` stays attributed to that hook however
 **A turn is a coordinate, not a container.** Its end is not a well-defined moment to total anything at
 — steers terminate and resume, a retract re-enqueues the turn it just popped, `followup` runs
 post-commit — so entries flush **when the pump's queue drains**, and one still in flight lands on the
-next idle. Anchoring on the turn head is what survives a retract-and-rerun: the pop stashes assistant
+next idle. A turn's scope forwards each entry to a queue the runner keeps by session, not to an array in
+the session's state: that state is dropped once the session idles with nobody watching, and spend still
+arrives after it (a `parallel_map_reduce` wave runs for minutes after the turn that started it), so held
+there it went into an array nothing flushed. An entry arriving with no pump of its session running is
+written by the next one — usually the append it precedes — or, failing that, by one started a moment
+later for the purpose. Anchoring on the turn head is what survives a retract-and-rerun: the pop stashes assistant
 and tool messages inside a marker payload, out of reach of any reduction over `session.messages`.
 
 **Adapters normalise for comparability and retain for fidelity.** `Usage` carries the normalised
