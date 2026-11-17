@@ -1299,7 +1299,8 @@ body's call from the model's, so a `vault_store` tool would be the model's way t
 - **`writeSecret`, never `createSecret`**: `createSecret` returns the name an equal value is already stored
   under, which handed to a body is an oracle for guessing stored secrets.
 - **Refused before asking**: an empty value (which `writeSecret` treats as removal; a body cannot remove a
-  key), control characters, over 8192 characters, a name the vault cannot store or `${}` cannot reference,
+  key), control characters, over 8192 characters or under 8 (redaction is by exact match, so a short value
+  would blank every occurrence of itself), a name the vault cannot store or `${}` cannot reference,
   and a value appearing in the function's own text — already in the conversation, and the commonest misuse,
   storing a key the user pasted; that is `plugin store-key`. A value already in the session's history is
   still asked about, the prompt saying it is exposed. The prompt never shows the value, only its length.

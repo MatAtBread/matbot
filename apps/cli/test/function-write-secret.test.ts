@@ -106,6 +106,7 @@ const refusedBeforeAsking: [string, string, RegExp][] = [
   ['an empty value, which would remove the key', `context.writeSecret('ACME_API_KEY', '')`, /empty value/],
   ['a control character', `context.writeSecret('ACME_API_KEY', 'a' + String.fromCharCode(10) + 'B=c')`, /control character/],
   ['a value over the size cap', `context.writeSecret('ACME_API_KEY', 'x'.repeat(9000))`, /over the 8192/],
+  ['a value too short to redact without blanking the rest of the output', `context.writeSecret('ACME_API_KEY', ['ab', 'c'].join(''))`, /under the 8/],
   ['a name the vault cannot reference', `context.writeSecret('ACME KEY', 'a'.repeat(20))`, /cannot name a vault key/],
   ['a value written in the body itself', `context.writeSecret('ACME_API_KEY', 'sk-literal-pasted-0123456789')`, /function's own text.*store-key/s],
   ['a value that is not a string', `context.writeSecret('ACME_API_KEY', { toString() { return 'x'; } })`, /both strings/],
@@ -118,6 +119,16 @@ for (const [what, call, message] of refusedBeforeAsking) {
     assert.equal(vault.hasKey('ACME_API_KEY'), false);
   });
 }
+
+test('a stored value containing another stored value is redacted whole, whichever was written first', async () => {
+  // Assembled at run time: a value written out in the body is refused, being in the conversation already.
+  const { final } = await run(`probe() {
+    const short = ['short', 'key01'].join('-');
+    const long = [short, 'TAIL9876'].join('-');
+    return context.writeSecret('ACME_A', short).then(() => context.writeSecret('ACME_B', long)).then(() => ({ long }));
+  }`);
+  assert.deepEqual(final, { type: 'result', value: { long: '[REDACTED]' } });
+});
 
 test('a value already in the conversation is still asked about, saying it is exposed', async () => {
   const history = [{ id: 'm1', role: 'tool', content: [{ type: 'tool-result', id: 't1', result: `api_key=${ISSUED}` }] }] as unknown as Message[];

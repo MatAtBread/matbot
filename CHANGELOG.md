@@ -413,6 +413,10 @@ a second host's needs.
   unknown-provider error lists aliases as `alias → profile`.
 - **A thinking block carries `meta?: ProviderMeta`**, on the stored `thinking` content and the
   `thinking-block` event, as a tool call already did, for an adapter's round-trip state about the block.
+- **A tool you call fails with everything its `error` event said.** `toolResult`, `toolText` and the
+  `tool` proxy threw an `Error` holding only the message; it now keeps the event's `code`, `failure`,
+  `stdout` and `stderr`, which `toolErrorDetail(e)` reads back. So a failure's class survives a nested
+  call: a tool that lets such an error escape reports the class its callee raised.
 
 ### Bug fixes
 
@@ -613,10 +617,16 @@ a second host's needs.
   afterwards as `{ Vault: name }`. Creating a key asks `tool_function.write-secret`, which may be remembered
   per function version; replacing one asks `tool_function.replace-secret` every time, so with nobody to ask
   it is refused. Refused without asking: an empty value (a body cannot remove a key), control characters,
-  over 8192 characters, an unusable name, and a value written in the function's own text (a key the user
+  over 8192 characters or under 8 (redaction is by exact match, and a short value would blank every
+  occurrence of itself), an unusable name, and a value written in the function's own text (a key the user
   has goes in with `plugin store-key`). Once written, the value is redacted from everything the call yields
   after that. A function using `writeSecret` asks `tool_function.edit` when redefined, as one using
   `fetch` does. `ComposedCallContext` (plugin-api) gains the method.
+- **`function-tools`** — a failure a body lets escape from a tool it called reaches the model with that
+  call's `stdout`, `stderr` and failure class, as a direct call to the same tool always did; a body that
+  catches it can read them (and `code`) off the error. Not `code`: that is the callee's number, not
+  `tool_function`'s. A script that died inside a body reached the model as "Process exited with code 127"
+  with its stderr gone, so the model ran the same body again.
 
 - <a id="old-migrations-removed"></a>**Storage: two in-place migrations of very old data are removed** (see *Upgrading to 0.5.0* in the
   README):

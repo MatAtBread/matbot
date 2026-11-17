@@ -724,6 +724,11 @@ than flattening the error to a string:
 }
 ```
 
+A tool you CALL fails the same way: `toolResult`, `toolText` and the `tool` proxy throw an `Error` whose
+message is the callee's, with its `code`, `failure`, `stdout` and `stderr` kept on it, and
+`toolErrorDetail(e)` reads them back. Pass them on when you report the failure, or the model sees "Process
+exited with code 1" without the stderr that says why — `tool_function` does this for a body's calls.
+
 `result`, `model-content` and `marker` are independent: a tool may yield a result and no markers, a
 marker and no result (a silent side-effect), or show the model an image whose `result` is a one-line
 summary. The durable record of what a tool did is its `result`.

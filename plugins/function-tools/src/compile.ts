@@ -1,4 +1,4 @@
-import { FUNCTION_TIMEOUT, importableByName, makeToolBox, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { FUNCTION_TIMEOUT, importableByName, makeToolBox, refusalMessage, toolErrorDetail } from '@matatbread/matbot-plugin-api';
 import { DefinitionError, stripLeadingTrivia } from './signature.js';
 import { gatedNetwork, type Asker } from './network.js';
 import { gatedSecretWriter } from './secrets.js';
@@ -457,7 +457,12 @@ export async function* runFunction(
       const first = (label?.source.trim().split('\n')[0] ?? '').slice(0, 160);
       console.warn(`[function-tools] stopped ${label?.tool ?? 'a function'} (session ${ctx.session.id}, call ${ctx.callId}): ${msg(error)}${first !== '' ? ` Definition: \`${first}\`` : ''}`);
     }
-    yield { type: 'error', message: secrets.redact(msg(error)) };
+    // What the failed call said beside its message — a script's stdout and stderr, whether retrying could
+    // help — goes on, or the model sees only "Process exited with code 1" and can do nothing but run the
+    // same body again. Not `code`: it would be the CALLEE's number reported as this tool's, and a door
+    // that answers by code (a callee's 422 for its own input) would blame this call's input for it.
+    const { code: _calleeCode, ...detail } = toolErrorDetail(error);
+    yield secrets.redact({ type: 'error', message: msg(error), ...detail } satisfies ToolEvent);
     return;
   }
   // `undefined` is "no result", not "a result that is undefined": a composition that returns nothing

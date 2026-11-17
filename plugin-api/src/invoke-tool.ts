@@ -2,6 +2,7 @@ import type { MatbotMachine, MatbotPlugin } from './plugin.js';
 import type { Tool, ToolContext, ToolEvent, ToolResultFor, ToolProxy, PromptFn, FormField, PermissionContext, PermissionGate, PermissionRequest } from './types.js';
 import { askPermissionGate } from './permission-gate.js';
 import { callFrame, callFramesOf, withCallFrames } from './call-frames.js';
+import { failureOf } from './errors.js';
 
 /** The host's plugin hot-load ops, as both the runner and {@link invokeTool} hold them. */
 export interface PluginOps {
@@ -161,6 +162,48 @@ export function invokeTool<K extends string, const P>(
   return tool.executor.execute(params, ctx) as AsyncIterable<ToolEvent<ToolResultFor<K, P>>>;
 }
 
+type ToolErrorEvent = Extract<ToolEvent, { type: 'error' }>;
+
+/** What a tool's `error` event says beside its message, as {@link toolErrorDetail} reads it back. */
+export type ToolErrorDetail = Partial<Pick<ToolErrorEvent, 'code' | 'failure' | 'stdout' | 'stderr'>>;
+
+/**
+ * The error a drain throws for a tool's `error` event: its message, with every other field the event
+ * carried kept on it. A drain that threw only the message made a caller composing tools blind to WHY one
+ * failed — a `bash` script that died reached a `tool_function` body as "Process exited with code 127" with
+ * its stderr (`curl: command not found`) gone, so the body's caller, a model, could only run the same body
+ * again (it did, nine times). A body can read the fields off what it catches; `function-tools` passes them
+ * on when it does not.
+ */
+function toolEventError(ev: ToolErrorEvent): Error & ToolErrorDetail {
+  return Object.assign(new Error(ev.message), {
+    ...(ev.code    !== undefined ? { code:    ev.code    } : {}),
+    ...(ev.failure !== undefined ? { failure: ev.failure } : {}),
+    ...(ev.stdout  !== undefined ? { stdout:  ev.stdout  } : {}),
+    ...(ev.stderr  !== undefined ? { stderr:  ev.stderr  } : {}),
+  });
+}
+
+/**
+ * The detail a tool's failure carried, read off whatever was thrown — duck-typed, like every matbot error,
+ * because what reaches a catch may have been thrown by another copy of this package, or rethrown by code
+ * that kept the fields. Only fields of the right type are read, so a body's own `{ code: 'E_FOO' }` is not
+ * passed on as a tool's. Each is read ONCE: what was thrown may be a body's object, and a getter read twice
+ * can answer the type check with a string and the copy with something else.
+ */
+export function toolErrorDetail(e: unknown): ToolErrorDetail {
+  if (typeof e !== 'object' || e === null) return {};
+  const r = e as Record<string, unknown>;
+  const code = r['code'], stdout = r['stdout'], stderr = r['stderr'];
+  const failure = failureOf(e);
+  return {
+    ...(typeof code   === 'number' ? { code }    : {}),
+    ...(failure !== undefined      ? { failure } : {}),
+    ...(typeof stdout === 'string' ? { stdout }  : {}),
+    ...(typeof stderr === 'string' ? { stderr }  : {}),
+  };
+}
+
 /**
  * The one drain: consume a tool event stream, keeping the last `result` and throwing on the first
  * `error`. Whether a stream that yielded NO result is a failure is the caller's question, and the only
@@ -173,7 +216,7 @@ async function drain<R>(events: AsyncIterable<ToolEvent<R>>, onMarker?: (ev: Too
   let hadResult = false;
   for await (const ev of events) {
     if      (ev.type === 'result') { value = ev.value; hadResult = true; }
-    else if (ev.type === 'error')  { throw new Error(ev.message); }
+    else if (ev.type === 'error')  { throw toolEventError(ev); }
     else if (ev.type === 'marker') { onMarker?.(ev); }
   }
   return { value, hadResult };

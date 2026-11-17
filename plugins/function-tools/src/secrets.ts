@@ -12,6 +12,9 @@ import type { Asker } from './network.js';
 // leaves the body through this call's own output is redacted once it is written.
 
 const MAX_SECRET_CHARS = 8192;
+// Redaction is by substring, so a short value would blank every occurrence of itself in the call's output —
+// a stored "1" turns every digit 1 into [REDACTED]. No credential is this short.
+const MIN_SECRET_CHARS = 8;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export interface SecretWriter {
@@ -31,6 +34,8 @@ export interface SecretWriter {
  * `source` is the text the function was defined with: a value written there is already in the conversation.
  */
 export function gatedSecretWriter(ctx: ToolContext, asker: Asker, source: string): SecretWriter {
+  // Longest first: a value that contains another must be replaced before it, or replacing the shorter one
+  // breaks the longer one's match and leaves the rest of it in the clear.
   const written: string[] = [];
   const redactString = (s: string): string => written.reduce((t, v) => t.split(v).join('[REDACTED]'), s);
   const redactDeep = (v: unknown, seen: WeakMap<object, unknown>): unknown => {
@@ -61,6 +66,7 @@ export function gatedSecretWriter(ctx: ToolContext, asker: Asker, source: string
       if (value === '') throw new Error('writeSecret was given an empty value; nothing was stored. A key is removed only by the user.');
       if (CONTROL.test(value)) throw new Error(`The value for ${name} contains a control character (a line break, say), which a secret cannot hold; nothing was stored.`);
       if (value.length > MAX_SECRET_CHARS) throw new Error(`The value for ${name} is ${value.length} characters, over the ${MAX_SECRET_CHARS} a secret may be; nothing was stored.`);
+      if (value.length < MIN_SECRET_CHARS) throw new Error(`The value for ${name} is ${value.length} characters, under the ${MIN_SECRET_CHARS} a secret must be; nothing was stored.`);
       const unnamed = unreferenceableKey(name) !== undefined ? REFERENCEABLE_KEY_RULE : ctx.vault.unstorableKey?.(name);
       if (unnamed !== undefined) throw new Error(`"${name}" cannot name a vault key: ${unnamed}.`);
       if (source.includes(value)) {
@@ -74,7 +80,7 @@ export function gatedSecretWriter(ctx: ToolContext, asker: Asker, source: string
       // Created by someone else while the question was open: the answer given was to a create, not a replace.
       if (!exists && ctx.vault.hasKey(name)) throw new Error(`${name} was created by something else while you were being asked; nothing was stored. Ask again to replace it.`);
 
-      written.push(value);
+      if (!written.includes(value)) { written.push(value); written.sort((a, b) => b.length - a.length); }
       try { await ctx.vault.writeSecret(name, value); }
       catch (e) { throw new Error(redactString(e instanceof Error ? e.message : String(e))); }
     },
