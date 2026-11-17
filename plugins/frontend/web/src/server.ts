@@ -607,6 +607,17 @@ export function createWebServer(deps: WebServerDeps) {
     }
   });
 
+  // A controller that aborts when the caller disconnects before the reply is sent, for a tool's
+  // `ctx.signal` — how a tool learns nobody is waiting (a query hands it to the database, which cancels).
+  // The RESPONSE's `close`, not the request's: an IncomingMessage closes once its body is consumed, so a
+  // `req.on('close')` attached after reading the body never runs on a disconnect (Node 16+). The response
+  // also closes after a normal reply, hence `writableEnded`: a tool that succeeded was not cancelled.
+  function abortOnDisconnect(res: ServerResponse): AbortController {
+    const ac = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) ac.abort(); });
+    return ac;
+  }
+
   function makeToolCtx(ac: AbortController, tool: Pick<Tool, 'name' | 'pluginName'>) {
     const now = new Date().toISOString();
     // One fixed id rather than one per request: it is what a permission answer for this door is held
@@ -973,8 +984,7 @@ export function createWebServer(deps: WebServerDeps) {
       try { input = raw ? JSON.parse(raw) : {}; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
-      const ac = new AbortController();
-      req.on('close', () => ac.abort());
+      const ac = abortOnDisconnect(res);
 
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }
@@ -1028,8 +1038,7 @@ export function createWebServer(deps: WebServerDeps) {
       try { input = raw ? JSON.parse(raw) : {}; }
       catch { json(res, 400, { error: 'Invalid JSON' }); return; }
 
-      const ac = new AbortController();
-      req.on('close', () => ac.abort());
+      const ac = abortOnDisconnect(res);
 
       const tool = await resolveToolReady(toolName, ac.signal);
       if (!tool) { json(res, 404, { error: `Tool "${toolName}" not found` }); return; }

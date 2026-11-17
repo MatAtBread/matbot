@@ -816,6 +816,11 @@ a second host's needs.
 - **`frontend-web`** — `POST /tools/:name` answers a classified failure with its status (503 for
   `unavailable`, so a client knows asking again later may work) and puts `failure` in the body; the submit
   route does the same for a submission `open()` refused.
+- **`frontend-web`** — a caller that disconnects from `POST /tools/:name` or `POST /stream/tools/:name`
+  before the reply aborts the tool's `ctx.signal`, so a tool that hands it on (a query to its database) is
+  cancelled rather than run to completion for nobody. It never fired: both doors listened for the request
+  closing, which since Node 16 happens once its body has been read, not on a disconnect. A request answered
+  normally is not aborted afterwards.
 
 - <a id="sessions-read-tracking"></a>**`sessions`** — read tracking. It adds `Session.readAt` by augmentation: how far a session has been
   read. It exports `isUnread(session)`, and `SessionIndicator` (`'prompting' | 'running' | 'unread'`) with
