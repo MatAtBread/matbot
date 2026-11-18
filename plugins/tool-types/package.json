@@ -3,12 +3,13 @@
   "matbotRuntime": [
     "node"
   ],
-  "version": "0.4.25",
+  "version": "0.5.0",
   "engines": {
     "node": ">=24.0.0"
   },
   "files": [
-    "src"
+    "src",
+    "src/parameters.cts"
   ],
   "description": "Node-only ToolTypeIndex service: derives a self-contained .d.ts of the loaded tools' result/service types (by compiling their `declare module` augmentations) so tool-call code generators and composers can type what `tool` calls resolve to.",
   "keywords": [

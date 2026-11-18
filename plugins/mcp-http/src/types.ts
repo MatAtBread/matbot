@@ -1,8 +1,11 @@
+import type { RemoteHeaders } from './headers.js';
+
 export interface MCPRemoteConfig {
   type:     'remote';
   name:     string;
   endpoint: string;
-  headers?: Record<string, string>;
+  /** Sent with every request. A `{ Vault }` value is read from the vault per request and never persisted resolved. */
+  headers?: RemoteHeaders;
   /** Prefix for this server's proxy-tool names. Default `mcp__<name>__`; persisted so reconnects keep the same names. */
   proxyToolName?: string;
   /**
@@ -57,7 +60,7 @@ export interface MCPRemoteServerInfo {
  */
 export interface McpRemoteService {
   /** Connect a remote MCP server, register its proxy tools, and persist it. */
-  add(config: { name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }>;
+  add(config: { name: string; endpoint: string; headers?: RemoteHeaders; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }>;
   /** Connected remote servers (for `list`). */
   list(): MCPRemoteServerInfo[];
   /** Whether `name` is a remote server this service manages. */

@@ -1,9 +1,9 @@
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, subTurnDepth, isRequest } from '@matatbread/matbot-plugin-api';
 import type { MatbotPluginSpec, MatbotMachine, Store, Message, MessageContent, Session, PromptFn, DeferredCorrection } from '@matatbread/matbot-plugin-api';
-import { TriggerManager } from './manager.js';
+import { TriggerManager, RETIRED_CLASSIFIER } from './manager.js';
 import { dispatchTrigger, renderResult, TOOL_INPUT_INVALID } from './dispatch.js';
 import { createTriggerActionTool, createTriggersConfigTool } from './tools.js';
-import type { Trigger, Triggers, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
+import type { Trigger, Triggers, TriggerFilter, FiredCondition, TriggerCooldown, TriggerSurface } from './types.js';
 
 /** A firing trigger's id plus the specific condition(s) that matched — the unit markers trace, so a
  *  post-mortem can see not just that a trigger fired but which rubric the classifier judged true and
@@ -46,6 +46,9 @@ declare module '@matatbread/matbot-plugin-api' {
     /** The live trigger set (data-driven hooks). Registered by setupTriggers; consumed by plugins
      *  that seed built-in triggers (e.g. cognition). Its presence is the "triggers wired" signal. */
     Triggers?: Triggers;
+    /** Withholds triggers from one conversation's evaluation. Registered by the plugin that holds the
+     *  policy, never by triggers, which reads it at every evaluation; absent ⇒ every trigger is judged. */
+    TriggerFilter?: TriggerFilter;
   }
 }
 
@@ -118,7 +121,7 @@ export function invalidInvocationReport(messages: readonly Message[], from: numb
   const lines: string[] = [];
   for (let i = from - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) break;
+    if (isRequest(m)) break;
     for (const c of m.content) {
       if (c.type !== 'marker' || c.creator !== 'triggers') continue;
       const d = c.data as { triggerId?: unknown; tool?: unknown; error?: unknown; code?: unknown };
@@ -174,11 +177,11 @@ function silentFiredMarker(surface: TriggerSurface, triggers: FiredSource[]): Me
 }
 
 // True when the latest turn is a retract-redo: a `matbot-retraction` marker sits after the last genuine
-// (non-robo) user message — i.e. this user message was already processed on the original attempt, so
+// user message (a request: see isRequest) — i.e. this user message was already processed on the original attempt, so
 // user-phase (ephemeral/contextual) triggers and their side effects already fired. Re-firing them on the
 // redo is the duplicate-side-effect bug; skip them.
 function isRetractRedo(messages: Message[]): boolean {
-  const lastUser = messages.findLastIndex(m => m.role === 'user' && !m.content.every(c => c.origin === 'robo'));
+  const lastUser = messages.findLastIndex(m => isRequest(m));
   if (lastUser < 0) return false;
   return messages.slice(lastUser + 1).some(m => m.content.some(c => c.type === 'marker' && c.creator === RETRACTION_CREATOR));
 }
@@ -192,7 +195,7 @@ function isRetractRedo(messages: Message[]): boolean {
 // well-behaved rule self-terminates and never lands here.
 function retractActiveLastTurn(messages: Message[]): Set<string> {
   const userIdxs: number[] = [];
-  messages.forEach((m, i) => { if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) userIdxs.push(i); });
+  messages.forEach((m, i) => { if (isRequest(m)) userIdxs.push(i); });
   const cur = userIdxs.at(-1);
   if (cur === undefined) return new Set();
   const prev = userIdxs.at(-2) ?? -1;
@@ -227,7 +230,7 @@ interface FireHistory {
   since:    Map<string, number>;
 }
 
-// One backward scan of the message tail, counting genuine (non-robo) user messages as turn boundaries.
+// One backward scan of the message tail, counting genuine user messages (requests) as turn boundaries.
 // Deliberately counts only fires, NOT cool-down suppressions: a quiet period is a fixed window that must
 // expire on its own, unlike the retract convergence guard (which re-arms on suppression precisely so a
 // still-matching rule stays held off indefinitely).
@@ -237,7 +240,7 @@ function fireHistory(messages: Message[]): FireHistory {
   let turnsBack  = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
-    if (m.role === 'user' && !m.content.every(c => c.origin === 'robo')) { turnsBack++; continue; }
+    if (isRequest(m)) { turnsBack++; continue; }
     for (const c of m.content) {
       if (c.type !== 'marker' || c.creator !== 'triggers') continue;
       const d = c.data as { event?: unknown; triggers?: unknown };
@@ -303,7 +306,8 @@ function textOf(msg: Message | undefined): string {
   return msg?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
 }
 
-const isGenuineUser = (m: Message): boolean => m.role === 'user' && !m.content.every(c => c.origin === 'robo');
+// A person's message, or a robo-submit — not a followup resubmit, which continues the turn before it.
+const isGenuineUser = isRequest;
 
 function fileLabel(c: MessageContent): string | undefined {
   switch (c.type) {
@@ -364,14 +368,12 @@ function side(label: string, messages: readonly Message[], msg: Message | undefi
  * Wire the triggers subsystem: build the {@link TriggerManager}, load persisted triggers, register
  * the `Triggers` service and the `trigger_action` tool, then install the two evaluation hooks:
  *
- *   user  — a `screen` hook (pre-response) that KICKS OFF the `user`-phase classify+dispatch but does
- *           NOT await it: the classifier races the turn's own generation instead of gating the first
- *           token. Its verdict is consumed post-commit by the `followup` hook (below), so a user-phase
- *           result-fire supersedes the answer via a retract-redo rather than informing it in advance.
- *           This collapses the user surface toward the agent one — both are now concurrent-classify +
- *           post-turn-correct, differing only in subject (user message vs response). The `ephemeral`
- *           /`contextual` kinds no longer split delivery (a pre-response injection point is gone): any
- *           result-fire is delivered as a retract; a silent side-effect (no result) needs no delivery.
+ *   user  — a `screen` hook (pre-response) that kicks off the `user`-phase classify+dispatch and holds
+ *           the first token for it for up to `classifierGraceMs` (0, the default, holds nothing). A
+ *           verdict inside the hold informs the answer — `ephemeral` for this turn, `contextual` durably.
+ *           Otherwise it races the turn's generation: the runner restarts in-situ if it lands before
+ *           commit, else the `followup` hook (below) supersedes the answer with a retract-redo. A silent
+ *           side-effect (no result) needs no delivery.
  *   agent — the `followup` hook (post-commit) also judges agent-surface conditions against the
  *           assistant's response, invokes each fired trigger's tool, and delivers the result per the
  *           fired condition's `kind`: `retract` (discard the response and re-run with the result
@@ -424,6 +426,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
     const messages = ctx.session.messages;
     const lastUser = messages.findLast(l => l.role === 'user');
     const fired = await manager.evaluate(
+      ctx.session,
       'user',
       side('latest user message', messages, lastUser),
       side('preceding assistant message', messages, messages.findLast(
@@ -464,9 +467,13 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
   services.hooks.register({
     on: 'screen',
     async handler(ctx) {
+      // A trigger judges what a person said, and what was said back to them. A sub-turn has neither: its
+      // prompt is another model's and its answer goes back to that model, whose own reply is judged here.
+      if (subTurnDepth(ctx.session.messages) > 0) return;
       const lastUser = ctx.session.messages.findLast(l => l.role === 'user');
-      // Skip our own agent-phase robo resubmissions — they are not real user turns.
-      if (!lastUser || lastUser.content.every(c => c.origin === 'robo')) return;
+      // Skip agent-phase robo resubmissions — they continue a turn rather than start one. A robo-submit (a
+      // job asking something of the conversation) is a request, and is judged like a person's.
+      if (!lastUser || !isRequest(lastUser)) return;
 
       // Guard: a retract-redo re-runs this same user turn. The user-phase triggers already fired — and
       // their side effects (e.g. remember_fact's store write) already happened — on the original
@@ -500,10 +507,13 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       // Optional grace: wait up to `classifierGraceMs` for the verdict before racing. If it lands with a
       // result-fire, deliver it as ordinary ephemeral (injected before the first token — the clean path)
       // and latch `claimed` so neither the runner nor followup re-delivers it. At 0 (default) this is
-      // skipped entirely — pure race, no added latency.
+      // skipped entirely — pure race, no added latency. The timer is cleared when the verdict wins, so a
+      // turn does not leave one pending for the rest of the window.
       const graceMs = await resolveGraceMs();
       if (graceMs > 0) {
-        await Promise.race([rec.verdict, new Promise(r => setTimeout(r, graceMs))]);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([rec.verdict, new Promise(r => { timer = setTimeout(r, graceMs); })]);
+        clearTimeout(timer);
         if (rec.ready && hasCorrection(rec.correction) && !rec.claimed) {
           rec.claimed = true;
           return {
@@ -545,6 +555,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
       if (traceId !== undefined) pendingUserPhase.delete(traceId);
 
       if (ctx.resubmitDepth > 0) return;
+      if (subTurnDepth(ctx.session.messages) > 0) return;   // see the screen hook
 
       const userOut: UserPhaseOutcome = rec ? await rec.verdict : NO_USER_PHASE();
       // `claimed` ⇒ the correction was already delivered on the clean path (the runner's in-situ restart
@@ -553,6 +564,7 @@ export async function setupTriggers(services: MatbotMachine): Promise<TriggerMan
 
       const messages = ctx.session.messages;
       const fired = await manager.evaluate(
+        ctx.session,
         'agent',
         side('assistant response', messages, messages.findLast(
           l => l.role === 'assistant' && l.content.some(c => c.type === 'text'),
@@ -685,13 +697,10 @@ export function createTriggersPlugin(): MatbotPluginSpec {
       if (!captured) return base;
       const pinned    = await captured.settings().get<string>('classifierProvider');
       const available = [...captured.providers.keys()];
-      const legacy    = captured.providers.has('skills-classifier');
       if (pinned === undefined) {
         return base +
-          (legacy
-            ? '\n\nThe classifier uses the provider "skills-classifier" (the legacy default present in this install).'
-            : '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
-              'runs on — triggers work out of the box.') +
+          '\n\nNo classifier provider is pinned, so the classifier uses whatever provider the current turn ' +
+          'runs on — triggers work out of the box.' +
           ' To pin a small/fast model instead, use the triggers_config tool (action "set"). ' +
           `Available providers: ${available.join(', ') || '(none)'}.`;
       }
@@ -706,6 +715,11 @@ export function createTriggersPlugin(): MatbotPluginSpec {
     async setup(services) {
       captured = services;
       manager  = await setupTriggers(services);
+      if (services.providers.has(RETIRED_CLASSIFIER) && await services.settings().get('classifierProvider') === undefined) {
+        console.warn(`[triggers] a provider named "${RETIRED_CLASSIFIER}" is configured, but since 0.5.0 the classifier `
+          + 'no longer uses it by name — it uses the turn\'s provider. To keep it, set this plugin\'s classifierProvider '
+          + `setting (in the CLI's matbot.yaml: default_settings: { '@matatbread/matbot-triggers': { classifierProvider: ${RETIRED_CLASSIFIER} } })`);
+      }
     },
 
     async teardown() {

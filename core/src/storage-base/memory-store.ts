@@ -5,6 +5,8 @@ import { executeQuery } from './query/index.js';
 export class MemoryStore<T extends { id: string; version: string }> implements Store<T> {
   private readonly items = new Map<string, T>();
 
+  get size(): number { return this.items.size; }
+
   async get(id: string): Promise<T | null> {
     return this.items.get(id) ?? null;
   }

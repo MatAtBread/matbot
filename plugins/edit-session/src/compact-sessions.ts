@@ -70,7 +70,9 @@ interface CompactSessionsParams {
  *   `unavailable` — could not be completed now; the same call later may well succeed.
  *
  * The two failure classes are genuinely different remedies, which is why one string covering both was
- * wrong: `denied` means stop and go to the owner, `unavailable` means come back.
+ * wrong: `denied` means stop and go to the owner, `unavailable` means come back. Both are `FailureClass`
+ * words, so a skip reads the same as any other failure a caller sees — spelled out rather than derived
+ * from it, because this type is wire text and a model reads `Extract<…>` where it should read two words.
  */
 export type SkipKind = 'ineligible' | 'denied' | 'unavailable';
 

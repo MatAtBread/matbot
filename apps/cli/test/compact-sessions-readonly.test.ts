@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 // Values through core, which re-exports them: apps/cli deliberately has no direct plugin-api dependency.
 import { readOnlyError, runAs, installPrincipalCarrier } from '@matatbread/matbot-core';
 import type { Session, Store, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { makeCompactSessionsTool } from '../../../plugins/edit-session/src/compact-sessions.ts';
 
 // `compact_sessions` sweeps the WHOLE session store, and a store partitioned by profile holds sessions

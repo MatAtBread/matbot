@@ -1,37 +1,76 @@
 import type {
-  Tool, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, MimeType, UserContent, FileStore,
+  Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore,
 } from '@matatbread/matbot-plugin-api';
-import { collectBytes, encodeBase64 } from '@matatbread/matbot-plugin-api';
+import { collectBytes, describeProviders, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
+import { withCallFrames } from '@matatbread/matbot-plugin-api/host';
+import { withFailureNote } from './runner.js';
 // The arm mapping is the runner's, not a copy of it: it decides which types may be sent at all, and a
 // rule with two copies is one that gets fixed in one of them.
-import { armFor } from './media.js';
+import { armFor, findAttachment } from './media.js';
+import { MAX_SUB_TURN_DEPTH, runSubTurn, subTurnFrame, subTurnSeed } from './sub-turn.js';
+
+export { MAX_SUB_TURN_DEPTH } from './sub-turn.js';
+
+// A sub-turn's markers come back as this call's own, still carrying the frames the sub-turn's runner stamped
+// on them, so the runner storing them puts `single_turn`'s frame ahead of the calls made inside the sub-turn.
+function* markerEvents(carried: readonly MessageContent[]): Iterable<ToolEvent<never>> {
+  for (const c of carried) {
+    if (c.type !== 'marker') continue;
+    const ev = { type: 'marker' as const, creator: c.creator, data: c.data };
+    yield c.by !== undefined ? withCallFrames(ev, c.by) : ev;
+  }
+}
+
+/** A turn as a model and the validators see it. `system` is for a turn without tools and `transcript` for one
+ *  with them; the executor refuses either on the other kind. */
+export interface SubTurn {
+  prompt:      string;
+  context?:    string;
+  tools?:      boolean;
+  provider?:   string;
+  system?:     string;
+  attach?:     string[];
+  transcript?: boolean;
+}
+
+/** What a turn says. A turn with tools adds the calls it made, and its own messages when it asked for a
+ *  `transcript`. Every name here is spelt out in every tool description of every turn. */
+export interface SubTurnResult {
+  text:       string;
+  toolCalls?: { name: string; input: unknown; isError: boolean }[];
+  messages?:  Message[];
+}
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    single_turn: ToolContract<{ text: string }, { provider?: string; prompt: string; system?: string; attach?: string[] }>;  // the consulted provider's reply text
+    single_turn: ToolContract<SubTurnResult, SubTurn>;
   }
 }
 
 /**
- * Resolve `attach` names/ids to inline media for the one-shot. Looked up by **id first, then name**,
- * across the MediaStore and then the turn's own file store: an id is unambiguous and a name is what a
- * model actually has to hand, and both stores are in play because session media and workspace files are
- * separately owned. A one-shot has no session and so no residency window — whatever is named is sent,
- * once, and the caller's own provider limits are the only ceiling.
+ * Resolve `attach` names/ids to inline media for a turn without tools. An attachment of this session answers
+ * to the id the model is shown beside it. Otherwise it is looked up by **id first, then name**, across the
+ * MediaStore and then the turn's own file store: an id is unambiguous and a name is what a model actually has
+ * to hand, and both stores are in play because session media and workspace files are separately owned. Such a
+ * turn has no session and so no residency window — whatever is named is sent, once, and the caller's own
+ * provider limits are the only ceiling.
  */
 async function resolveAttachments(
-  names:  readonly string[],
-  stores: ReadonlyArray<FileStore | undefined>,
+  names:    readonly string[],
+  messages: readonly Message[],
+  stores:   ReadonlyArray<FileStore | undefined>,
   signal: AbortSignal | undefined,
 ): Promise<{ content: UserContent[]; missing: string[]; unsupported: string[] }> {
   const content: UserContent[] = [];
   const missing: string[] = [];
   const unsupported: string[] = [];
   for (const ref of names) {
+    const attached = findAttachment(messages, ref);
+    const wanted   = attached?.fileId ?? ref;
     let handle = null;
     for (const store of stores) {
       if (store === undefined) continue;
-      handle = await store.get(ref).catch(() => null) ?? await store.getByName(ref).catch(() => null);
+      handle = await store.get(wanted).catch(() => null) ?? await store.getByName(wanted).catch(() => null);
       if (handle !== null) break;
     }
     if (handle === null) { missing.push(ref); continue; }
@@ -40,93 +79,157 @@ async function resolveAttachments(
     const arm = armFor(handle.mimeType);
     if (arm === null) { unsupported.push(`${ref} (${handle.mimeType})`); continue; }
     const bytes = await collectBytes(handle.stream(signal));
-    content.push({ type: arm, data: encodeBase64(bytes), mimeType: handle.mimeType as MimeType, name: handle.name });
+    content.push({ type: arm, data: encodeBase64(bytes), mimeType: handle.mimeType as MimeType, name: attached?.name ?? handle.name });
   }
   return { content, missing, unsupported };
 }
 
+const COMMON = new Set(['prompt', 'context', 'provider', 'attach', 'tools']);
+
+// Validators are optional and a minimal install has none, so this is the boundary for that install.
+function refusal(turn: Record<string, unknown>): string | undefined {
+  if (turn['tools'] !== undefined && typeof turn['tools'] !== 'boolean') return '"tools" is true or false.';
+  const tools = turn['tools'] === true;
+  for (const k of Object.keys(turn)) {
+    if (COMMON.has(k)) continue;
+    if (k === 'system' && !tools) continue;
+    if (k === 'transcript' && tools) continue;
+    if (k === 'system') return '"system" is only for a turn without tools. A turn with tools has this matbot\'s own system prompt, so put instructions in "context".';
+    if (k === 'transcript') return '"transcript" is only returned by a turn with tools.';
+    return `Unknown field "${k}". single_turn takes prompt, context, provider, attach and tools, and system (without tools) or transcript (with tools).`;
+  }
+  if (typeof turn['prompt'] !== 'string' || turn['prompt'] === '') return 'single_turn requires a non-empty string "prompt".';
+  if (turn['context'] !== undefined && typeof turn['context'] !== 'string') return '"context" is a string.';
+  if (turn['transcript'] !== undefined && typeof turn['transcript'] !== 'boolean') return '"transcript" is true or false.';
+  if (turn['attach'] !== undefined && (!Array.isArray(turn['attach']) || turn['attach'].some(a => typeof a !== 'string'))) {
+    return '"attach" is an array of file names or attachment ids, e.g. ["chart.png"].';
+  }
+  return undefined;
+}
+
 /**
- * Exposes {@link MatbotMachine.singleTurn} to the model: a one-shot completion against a configured
- * provider, returning its reply. The intended use is consulting another model (e.g. a different-lineage
- * critic of the current draft, or any generation that should run on a specific provider) with a
- * well-defined interface, rather than the model improvising a bash/curl call.
+ * The model-facing surface of {@link MatbotMachine.singleTurn} and of a sub-turn: a prompt run apart from this
+ * conversation, as one request to a model (the default) or, with `tools: true`, as a full agent turn within
+ * the session (see `sub-turn.ts`). It returns what that turn said, and nothing else.
  *
- * `provider` is optional: omitted, the call runs on the current turn's provider ({@link ToolContext.provider}).
- * This is the general case — name a provider to switch models, or leave it off to relay through the
- * model already in use. It lives in core (not in any plugin) because it is the model-facing surface of
- * a core service (`singleTurn`); core is also the one cross-runtime home both the node app and the
- * browser bundle register it from — the tool-plugin barrel (where `plugin`/`provider` live) is node-only.
+ * One turn per call. Running several at once, and where their answers go, is composition: a body holding the
+ * promises of several calls knows exactly when they have all settled and can send each answer wherever it is
+ * wanted, which a field here could only enumerate. It took a `turns` list during 0.5.0's development, which
+ * read as the map-reduce primitive while having nowhere to put a result but its own return value.
+ *
+ * It lives in core because it is the model-facing surface of core services, and core is the one
+ * cross-runtime home both the node app and the browser bundle register it from.
  */
-export function createSingleTurnTool(services: MatbotMachine): Tool<ToolResultOf<'single_turn'>> {
+// Every word here is sent in every turn, so it says what decides the call and leaves the shape to the
+// contract text and the schema. Probed on DeepSeek and Gemini: without an example neither model delegated
+// agentic work at all, and an example whose prompt read like a command ("Run `npm run typecheck`") had
+// Gemini write a turn as a `bash` call.
+export const DESCRIPTION =
+  'Run a prompt as a separate turn and return what it says. It does not see this conversation: put ' +
+  'everything it needs in `context`.\n' +
+  'Without `tools`: one request to a model, no tools. The cheapest way to summarise, classify, extract, ' +
+  'translate or critique, or to ask another model (`provider`).\n' +
+  'With `tools: true`: a full agent turn with your tools and permissions, which can act over many steps. For ' +
+  'a sub-task that has to act, or whose steps would flood this conversation:\n' +
+  '  { "prompt": "Review src/ for bugs", "context": "Code in /work/app. Bullet list.", "tools": true }';
+
+export function createSingleTurnTool(machine: MatbotMachine): Tool<ToolResultOf<'single_turn'>> {
   const executor: ToolExecutor<ToolResultOf<'single_turn'>> = {
     async *execute(input: unknown, ctx: ToolContext) {
-      const args = input as { provider?: string; prompt?: string; system?: string; attach?: unknown };
-      if (typeof args.prompt !== 'string') { yield { type: 'error', message: 'single_turn requires a string "prompt".' }; return; }
-      const provider = args.provider ?? ctx.provider;
-      if (!provider) {
-        yield { type: 'error', message: 'single_turn needs a "provider" — none was given and there is no current turn provider to fall back to.' };
+      if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+        yield { type: 'error', message: 'single_turn takes a turn: { "prompt": "…" }.' };
         return;
       }
-      if (!services.providers.has(provider)) {
-        const known = [...services.providers.keys()].join(', ') || '(none configured)';
+      const why = refusal(input as Record<string, unknown>);
+      if (why !== undefined) { yield { type: 'error', message: why }; return; }
+      const turn = input as SubTurn;
+      const provider = turn.provider ?? ctx.provider;
+      if (!provider) { yield { type: 'error', message: 'single_turn needs a "provider": none was given and there is no current turn provider to fall back to.' }; return; }
+      if (!machine.providers.has(provider)) {
+        const known = describeProviders(machine.providers) || '(none configured)';
         yield { type: 'error', message: `Unknown provider "${provider}". Configured providers: ${known}.` };
         return;
       }
-      // Attachments make the prompt a UserContent[] rather than a string. Media the store doesn't have
-      // is REPORTED, not silently dropped: a consulted model answering about a file it never saw is the
-      // failure that looks like a bad answer rather than a bad call.
-      const attach = Array.isArray(args.attach) ? args.attach.filter((a): a is string => typeof a === 'string') : [];
-      let prompt: string | UserContent[] = args.prompt;
-      if (attach.length > 0) {
-        const { content, missing, unsupported } = await resolveAttachments(attach, [services.MediaStore, ctx.files], ctx.signal);
-        if (missing.length > 0) {
-          yield { type: 'error', message: `single_turn: no such file(s): ${missing.join(', ')}. Attachments are looked up by store id or by name.` };
+      const said: UserContent[] = [
+        ...(turn.context !== undefined && turn.context !== '' ? [{ type: 'text', text: turn.context } as const] : []),
+        { type: 'text', text: turn.prompt },
+      ];
+      const attach = turn.attach ?? [];
+
+      if (turn.tools === true) {
+        // Session media only, by reference: the runner resolves it against this same session, and anything
+        // else would be written into the session's media as the turn opened. The turn can open a file itself.
+        const refs: UserContent[] = [];
+        for (const ref of attach) {
+          const found = findAttachment(ctx.session.messages, ref);
+          if (found === undefined) {
+            yield { type: 'error', message: `"${ref}" is not an attachment of this conversation. A turn with tools takes attachments by the id shown beside them, and can open a stored file itself.` };
+            return;
+          }
+          refs.push(found);
+        }
+        const principal = tryCurrentPrincipal();
+        if (principal === undefined) { yield { type: 'error', message: 'single_turn has no principal to run a turn with tools as.' }; return; }
+        if (machine.ephemeral === undefined) { yield { type: 'error', message: 'This matbot cannot run a turn with tools beside this one.' }; return; }
+        const depth = subTurnDepth(ctx.session.messages);
+        if (depth >= MAX_SUB_TURN_DEPTH) {
+          yield { type: 'error', message: `This turn is already ${depth} levels below the conversation, the most allowed, so it cannot start a turn with tools. Do this work in this turn.` };
           return;
         }
-        if (unsupported.length > 0) {
-          yield { type: 'error', message:
-            `single_turn: no model endpoint decodes ${unsupported.join(', ')}, so sending it would fail ` +
-            'the call. Convert it to PNG or JPEG, or read the file as text and put that in the prompt.' };
-          return;
-        }
-        prompt = [...content, { type: 'text', text: args.prompt }];
+        // What the turn's tools recorded is yielded before the result, so the runner stores it in this
+        // session as this tool's own markers. Its spend is charged to the caller by `runSubTurn`.
+        let carried: MessageContent[] = [];
+        const work = await runSubTurn(machine, { provider, transcript: turn.transcript === true, content: [subTurnFrame(ctx.session.id), ...refs, ...said] },
+          subTurnSeed(ctx.session.messages, depth + 1), principal, ctx, ctx.signal, markers => { carried = markers; });
+        if ('error' in work) { yield { type: 'error', message: work.error }; return; }
+        yield* markerEvents(carried);
+        yield { type: 'result', value: work };
+        return;
       }
 
-      const res = await services.singleTurn({
-        provider,
-        prompt,
-        signal: ctx.signal,
-        ...(typeof args.system === 'string' ? { system: args.system } : {}),
-      });
-      // Usage is accounting, not conversation: it is captured ambiently (the host's complete() reports
-      // it into the turn's usage sink, attributed to this tool call) — the model gets only the text.
-      yield { type: 'result', value: { text: res.text } };
+      // Media the store doesn't have is REPORTED, not silently dropped: a model answering about a file it
+      // never saw is the failure that looks like a bad answer rather than a bad call.
+      const { content, missing, unsupported } = attach.length > 0
+        ? await resolveAttachments(attach, ctx.session.messages, [machine.MediaStore, ctx.files], ctx.signal)
+        : { content: [], missing: [], unsupported: [] };
+      if (missing.length > 0) {
+        yield { type: 'error', message: `No such file(s): ${missing.join(', ')}. Attachments are looked up by attachment id, store id or name.` };
+        return;
+      }
+      if (unsupported.length > 0) {
+        yield { type: 'error', message:
+          `No model endpoint decodes ${unsupported.join(', ')}, so sending it would fail ` +
+          'the call. Convert it to PNG or JPEG, or read the file as text and put that in the context.' };
+        return;
+      }
+      // Its spend is recorded ambiently, as any tool's completion is.
+      try {
+        const { text } = await machine.singleTurn({
+          provider, prompt: [...content, ...said], signal: ctx.signal, ...(turn.system !== undefined ? { system: turn.system } : {}),
+        });
+        yield { type: 'result', value: { text } };
+      } catch (e) {
+        // The class goes in the text, not a field of its own: what a model reads of this tool is spelt out
+        // in its contract on every turn, and a model reasons from the words anyway.
+        yield { type: 'error', message: withFailureNote(e instanceof Error ? e.message : String(e), failureOf(e)) };
+      }
     },
   };
 
   return {
     name: 'single_turn',
-    description:
-      'Run a single-turn completion against a configured provider and return its reply. This is a ' +
-      'one-shot call — not your own response: you send one `prompt` (and optional `system`), and get ' +
-      'back its text. Use it to consult a different model — e.g. a second, ' +
-      'different-lineage model critiquing your draft, or any generation that should run on a specific ' +
-      'provider. `provider` is OPTIONAL: omit it to run on the current conversation\'s model, or name ' +
-      'a configured provider to switch models (list or add providers with the provider tool). ' +
-      '`attach` is an ARRAY OF STORED FILE NAMES OR IDS (e.g. ["chart.png"]) to send alongside the ' +
-      'prompt, for the consulted model to look at. It is not a content type and not a way to forward ' +
-      'media from THIS conversation — you can already see that; only name a file that exists in the ' +
-      'workspace or media store. Whether the consulted provider can read a given file is its business; ' +
-      'one it cannot take degrades to a text note. An image in a format no endpoint decodes (HEIC, ' +
-      'SVG, BMP, TIFF) is refused outright rather than sent — convert it first, or read it as text.',
+    description: DESCRIPTION,
     inputSchema: {
       type:       'object',
       required:   ['prompt'],
       properties: {
-        provider: { type: 'string', description: 'Name of a configured provider to run the completion against. Optional — defaults to the current turn\'s provider.' },
-        prompt:   { type: 'string', description: 'The user message to send to that provider.' },
-        system:   { type: 'string', description: 'Optional system prompt for the call.' },
-        attach:   { type: 'array', items: { type: 'string' }, description: 'Optional array of stored FILE NAMES or store ids, e.g. ["diagram.png"]. Each is loaded and sent as inline media (image/document/audio) ahead of the prompt text. Not a content type — naming a file that does not exist is an error, not a request for one.' },
+        prompt:     { type: 'string', description: 'The task.' },
+        context:    { type: 'string', description: 'What it needs to know. It cannot see this conversation.' },
+        tools:      { type: 'boolean', description: 'true: a full agent turn that can act. Default: one request, no tools.' },
+        provider:   { type: 'string', description: 'A configured provider. Default: the current one.' },
+        system:     { type: 'string', description: 'A system prompt, without tools.' },
+        attach:     { type: 'array', items: { type: 'string' }, description: 'Files to send: an attachment id from this conversation, or (without tools) a stored file name.' },
+        transcript: { type: 'boolean', description: 'With tools: also return its messages, for code to reduce.' },
       },
     },
     executor,

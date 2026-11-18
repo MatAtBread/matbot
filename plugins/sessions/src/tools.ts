@@ -1,5 +1,6 @@
 import type { Tool, ToolContract, ToolResultOf, ToolContext, Session, Store, Filter, StoreQuery, FieldPath, SessionAppender, SessionRunner } from '@matatbread/matbot-plugin-api';
 import { lastActivityAt, StoreQueryError } from '@matatbread/matbot-plugin-api';
+import { sessionIndicator, type SessionIndicator } from './read-state.js';
 import { compileFilter, applySort, validateQuery, decodeCursor, encodeCursor, type PageState } from '@matatbread/matbot-core/storage-base';
 
 declare module '@matatbread/matbot-plugin-api' {
@@ -11,21 +12,28 @@ declare module '@matatbread/matbot-plugin-api' {
     // right here — every row is copied into a fresh summary and never written back). Intersecting the whole
     // of StoreQuery published a knob no caller could actually turn.
     session_action:
-      | ToolContract<Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>, { action: 'list'; includeArchived?: boolean }>
+      | ToolContract<SessionSummary[], { action: 'list'; includeArchived?: boolean }>
       | ToolContract<
-          { items: Array<{ id: string; title: string | undefined; preview: string; updatedAt: string }>; cursor?: string; total?: number },
+          { items: SessionSummary[]; cursor?: string; total?: number },
           { action: 'query' } & Omit<StoreQuery, 'immutable'>
         >
-      | ToolContract<Session,                          { action: 'get'; sessionId: string }>
+      | ToolContract<Session,                          { action: 'get'; sessionId: string; markRead?: boolean }>
       | ToolContract<{ id: string; title: string;        deferred?: true }, { action: 'rename'; sessionId: string; title: string }>
       | ToolContract<{ id: string; status: 'archived';   deferred?: true }, { action: 'hide'; sessionId: string }>
       | ToolContract<{ id: string; status: 'active';     deferred?: true }, { action: 'unhide'; sessionId: string }>
       // `deferred` while it waits for a turn of that session, which may be this one.
-      | ToolContract<{ id: string; messageIds: string[]; deferred?: true }, { action: 'append'; sessionId?: string; text: string }>;
+      | ToolContract<{ id: string; messageIds: string[]; deferred?: true; traceId?: string }, { action: 'append'; sessionId?: string; text: string; submit?: 'queue' | 'parallel' | 'interrupt' }>;
   }
 }
 
-type SessionSummary = { id: string; title: string | undefined; preview: string; updatedAt: string };
+/** A row of `list`/`query`. `state` is what a session list shows beside it — see {@link SessionIndicator}. */
+export interface SessionSummary {
+  id:        string;
+  title:     string | undefined;
+  preview:   string;
+  updatedAt: string;
+  state?:    SessionIndicator;
+}
 
 function sessionPreview(session: Session): string {
   const first = session.messages.find(m => m.role === 'user');
@@ -35,8 +43,9 @@ function sessionPreview(session: Session): string {
   return text.length > 60 ? `${text.slice(0, 60)}…` : text;
 }
 
-function toSummary(s: Session): SessionSummary {
-  return { id: s.id, title: s.title, preview: sessionPreview(s), updatedAt: s.updatedAt };
+function toSummary(s: Session, run: SessionRunner | undefined): SessionSummary {
+  const state = sessionIndicator(s, run?.status(s.id));
+  return { id: s.id, title: s.title, preview: sessionPreview(s), updatedAt: s.updatedAt, ...(state !== undefined ? { state } : {}) };
 }
 
 // Synthesized, lowercased "columns" holding the conversation text per authorship role — matbot's
@@ -97,7 +106,7 @@ const JOB_CANNOT_EDIT =
   'A background job cannot rename, hide or unhide a session — it would race the turns of the process that ' +
   'owns it. Use "append" to say something in a conversation instead.';
 
-type FieldEdit = { title: string } | { status: Session['status'] };
+type FieldEdit = { title: string } | { status: Session['status'] } | { readAt: string };
 
 // A title or status edit is metadata, not conversational activity: keep updatedAt on the last message
 // (the lastActivityAt invariant) so it doesn't float the session up a recency-sorted list.
@@ -105,17 +114,23 @@ function withEdit(session: Session, edit: FieldEdit): Session {
   return { ...session, ...edit, version: crypto.randomUUID(), updatedAt: lastActivityAt(session) };
 }
 
+// Read up to `readAt` — never back: a reader shown an older copy than one already marked does not undo it.
+const readTo = (readAt: string) => (session: Session): FieldEdit | undefined =>
+  session.readAt !== undefined && session.readAt >= readAt ? undefined : { readAt };
+
 // The precise per-action contract. JSON Schema can't express "title required only for rename"
 // without an awkward oneOf, so the schema stays loose and the description carries this TypeScript
 // discriminated union — which LLMs read accurately — as the source of truth. The executor enforces it.
 type SessionInput =
   | { action: 'list';   includeArchived?: boolean }
   | ({ action: 'query' } & Omit<StoreQuery, 'immutable'>)
-  | { action: 'get';    sessionId: string }
+  | { action: 'get';    sessionId: string; markRead?: boolean }
   | { action: 'rename'; sessionId: string; title: string }
   | { action: 'hide';   sessionId: string }
   | { action: 'unhide'; sessionId: string }
-  | { action: 'append'; sessionId?: string; text: string };
+  | { action: 'append'; sessionId?: string; text: string; submit?: 'queue' | 'parallel' | 'interrupt' };
+
+const SUBMIT_MODES: readonly unknown[] = ['queue', 'parallel', 'interrupt'];
 
 function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool<ToolResultOf<'session_action'>> {
   const isSubAgent = env.isSubAgent ?? (() => false);
@@ -125,14 +140,19 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
   // copy back unconditionally at turn end, so a CAS landing mid-turn succeeds and is then silently undone.
   // So the edit is the runner's to make (`SessionRunner.write`), which waits for that turn if there is one.
   // Setting a field composes with any other write, so a lost compare-and-swap reads again and re-applies.
-  const editFields = async (sessionId: string, edit: FieldEdit): Promise<string | { deferred?: true }> => {
+  // `edit` may depend on what the write finds: `undefined` from it is nothing to write.
+  const editFields = async (
+    sessionId: string, edit: FieldEdit | ((session: Session) => FieldEdit | undefined),
+  ): Promise<string | { deferred?: true }> => {
     if (isSubAgent()) return JOB_CANNOT_EDIT;
     if (!(await store.get(sessionId))) return `Session "${sessionId}" not found.`;
     let outcome: string | undefined = CONCURRENT;
     const attempt = async (): Promise<boolean> => {
       const session = await store.get(sessionId);
       if (!session) { outcome = `Session "${sessionId}" not found.`; return true; }
-      if (!(await store.cas(sessionId, session.version, withEdit(session, edit))).ok) return false;
+      const change = typeof edit === 'function' ? edit(session) : edit;
+      if (change === undefined) { outcome = undefined; return true; }
+      if (!(await store.cas(sessionId, session.version, withEdit(session, change))).ok) return false;
       outcome = undefined;
       return true;
     };
@@ -152,6 +172,10 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       'messages identified by a unique ID, with a title and a status (active or archived). This tool ' +
       'covers the lifecycle: list sessions, search their contents (query), fetch one in full (get), ' +
       'rename one, hide (archive) one, unhide (unarchive) one, or append a message to one.\n\n' +
+      'Each "list"/"query" row may carry "state": "prompting" (a turn is waiting on an answer from a person), ' +
+      '"running" (a turn is running or queued) or "unread" (it has messages nobody has been shown). "get" with ' +
+      '"markRead": true records that what it returns has been shown — for a frontend displaying the ' +
+      'session; reading a session for your own purposes is not showing it to anyone.\n\n' +
       '"append" posts "text" into a conversation as a message from the assistant, without starting a turn. ' +
       'With no "sessionId" it goes to the conversation the run reports to — for a background job, the one ' +
       'the job was created with; in an ordinary turn, the one this call is made from. A job\'s own session ' +
@@ -162,6 +186,20 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
       'that conversation — at once if none is — and while it waits the result says "deferred": true (always, ' +
       'for this conversation). A bare notification that needs no follow-up is telegram_send\'s job; ' +
       'append is the one that keeps context.\n\n' +
+      'With "submit", "text" is not said but ASKED: it is posted as a request to that conversation, which ' +
+      'answers it as it would a person\'s message, with its own tools, and the result carries the answering ' +
+      'turn\'s "traceId". "submit" says what happens if a turn is running there when it arrives (with none, ' +
+      'all three answer at once), and only you know which you need, because it turns on whether your request ' +
+      'depends on messages appended before it: ' +
+      '"queue" waits for that turn to end and is answered with everything appended meanwhile in front of it — ' +
+      'use it when the request is about what you (or turns you started) appended; ' +
+      '"parallel" answers at once, beside that turn, on a copy holding neither that turn\'s work nor anything ' +
+      'appended while it runs — use it only for a request that stands alone; ' +
+      '"interrupt" stops that turn, keeping what it finished, and answers this next, after the appends — ' +
+      'made from that very turn, it ends the turn making the call. Use it when what you ' +
+      'found needs that conversation to act or decide, e.g. "The email 123 from virginmedia.com announces a ' +
+      'planned outage on Friday. What mitigation should we put in place?" — not for a report, which needs ' +
+      'no answer. Write it to stand alone: the conversation sees your words, not your working.\n\n' +
       'A rename, hide or unhide of a session with a turn running in it — including the one this call is ' +
       'made from — is applied once that turn ends, and the result says "deferred": true. Do not re-issue it.\n\n' +
       '"list" and "query" return lightweight summaries — each item\'s "preview" is just the session\'s ' +
@@ -183,7 +221,9 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
         action:          { type: 'string', enum: ['list', 'query', 'get', 'rename', 'hide', 'unhide', 'append'], description: 'The operation to perform.' },
         sessionId:       { type: 'string', description: 'ID of the target session. Required for get/rename/hide/unhide. For append it is optional, and when given it wins outright; when omitted the default is the conversation the run reports to — never a background job\'s own session, which is a throwaway.' },
         text:            { type: 'string', description: 'append only: the message to post.' },
+        submit:          { type: 'string', enum: ['queue', 'parallel', 'interrupt'], description: 'append only: post "text" as a request the conversation answers, rather than as a message from you, and say how it meets a turn running there: "queue" (after it, and after everything appended meanwhile), "parallel" (at once, beside it, without what was appended) or "interrupt" (stop it, then this). Omit to post a message without starting a turn.' },
         title:           { type: 'string', description: 'New title — required for action "rename".' },
+        markRead:        { type: 'boolean', description: 'get only: record that the returned session has been shown to its reader. Default false.' },
         includeArchived: { type: 'boolean', description: 'list only: include archived sessions. Default false.' },
         where:           { type: 'object', description: 'query only: a store-query Filter over "user"/"assistant" (session text) and stored fields. See description.' },
         sort:            { type: 'array',  description: 'query only: SortSpec[] over stored fields, e.g. [{ "field": "updatedAt", "dir": "desc" }].' },
@@ -207,7 +247,8 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
                 : { immutable: true, where: { op: 'neq', field: 'status', value: 'archived' } },
             );
             const sorted = items.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-            yield { type: 'result', value: sorted.map(toSummary) };
+            const run = env.run?.();
+            yield { type: 'result', value: sorted.map(s => toSummary(s, run)) };
             return;
           }
 
@@ -267,11 +308,12 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
             // The for-loop with the early break: synthesize + test one session at a time and stop the
             // moment the page is full, so a low `limit` over hundreds of sessions never searches the tail.
             const rows: SessionSummary[] = [];
+            const run = env.run?.();
             let matched = 0;
             for (const s of ordered) {
               if (!counting && page.limit !== undefined && rows.length >= page.limit) break;
               if (!match({ ...s, ...synthRoles(s) })) continue;
-              if (matched++ >= page.offset && !counting) rows.push(toSummary(s));
+              if (matched++ >= page.offset && !counting) rows.push(toSummary(s, run));
             }
 
             // Optimistic cursor: emitted whenever the page filled, so the next page may be empty — the
@@ -285,12 +327,16 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
           }
 
           case 'get': {
-            const { sessionId } = args as Extract<SessionInput, { action: 'get' }>;
+            const { sessionId, markRead } = args as Extract<SessionInput, { action: 'get' }>;
             if (!sessionId) { yield { type: 'error', message: 'action "get" requires "sessionId".' }; return; }
             // Pure committed history. Pending submissions and the in-progress response are the live
             // "delta" delivered over the runner's event stream, never overlaid onto stored state.
             const session = await store.get(sessionId);
             if (!session) { yield { type: 'error', message: `Session "${sessionId}" not found.` }; return; }
+            // Read up to what this call returns, not to whatever is there when the write lands: it waits for
+            // a running turn, whose reply nobody has been shown. Not awaited — the reader has its answer, and
+            // a mark that cannot land leaves the session unread, which is the truth.
+            if (markRead === true && !isSubAgent()) void editFields(sessionId, readTo(lastActivityAt(session)));
             yield { type: 'result', value: session };
             return;
           }
@@ -324,8 +370,12 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
           }
 
           case 'append': {
-            const { sessionId, text } = args as Extract<SessionInput, { action: 'append' }>;
+            const { sessionId, text, submit } = args as Extract<SessionInput, { action: 'append' }>;
             if (typeof text !== 'string' || text.trim() === '') { yield { type: 'error', message: 'action "append" requires "text".' }; return; }
+            if (submit !== undefined && !SUBMIT_MODES.includes(submit)) {
+              yield { type: 'error', message: `"submit" is one of ${SUBMIT_MODES.map(m => `"${m}"`).join(', ')}, or omitted to post a message without starting a turn; got ${JSON.stringify(submit)}.`, failure: 'invalid' };
+              return;
+            }
             const appender = ctx.appender ?? env.appender?.();
             if (appender === undefined) { yield { type: 'error', message: 'Nothing here can append to a session.' }; return; }
             // A background job's own session — in its own process, or an ephemeral run's here — is a throwaway
@@ -338,10 +388,11 @@ function makeSessionActionTool(store: Store<Session>, env: SessionToolEnv): Tool
               return;
             }
             try {
-              const { sessionId: id, messageIds, deferred } = await appender.append(target, [
-                { role: 'assistant', content: [{ type: 'text', text, origin: 'robo' }] },
+              const content = [{ type: 'text' as const, text, origin: 'robo' as const }];
+              const { sessionId: id, messageIds, deferred, traceId } = await appender.append(target, [
+                submit === undefined ? { role: 'assistant', content } : { role: 'user', content, mode: submit },
               ]);
-              yield { type: 'result', value: { id, messageIds, ...(deferred ? { deferred } : {}) } };
+              yield { type: 'result', value: { id, messageIds, ...(deferred ? { deferred } : {}), ...(traceId !== undefined ? { traceId } : {}) } };
             } catch (e) {
               yield { type: 'error', message: e instanceof Error ? e.message : String(e) };
             }

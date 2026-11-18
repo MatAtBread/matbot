@@ -1,7 +1,6 @@
 ---
 "@matatbread/matbot-plugin-api": patch
 "@matatbread/matbot-core": patch
-"@matatbread/matbot-default-gate": patch
 "@matatbread/matbot-function-tools": patch
 "@matatbread/matbot-tool-types": patch
 "@matatbread/matbot-browser": patch

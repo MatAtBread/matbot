@@ -1,4 +1,4 @@
-import { importableByName, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { refusalMessage } from '@matatbread/matbot-plugin-api';
 import type { MatbotMachine, PluginSettings, Tool, ToolContext, ToolContract, ToolExecutor, ToolResultOf } from '@matatbread/matbot-plugin-api';
 
 /**
@@ -8,11 +8,12 @@ import type { MatbotMachine, PluginSettings, Tool, ToolContext, ToolContract, To
  */
 export const TIMEOUT_KEY = 'timeout_ms';
 /**
- * An optional RESTRICTION on what a body may import, as exact specifiers or prefixes (`['node:']`).
- * Absent ⇒ no restriction, and every specifier reaches the gate; `[]` is the opposite of absent and
- * switches imports off. See `FunctionRunner.permittedImports`.
+ * Retired in 0.5.0: an import restriction this runner carried, in front of the permission gate. The
+ * gate says the same thing — a standing denial refuses a module outright — so it is not read. Still
+ * NAMED, because an installation that authored it would otherwise have its restriction silently become
+ * "ask at the call", which is a widening nobody chose. The warning goes in 0.6.0.
  */
-export const IMPORTS_KEY = 'permit_imports';
+const RETIRED_IMPORTS_KEY = 'permit_imports';
 
 /** What is IN EFFECT, which is what a reader of this tool wants: the stored override if there is one,
  *  else the installation's `default_settings:` floor, else the coded default. Nothing distinguishes the
@@ -21,8 +22,6 @@ export interface RunnerConfig {
   timeoutMs:        number;
   /** The coded default, so `timeoutMs` can be read against something. */
   timeoutMsDefault: number;
-  /** `null` ⇒ no restriction: every specifier reaches the gate. `[]` ⇒ imports are switched off. */
-  permitImports:    string[] | null;
   /** The identifiers the runner does not bind. Fixed, and reported so a reader need not guess. */
   withheldGlobals:  string[];
   /** A stored or configured value that could not be used, and what was used instead. */
@@ -35,78 +34,54 @@ export function timeoutProblem(value: unknown): string | undefined {
     ? undefined : 'must be a non-negative integer (0 removes the time bound)';
 }
 
-/** Why `value` cannot be a `permit_imports`, or `undefined` if it can. An entry naming a path or a URL
- *  is refused rather than kept, since it could never admit anything a body is allowed to import. */
-export function permitProblem(value: unknown): string | undefined {
-  if (!Array.isArray(value) || !value.every(s => typeof s === 'string' && s !== '')) {
-    return 'must be an array of non-empty specifiers or prefixes (e.g. ["node:", "node:fs"]), or [] to switch imports off';
-  }
-  const bad = value.filter(p => !importableByName(p.replace(/\/$/, '')));
-  return bad.length > 0
-    ? `names something a body can never import (${bad.join(', ')}): entries are node builtins or package names, never paths or URLs`
-    : undefined;
-}
-
 /**
- * The two settings as they will be USED. They are checked here, and not only by `set`, because
- * `default_settings:` and a hand-edited document reach the runner without passing through the tool.
- * A bad time bound falls back to the coded default. A bad restriction falls back to `[]`, so imports are
- * off: falling back to "no restriction" would turn a typo in a restriction into the widest setting.
+ * The setting as it will be USED. Checked here, and not only by `set`, because `default_settings:` and a
+ * hand-edited document reach the runner without passing through the tool. A bad time bound falls back to
+ * the coded default.
  */
 export async function readRunnerConfig(settings: PluginSettings, codeDefaultMs: number):
-    Promise<{ timeoutMs: number; permit: readonly string[] | undefined; problems: string[] }> {
+    Promise<{ timeoutMs: number; problems: string[] }> {
   const problems: string[] = [];
   const rawTimeout = await settings.get<unknown>(TIMEOUT_KEY);
-  const rawPermit  = await settings.get<unknown>(IMPORTS_KEY);
   let timeoutMs = codeDefaultMs;
   if (rawTimeout !== undefined) {
     const why = timeoutProblem(rawTimeout);
     if (why === undefined) timeoutMs = rawTimeout as number;
     else problems.push(`${TIMEOUT_KEY} ${why}, but is ${JSON.stringify(rawTimeout)}; using ${codeDefaultMs}ms.`);
   }
-  let permit: readonly string[] | undefined;
-  if (rawPermit !== undefined) {
-    const why = permitProblem(rawPermit);
-    if (why === undefined) permit = rawPermit as readonly string[];
-    else {
-      permit = [];
-      problems.push(`${IMPORTS_KEY} ${why}, but is ${JSON.stringify(rawPermit)}; imports are switched off until it is corrected.`);
-    }
+  if (await settings.get<unknown>(RETIRED_IMPORTS_KEY) !== undefined) {
+    problems.push(`${RETIRED_IMPORTS_KEY} is no longer read, so it restricts nothing: every import is asked about at the call. `
+      + 'Refuse a module outright with a standing denial in the permission gate instead — under default_settings: '
+      + "'@matatbread/matbot-default-gate': { 'deny:tool_function.import': { '*': ['* node:child_process'] } } — and remove this key.");
   }
-  return { timeoutMs, permit, problems };
+  return { timeoutMs, problems };
 }
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     function_runner_config:
       | ToolContract<RunnerConfig, { action: 'get' }>
-      | ToolContract<RunnerConfig, { action: 'set'; timeoutMs?: number | null; permitImports?: string[] | null }>
+      | ToolContract<RunnerConfig, { action: 'set'; timeoutMs: number | null }>
       | ToolContract<RunnerConfig, { action: 'clear' }>;
   }
 }
 
-/** Prose for the gate, per key: a subject is a key and keys make terrible questions. */
-function labelFor(key: string, now: RunnerConfig): string {
-  return key === IMPORTS_KEY
-    ? `Change what a \`tool_function\` body may import on this installation? Currently ${
-        now.permitImports === null ? 'any module, each asked about at the call'
-          : now.permitImports.length === 0 ? 'nothing — imports are switched off'
-          : now.permitImports.join(', ')}. This is the restriction the per-import prompt cannot widen.`
-    : `Change how long a \`tool_function\` body may compute without awaiting? Currently ${
-        now.timeoutMs === 0 ? 'unbounded' : `${now.timeoutMs}ms`}.`;
+/** Prose for the gate: a subject is a key and keys make terrible questions. */
+function labelFor(now: RunnerConfig): string {
+  return `Change how long a \`tool_function\` body may compute without awaiting? Currently ${
+    now.timeoutMs === 0 ? 'unbounded' : `${now.timeoutMs}ms`}.`;
 }
 
 /**
- * `function_runner_config` — read and change this runner's two settings at run time.
+ * `function_runner_config` — read and change this runner's setting at run time.
  *
  * The settings are the plugin's own, so an installation authors them under `default_settings:` keyed by
  * the package name, exactly as it would any other plugin's; this tool writes the ordinary per-principal
  * OVERRIDE above that floor, which is the write path a running actor has for every other setting in
- * matbot. What it buys is that `permit_imports` no longer needs a restart to narrow — and the usual
- * consequence of an override applies: a stored value beats the configured default, so this can WIDEN a
- * floor an installation authored. That is why the write is gated, and why an installation needing a
- * restriction nothing in-process can lift does not reach for this plugin at all: it replaces the runner
- * package, which is what the `FunctionRunner` seam is for.
+ * matbot. The usual consequence of an override applies: a stored value beats the configured default, so
+ * this can WIDEN a floor an installation authored. That is why the write is gated, and why an
+ * installation needing a bound nothing in-process can lift replaces the runner package, which is what the
+ * `FunctionRunner` seam is for.
  *
  * Whose settings a change is depends on how the settings store is partitioned, which is the storage's
  * business: by principal (a profiles backend), so a change is that principal's environment alone, or not
@@ -119,11 +94,10 @@ export function createRunnerConfigTool(
   codeDefaultMs: number,
 ): Tool<ToolResultOf<'function_runner_config'>> {
   const current = async (): Promise<RunnerConfig> => {
-    const { timeoutMs, permit, problems } = await readRunnerConfig(services.settings(), codeDefaultMs);
+    const { timeoutMs, problems } = await readRunnerConfig(services.settings(), codeDefaultMs);
     return {
       timeoutMs,
       timeoutMsDefault: codeDefaultMs,
-      permitImports:    permit === undefined ? null : [...permit],
       withheldGlobals:  [...(services.FunctionRunner?.withheldGlobals ?? [])],
       ...(problems.length > 0 ? { problems } : {}),
     };
@@ -131,7 +105,7 @@ export function createRunnerConfigTool(
 
   const executor: ToolExecutor<ToolResultOf<'function_runner_config'>> = {
     async *execute(input: unknown, ctx: ToolContext) {
-      const args = input as { action?: string; timeoutMs?: unknown; permitImports?: unknown };
+      const args = input as { action?: string; timeoutMs?: unknown };
       const settings = services.settings();
       switch (args.action) {
         case 'get':
@@ -141,58 +115,40 @@ export function createRunnerConfigTool(
         case 'set':
         case 'clear': {
           // `null` is "revert to the installation's default", which is what `delete` means on a layered
-          // setting — not "no restriction", which is what an ABSENT default happens to mean.
-          const writes = new Map<string, readonly string[] | number | null>();
-          if (args.action === 'clear') {
-            writes.set(TIMEOUT_KEY, null);
-            writes.set(IMPORTS_KEY, null);
-          } else {
-            if (args.timeoutMs !== undefined) {
-              const why = args.timeoutMs === null ? undefined : timeoutProblem(args.timeoutMs);
-              if (why !== undefined) {
-                yield { type: 'error', message: `"timeoutMs" ${why}, or null to revert to the installation default.` };
-                return;
-              }
-              writes.set(TIMEOUT_KEY, args.timeoutMs as number | null);
-            }
-            if (args.permitImports !== undefined) {
-              const why = args.permitImports === null ? undefined : permitProblem(args.permitImports);
-              if (why !== undefined) {
-                yield { type: 'error', message: `"permitImports" ${why}, or null to revert to the installation default.` };
-                return;
-              }
-              writes.set(IMPORTS_KEY, args.permitImports as readonly string[] | null);
-            }
-            if (writes.size === 0) {
-              yield { type: 'error', message: 'action "set" requires at least one of "timeoutMs" or "permitImports". Use "clear" to revert both to the installation default.' };
+          // setting.
+          let value: number | null = null;
+          if (args.action === 'set') {
+            if (args.timeoutMs === undefined) {
+              yield { type: 'error', message: 'action "set" requires "timeoutMs". Use "clear" to revert it to the installation default.' };
               return;
             }
-          }
-
-          // One decision per KEY, because they are two decisions: what a body may reach and how long it
-          // may compute are not the same question, and a standing answer for one must not carry the
-          // other. Narrowest first — this key, then any setting of this runner.
-          const now = await current();
-          for (const key of writes.keys()) {
-            const permit = await ctx.gate({
-              gate: 'set', subject: key, label: labelFor(key, now), fallback: false,
-              standing: [
-                { subject: key, label: `Always allow changing \`${key}\`` },
-                { subject: '*', label: 'Always allow changing this runner\'s settings' },
-              ],
-            });
-            if (!permit.allowed) {
-              yield { type: 'error', message: `${refusalMessage(permit)} \`${key}\` was not changed.` };
+            const why = args.timeoutMs === null ? undefined : timeoutProblem(args.timeoutMs);
+            if (why !== undefined) {
+              yield { type: 'error', message: `"timeoutMs" ${why}, or null to revert to the installation default.` };
               return;
             }
+            value = args.timeoutMs as number | null;
           }
 
-          for (const [key, value] of writes) {
-            if (value === null) await settings.delete(key);
-            else await settings.set(key, value);
+          const permit = await ctx.gate({
+            gate: 'set', subject: TIMEOUT_KEY, label: labelFor(await current()), fallback: false,
+            standing: [
+              { subject: TIMEOUT_KEY, label: `changing \`${TIMEOUT_KEY}\`` },
+              { subject: '*', label: 'changing this runner\'s settings' },
+            ],
+          });
+          if (!permit.allowed) {
+            yield { type: 'error', message: `${refusalMessage(permit)} \`${TIMEOUT_KEY}\` was not changed.` };
+            return;
           }
-          // Nothing to rebuild: the runner reads these at the start of every invocation, so the next run or
-          // check sees them. Reported as read back, which is what that invocation will get.
+
+          if (value === null) await settings.delete(TIMEOUT_KEY);
+          else await settings.set(TIMEOUT_KEY, value);
+          // A stored override of the retired key is otherwise unremovable through any tool, and keeps its
+          // warning alive; one in `default_settings:` is the yaml's to drop.
+          if (args.action === 'clear') await settings.delete(RETIRED_IMPORTS_KEY);
+          // Nothing to rebuild: the runner reads this at the start of every invocation, so the next run
+          // sees it. Reported as read back, which is what that invocation will get.
           yield { type: 'result', value: await current() };
           return;
         }
@@ -207,26 +163,19 @@ export function createRunnerConfigTool(
     name: 'function_runner_config',
     description:
       'Read or change how `tool_function` bodies are run by this installation (the node FunctionRunner). '
-      + 'Two settings. `permitImports` is an optional RESTRICTION on what a body may import, as exact '
-      + 'specifiers or prefixes of builtins and package names (["node:"] is every builtin, ["node:fs", '
-      + '"node:path"] just those two; a path or a URL is never importable, so cannot be an entry): '
-      + 'null means no restriction, so every import is asked about at the call; [] switches imports off '
-      + 'entirely. A specifier outside the restriction cannot be allowed by anyone at the call, and it '
-      + 'fails the type-check rather than being refused later. `timeoutMs` is how long a body may compute '
-      + 'WITHOUT awaiting; 0 removes that bound and nothing else (the withheld globals and the import gate '
-      + 'are unaffected). `get` reports what is in effect, the coded default, and the globals the runner '
-      + 'does not bind. `set` takes either or both; passing null for one reverts it to the installation '
-      + 'default, and `clear` reverts both. A change applies from the next run or check, and asking to make '
-      + 'one requires permission. Stored function '
-      + 'definitions are NOT re-checked when this changes: `tool_function` with action `check` reports '
-      + 'which of them passed in a different environment.',
+      + '`timeoutMs` is how long a body may compute WITHOUT awaiting; 0 removes that bound and nothing else '
+      + '(the withheld globals and the import gate are unaffected). `get` reports what is in effect, the '
+      + 'coded default, and the globals the runner does not bind. `set` takes `timeoutMs`, null reverting it '
+      + 'to the installation default, as `clear` does (which also forgets a stored `permit_imports`, a '
+      + 'retired setting). A change applies from the next run, and asking to '
+      + 'make one requires permission. What a body may import is not set here: each import is a permission '
+      + 'decision at the call (`gate_action` lists the standing answers).',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:        { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
-        timeoutMs:     { type: ['integer', 'null'], description: 'For "set": the synchronous time bound in ms, 0 for none, or null to revert to the installation default.' },
-        permitImports: { type: ['array', 'null'], items: { type: 'string' }, description: 'For "set": the specifiers or prefixes a body may import, [] for none, or null to revert to the installation default.' },
+        action:    { type: 'string', enum: ['get', 'set', 'clear'], description: 'The operation to perform.' },
+        timeoutMs: { type: ['integer', 'null'], description: 'For "set": the synchronous time bound in ms, 0 for none, or null to revert to the installation default.' },
       },
     },
     executor,

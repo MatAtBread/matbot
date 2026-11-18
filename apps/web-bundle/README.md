@@ -18,7 +18,7 @@ build on.
 ## Build & run
 
 ```bash
-pnpm web-build    # → dist/matbot.html (rich UI) + dist/matbot-demo.html (minimal dom demonstrator)
+pnpm web-build    # → dist/matbot.html
 open apps/web-bundle/dist/matbot.html # file:// — just works
 
 # or, to also exercise runtime *remote* plugin loading (which fetches .ts over http):
@@ -54,7 +54,7 @@ together by an import map at runtime. The mechanism is the browser mirror of the
    only for *runtime* remote `.ts` plugin loading — see the caveat below — never for the baseline
    boot.)
 3. **`src/bootstrap.ts`** is just another inlined module. It builds `MatbotServices` (the browser
-   analogue of `apps/cli/src/index.ts`), installs the constant principal carrier, and runs the real
+   analogue of `apps/cli/src/boot.ts`), installs the constant principal carrier, and runs the real
    `loadPlugins` / resolver / `SessionRunner` unchanged. The whole architecture runs as-is.
 
 Because everything is in-memory (blobs + an injected import map, no service worker, no `fetch`, no
@@ -63,17 +63,18 @@ host.
 
 ## What's a plugin here (not core)
 
-The web defaults are plugins, never core packages. The **auto-load core** (`matbot.web.json` →
-`plugins`) is kept minimal — just two:
+The **auto-load core** (`matbot.web.json` → `plugins`) is kept minimal — just one:
 
-- **`@matatbread/matbot-browser`** — the storage backend (IndexedDB `Store`s + OPFS `FileStore`),
-  the `LocalStorageVault`, and the browser `plugin` management tool. It also persists user-added
-  plugins and replays them on reload.
 - **`@matatbread/matbot-frontend-web`** (browser entry) — the full-featured in-process UI: the same
-  `index.html` + `app.js` the Node server serves, mounted with no wire. (The `matbot-demo.html`
-  bundle swaps this for **`@matatbread/matbot-frontend-dom`**, a minimal ~450-line demonstrator.)
+  `index.html` + `app.js` the Node server serves, mounted with no wire.
 
-Everything else browser-safe — `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
+What every browser install needs is the host's, not a plugin's: `bootstrap.ts` builds the storage
+backend (IndexedDB `Store`s + OPFS `FileStore`), the `LocalStorageVault`, and the `plugin` and
+`provider` tools from **`@matatbread/matbot-browser`**'s exports, and keeps the list of plugins a user
+adds and loads them again on reload — the same shape as the CLI, which builds its own from the
+filesystem. The `browser` plugin itself is bundled, and only makes that backend nameable.
+
+Everything else browser-safe — `browser`, `http`, `ask-user`, `sessions`, `edit-session`, `workspace`,
 `rumsfeld`, `triggers`, `skills`, `mcp-http`, `whoami`, `hook-logger`, `persist-ki-bge`,
 `json-validation`, `tool-store`, `function-tools`, `tool-router`, `cognition`, and the
 `storage/google-drive` backend — is **baked-but-idle** (`bundledPlugins`): in the artifact and the
@@ -83,10 +84,10 @@ google Gemini — pure `fetch`) are inlined as wizard-selectable *types* rather 
 providers — including **customer-services**, a free self-contained demo LLM the wizard offers with no
 endpoint or API key required (zero-config first run). **webllm** is the other self-contained one: open models (Qwen3-4B by
 default) on the GPU in the page, with WebLLM imported from a CDN only when it is chosen. Node-only plugins (`bash`, `docker-bash`, the stdio `mcp`
-plugin, `skills-node`, the node web frontend's server entry) are omitted — they need Node primitives.
+plugin, `background-jobs-node`, the node web frontend's server entry) are omitted — they need Node primitives.
 Note the MCP split: the stdio `@matatbread/matbot-tool-mcp` is Node-only, but the cross-runtime
-`@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `skills` plugin is
-cross-runtime and bundled; only its `skills-node` filesystem specialization is Node-only. See
+`@matatbread/matbot-mcp-http` (HTTP/SSE servers) *is* bundled. Likewise the base `background-jobs`
+plugin is cross-runtime and bundled; only its `background-jobs-node` specialization is Node-only. See
 [WEB-BUNDLE.md](../../docs/WEB-BUNDLE.md) for the three-layer plugin model.
 
 Built-in tools `plugin` (list/add/remove/reload/discover_local/store-key) and `provider` (list/add/remove) are present too,
@@ -109,6 +110,6 @@ you don't want the wizard.
 - **Runtime remote plugin loading** (`plugin add <url>`) requires http (not `file://`) and a recent
   browser; it fetches raw `.ts` and type-strips it in-page, lazy-loading sucrase from a CDN on first
   use (so that one path needs network). The inlined baseline has neither requirement.
-- **Size**: ~530 KB for the full UI (`matbot.html`), ~270 KB for the minimal `matbot-demo.html` —
+- **Size**: ~530 KB —
   the build-time-stripped JS modules and the loader, nothing else. No compiler is inlined.
 - Secrets persist in `localStorage` in plaintext — single-user local use only.

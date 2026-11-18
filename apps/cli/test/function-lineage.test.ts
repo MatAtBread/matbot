@@ -37,9 +37,11 @@ test('a permitted edit keeps the lineage, so the grants filed under it still app
 
   assert.equal(await lineage.carry(ctxIn('S1', () => permitted('user'), asked), { kind: 'function', name: 'probe' },
     [{ tool: 'probe', before: V1, after: V2 }]), 'kept');
-  assert.deepEqual(asked.map(r => [(r as { namespace?: string }).namespace, r.gate, r.subject, r.fallback]),
-    [['tool_function', 'edit', 'probe@session:S1', false]]);
-  assert.deepEqual(asked[0]?.standing?.map(s => s.subject), ['probe@session:S1']);
+  // Asked about the function, and rememberable for the SESSION only: the session is the gate's context to
+  // scope an answer by, so it is not in the subject.
+  assert.deepEqual(asked.map(r => [(r as { namespace?: string }).namespace, r.gate, r.subject, r.fallback, r.lifetimes]),
+    [['tool_function', 'edit', 'probe', false, ['session']]]);
+  assert.deepEqual(asked[0]?.standing?.map(s => s.subject), ['probe']);
   assert.equal(await lineage.resolve(await versionedSubject('probe', V2)), v1);
 
   // A chain resolves to its first version; coming back to a version already permitted asks nothing.
@@ -80,7 +82,7 @@ test("a package is asked about once for all its exports", async () => {
   assert.equal(await lineage.carry(ctxIn('S1', () => permitted('user'), asked), { kind: 'package', name: 'Pkg' },
     [{ tool: 'Pkg__a', before: P1, after: P2 }, { tool: 'Pkg__b', before: P1, after: P2 }]), 'kept');
   assert.equal(asked.length, 1);
-  assert.equal(asked[0]?.subject, 'Pkg@session:S1');
+  assert.equal(asked[0]?.subject, 'Pkg');
   for (const tool of ['Pkg__a', 'Pkg__b']) {
     assert.equal(await lineage.resolve(await versionedSubject(tool, P2)), await versionedSubject(tool, P1));
   }

@@ -8,8 +8,8 @@ import {
   loadPlugins, unloadPlugin, quiesced,
 } from '@matatbread/matbot-core';
 import type { Vault, MatbotMachine, StorageBackend } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 import type { Layer } from './fixtures/stacks-service.ts';
 
@@ -26,7 +26,7 @@ let seq = 0;
 async function machine(t: { after(fn: () => Promise<void>): void }) {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-layers-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const { services } = assembleMachine({
+  const { services, dispose } = assembleMachine({
     bootBackend: new FilesystemStorageBackend(join(dir, 'boot')),
     vault:       { resolve: async (r: string) => r } as unknown as Vault,
     providers:   new ProviderRegistryImpl(new Map()),
@@ -39,6 +39,7 @@ async function machine(t: { after(fn: () => Promise<void>): void }) {
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(dispose);
   return { services, dir };
 }
 

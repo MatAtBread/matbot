@@ -1,6 +1,7 @@
 import type { FileHandle } from './files.js';
 import type { MessageContent, Session } from './messages.js';
 import type { Usage } from './provider.js';
+import type { FailureClass } from '../errors.js';
 
 // ── Pipeline events ─────────────────────────────────────────────────────────────
 
@@ -73,7 +74,8 @@ export type TurnEvent =
   // ── terminals: exactly one per turn ──
   | { type: 'done';           session: Session;       traceId: string }
   | { type: 'aborted';        reason: string; session: Session; traceId: string }
-  | { type: 'error';          error: string;          traceId: string }
+  // `failure` says whether trying again could help (see `FailureClass`); absent ⇒ whatever failed did not say.
+  | { type: 'error';          error: string;          traceId: string; failure?: FailureClass }
   // A queued submission dropped before it ever ran (e.g. by `SessionRunner.abort`). It carries no
   // session because nothing ran and so nothing was persisted — but it does have a traceId: the
   // submission it cancels was assigned one at enqueue, and a frontend needs it to retire that bubble.

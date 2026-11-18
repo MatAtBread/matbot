@@ -8,8 +8,8 @@ import {
   installUsageCarrier, onContextQuiesce,
 } from '@matatbread/matbot-core';
 import type { Vault, FileStore, KnowledgeIndex, CompletionEvent, ProviderAdapter, MatbotPlugin } from '@matatbread/matbot-core';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
-import { defaultGate } from '@matatbread/matbot-default-gate';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
+import { defaultGate } from '@matatbread/matbot-core';
 import { FilesystemStorageBackend } from '@matatbread/matbot-storage-filesystem';
 
 // Both hosts now stand their machine up through `assembleMachine`, so what used to be two hand-kept
@@ -33,7 +33,6 @@ async function machine(t: { after(fn: () => Promise<void>): void }, extra: { res
     bootBackend: boot,
     vault:       vault({ KEY: 'secret-value' }),
     providers:   new ProviderRegistryImpl(new Map()),
-    gate:        defaultGate,
     version:     '9.9.9',
     ...extra,
     host: () => ({
@@ -43,6 +42,7 @@ async function machine(t: { after(fn: () => Promise<void>): void }, extra: { res
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(assembled.dispose);
   return { ...assembled, boot, other };
 }
 
@@ -84,7 +84,7 @@ test('a swap-member is capture-safe and reverts to its boot impl', async t => {
   assert.notEqual(await captured.search([{ term: 'x' }], new AbortController().signal), marker, 'and follows the revert');
 });
 
-test('the core tools arrive with the machine', async t => {
+test('the core tools arrive with a machine given no gate, the default gate\'s gate_action among them', async t => {
   const { services } = await machine(t);
   const names = services.tools.list().map(tool => tool.name);
   for (const name of ['gate_action', 'single_turn', 'about_matbot']) assert.ok(names.includes(name), name);
@@ -122,7 +122,7 @@ test('an ephemeral run\'s turn holds the machine while it runs', { timeout: 1000
       })();
     },
   };
-  const { services } = assembleMachine({
+  const { services, dispose } = assembleMachine({
     bootBackend: new FilesystemStorageBackend(join(dir, 'boot')),
     vault:       vault({}),
     providers:   new ProviderRegistryImpl([['fake', { name: 'fake', module: 'fake-adapter', model: 'fake' }]]),
@@ -135,6 +135,7 @@ test('an ephemeral run\'s turn holds the machine while it runs', { timeout: 1000
       TypeScriptStripper: { strip: (s: string) => s },
     }),
   });
+  t.after(dispose);
 
   let landed = false;
   let landedDuringTurn: boolean | undefined;
@@ -172,4 +173,12 @@ test('a provider\'s secrets resolve through the host\'s resolver when it supplie
   services.providers.register({ name: 'p', module: 'no-such-adapter', model: 'm', credentials: { apiKey: '${KEY}' } });
   await assert.rejects(services.complete({ provider: 'p', messages: [] }), /no loadable adapter/);
   assert.deepEqual(seen, ['${KEY}']);
+});
+
+test('a second machine in the process is refused while the first stands, and allowed once it is disposed', async t => {
+  const first = await machine(t);
+  await assert.rejects(machine(t), /already assembled in this process/);
+  await first.dispose();
+  const second = await machine(t);
+  assert.ok(second.services.tools.resolve('gate_action'));
 });

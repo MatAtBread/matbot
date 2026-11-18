@@ -72,24 +72,12 @@ the baked scaffold + `app.js`, and mounts.
 
 ---
 
-## Two bundles
+## Building
 
-`pnpm web-build` produces both artifacts (each from its own config in
-[apps/web-bundle/](../apps/web-bundle/)):
-
-| Output | Config | Frontend | Purpose |
-|---|---|---|---|
-| **`dist/matbot.html`** | `matbot.web.json` | `frontend/web` (browser entry) | The default, full-featured UI — sessions sidebar, files, plugin manager, markdown, the works. |
-| **`dist/matbot-demo.html`** | `matbot.web-demo.json` | `frontend/dom` | A minimal ~450-line in-process demonstrator, kept deliberately simple. |
-
-```bash
-pnpm web-build          # both bundles
-# under the hood:
-#   assemble.mjs                       → dist/matbot.html
-#   assemble.mjs matbot.web-demo.json  → dist/matbot-demo.html
-```
-
-A given bundle hosts exactly one frontend; the two never coexist.
+`pnpm web-build` produces **`dist/matbot.html`** from `matbot.web.json` in
+[apps/web-bundle/](../apps/web-bundle/): `frontend/web`'s browser entry — sessions sidebar, files,
+plugin manager, markdown, the works. `assemble.mjs <config>` builds from another config, which is how an
+installation ships a bundle of its own.
 
 ---
 
@@ -104,7 +92,7 @@ The browser has no `matbot.yaml`. Its `matbot.web.json` is the analogue, and plu
 
 2. **Baked-but-idle — `bundledPlugins[]`.** Baked into the artifact *and* the import map but **not**
    auto-loaded. They're the browser analogue of Node's on-disk `plugins` — present, ready,
-   and offered for on-demand activation. The `browser` plugin tool's **`discover_local`** action
+   and offered for on-demand activation. The browser `plugin` tool's **`discover_local`** action
    lists them (with `specifier` = their package name); the UI's plugin panel and "enable" banners
    surface them. Loading one is a single `plugin add`.
 
@@ -113,7 +101,8 @@ The browser has no `matbot.yaml`. Its `matbot.web.json` is the analogue, and plu
 
 ### Why baked-but-idle matters: persistence
 
-User-added plugins are persisted (in IndexedDB by the `browser` plugin) and **replayed on reload**.
+User-added plugins are persisted (in IndexedDB, by the bundle's bootstrap) and **loaded again on reload**,
+after the configured ones — as the CLI loads `matbot.yaml`'s `plugins:`.
 The specifier you persist therefore has to re-resolve on the next boot — and this is where the
 layers differ sharply:
 
@@ -122,7 +111,7 @@ layers differ sharply:
 - A `mbmod:` synthetic id or a `/plugins/…` HTTP path does *not* survive cleanly (ephemeral blob, or
   http-only re-fetch).
 
-So the `browser` plugin tool **canonicalizes what it persists**: after a successful load, if the
+So the browser `plugin` tool **canonicalizes what it persists**: after a successful load, if the
 plugin is baked (its name is a key in the bundle's `packageEntries`), it persists the **package
 name**; only genuinely remote plugins keep their URL
 ([plugin-tool.ts](../plugins/browser/src/plugin-tool.ts)). The package name is also the one

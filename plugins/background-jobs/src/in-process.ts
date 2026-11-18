@@ -1,7 +1,11 @@
 import type { AppendMessage, MatbotMachine, Session, SessionAppender } from '@matatbread/matbot-plugin-api';
 import { tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
-import { runEphemeralTurn } from '@matatbread/matbot-core';
-import { appendFor, jobContext, jobInfo, REPLY_TAIL, type JobRunner, type RunOutcome, type RunSpec } from './jobs.js';
+import { drainEphemeralTurn } from '@matatbread/matbot-core';
+import { appendFor, filterJobTriggers, jobContext, jobInfo, REPLY_TAIL, type JobRunner, type JobTriggers, type RunOutcome, type RunSpec } from './jobs.js';
+
+// The job turns in flight here that withhold triggers, by their ephemeral session's id: a job's turn runs on
+// this machine beside every conversation, so the filter has to tell them apart, and the id is minted here.
+const withheld = new Map<string, JobTriggers>();
 
 /**
  * A job's turn on an ephemeral run in this process: a private runner over an in-memory session, so the
@@ -13,12 +17,13 @@ import { appendFor, jobContext, jobInfo, REPLY_TAIL, type JobRunner, type RunOut
  * process's heap. Its tools defend themselves as a chat turn's do; `matbot-background-jobs-node` is the
  * choice for jobs that need the harder boundary.
  */
-export function inProcessRunner(machine: MatbotMachine): JobRunner | undefined {
+export async function inProcessRunner(machine: MatbotMachine): Promise<JobRunner | undefined> {
   if (machine.ephemeral === undefined) {
     console.warn('[background-jobs] this matbot has no ephemeral session runner, so no job can run in it.');
     return undefined;
   }
   const ephemeral = machine.ephemeral.bind(machine);
+  await filterJobTriggers(machine, session => withheld.get(session.id));
   return {
     async run(job: RunSpec, signal: AbortSignal): Promise<RunOutcome | undefined> {
       const provider  = job.provider ?? machine.providers.keys().next().value;
@@ -33,25 +38,29 @@ export function inProcessRunner(machine: MatbotMachine): JobRunner | undefined {
         ...(job.session !== undefined ? { defaultSessionId: job.session } : {}),
         async append(sessionId: string | undefined, messages: readonly AppendMessage[]) {
           const result = await appendFor(machine, job, sessionId, messages);
-          appended += result.messageIds.length;
+          appended += result.traceId !== undefined ? 1 : result.messageIds.length;   // a robo-submit is minted later
           return result;
         },
       };
       // The job's framing rides in its own first message, not the system context: a registered contributor
       // is machine-wide, and would tell every conversation in this process that it is a background job.
-      // A cancel or an unload stops the turn itself (see runEphemeralTurn), so it cannot report after the
+      // A cancel or an unload stops the turn itself (see drainEphemeralTurn), so it cannot report after the
       // job is gone.
-      const context = jobContext(await jobInfo(machine, job));
-      const turn = runEphemeralTurn(ephemeral({ appender }), {
-        signal, provider, principal,
-        content: [
-          { type: 'text', origin: 'robo', text: context },
-          { type: 'text', text: job.prompt },
-        ],
-      });
-      let next = await turn.next();
-      while (!next.done) next = await turn.next();
-      return { appended, reply: lastReply(next.value).slice(-REPLY_TAIL) };
+      const context   = jobContext(await jobInfo(machine, job));
+      const sessionId = crypto.randomUUID();
+      if (job.triggers !== undefined && job.triggers !== 'all') withheld.set(sessionId, job.triggers);
+      try {
+        const { session } = await drainEphemeralTurn(ephemeral({ appender }), {
+          signal, provider, principal, sessionId,
+          content: [
+            { type: 'text', origin: 'robo', text: context },
+            { type: 'text', text: job.prompt },
+          ],
+        });
+        return { appended, reply: lastReply(session).slice(-REPLY_TAIL) };
+      } finally {
+        withheld.delete(sessionId);
+      }
     },
   };
 }

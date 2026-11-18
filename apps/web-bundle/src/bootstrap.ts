@@ -2,12 +2,13 @@ import {
   getPluginNameForSpecifier, installPrincipalCarrier, createConstantPrincipalCarrier,
   installUsageCarrier, createSerialUsageCarrier, isMissingSecretError, loadPlugins,
   unloadPlugin as unloadPluginFn, ProviderRegistryImpl, applyProviderPatch, movedCredentialKeys, assembleMachine, preScanStorage,
+  aliasProblem, isProviderAlias, providerRows,
 } from '@matatbread/matbot-core';
 import type {
-  MatbotMachine, ProviderConfig, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
+  MatbotMachine, ProviderAlias, ProviderConfig, ProviderEntry, Vault, PluginResolver, PromptFn, MatbotPlugin, Principal, Runtime, ProviderPatch,
 } from '@matatbread/matbot-plugin-api';
-import { defaultGate } from '@matatbread/matbot-default-gate';
-import { BrowserStorageBackend, LocalStorageVault } from '@matatbread/matbot-browser';
+import { BrowserStorageBackend, LocalStorageVault, createBrowserPluginTool } from '@matatbread/matbot-browser';
+import { localExtraPlugins } from './extra-plugins.js';
 import { runProviderSetup, type AvailableProvider, type ProviderDraft } from './setup.js';
 import { createBrowserProviderTool, createBrowserToolTypeIndex, extractToolContracts, collectContractAliases } from '@matatbread/matbot-browser';
 import type { BrowserToolTypeIndexHandle } from '@matatbread/matbot-browser';
@@ -34,7 +35,7 @@ const stripTypeScript = async (source: string): Promise<string> => {
 /** Shape of the inlined config baked into the artifact (the browser analogue of matbot.yaml). */
 export interface BrowserConfig {
   plugins:   string[];                                    // importable specifiers (synthetic ids)
-  providers: Record<string, Omit<ProviderConfig, 'name'>>; // module is already an importable specifier
+  providers: Record<string, StoredProvider>; // a profile's module is already an importable specifier
   /** Adapter types the startup wizard can offer when no provider is configured. */
   availableProviders: AvailableProvider[];
   /** Baked-but-idle plugins (the browser analogue of node's on-disk packages): present in the
@@ -50,16 +51,19 @@ export interface BrowserConfig {
   defaultSettings?: Record<string, Record<string, unknown>>;
 }
 
+/** A provider entry as baked or persisted, keyed by its name: a profile, or an alias of one. */
+export type StoredProvider = Omit<ProviderConfig, 'name'> | Omit<ProviderAlias, 'name'>;
+
 const PROVIDERS_KEY = 'matbot.providers';
 
-function loadPersistedProviders(): Record<string, Omit<ProviderConfig, 'name'>> {
+function loadPersistedProviders(): Record<string, StoredProvider> {
   try {
     const raw = globalThis.localStorage?.getItem(PROVIDERS_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, Omit<ProviderConfig, 'name'>>) : {};
+    return raw ? (JSON.parse(raw) as Record<string, StoredProvider>) : {};
   } catch { return {}; }
 }
 
-function savePersistedProvider(cfg: ProviderConfig): void {
+function savePersistedProvider(cfg: ProviderEntry): void {
   const cur = loadPersistedProviders();
   const { name, ...rest } = cfg;
   cur[name] = rest;
@@ -165,9 +169,10 @@ export async function boot(env: BootEnv): Promise<void> {
   // by anything the user configured in a previous session. Build the seed map first so the registry
   // snapshots it as the boot baseline (what `revert` restores to); its ReadonlyMap surface serves reads,
   // and register/remove/revert are the sanctioned write path.
-  const providerSeed = new Map<string, ProviderConfig>();
+  const providerSeed = new Map<string, ProviderEntry>();
   for (const [name, cfg] of Object.entries(config.providers))         providerSeed.set(name, { ...cfg, name });
   for (const [name, cfg] of Object.entries(loadPersistedProviders())) {
+    if ('alias' in cfg) { providerSeed.set(name, { name, alias: cfg.alias }); continue; }
     // A provider persisted by an OLDER bundle may carry a build-specific synthetic `mbmod:` module id
     // that no longer exists in this build's import map. Left as-is it imports as an unknown-scheme URL
     // (the `mbmod:` CORS/ERR_FAILED boot failure). Repair a still-known synthetic id to its stable
@@ -184,6 +189,15 @@ export async function boot(env: BootEnv): Promise<void> {
     }
     providerSeed.set(name, { ...cfg, name, module });
   }
+  // An alias whose target is gone (a baked profile a newer bundle dropped, say) is skipped with a notice,
+  // as a stale module is above: refusing the whole set would leave the page unable to boot at all.
+  for (const e of [...providerSeed.values()]) {
+    const problem = isProviderAlias(e) ? aliasProblem(providerSeed, e) : undefined;
+    if (problem !== undefined) {
+      console.warn(`[matbot] skipping provider alias "${e.name}": ${problem}`);
+      providerSeed.delete(e.name);
+    }
+  }
   const providers = new ProviderRegistryImpl(providerSeed);
 
   // First run (or cleared storage): collect the full provider config — name, adapter, URL, model, key.
@@ -192,7 +206,7 @@ export async function boot(env: BootEnv): Promise<void> {
     providers.set(cfg.name, cfg);
   }
 
-  const providerSpecs = [...new Set([...providers.values()].map(p => p.module))];
+  const providerSpecs = [...new Set([...providers.values()].flatMap(p => isProviderAlias(p) ? [] : [p.module]))];
   const preScanned = await preScanStorage([...providerSpecs, ...config.plugins].map(spec => ({ spec, importSpec: spec })), '');
 
   const resolver: PluginResolver = {
@@ -253,17 +267,23 @@ export async function boot(env: BootEnv): Promise<void> {
     TypeScriptStripper: { strip: stripTypeScript },
   });
 
+  // IndexedDB + OPFS: the boot base, and the revert target when a swapped-in backend's plugin unloads.
+  const bootBackend = new BrowserStorageBackend();
+  // The browser has no matbot.yaml, so the plugins a user adds are listed in the boot backend instead —
+  // pinned to it, so a backend a plugin swaps in (Google Drive) cannot take the list somewhere the next
+  // boot does not look.
+  const extras = localExtraPlugins(bootBackend);
+
   const { services, loaded } = assembleMachine({
-    // IndexedDB + OPFS: the boot base, and the revert target when a swapped-in backend's plugin unloads.
-    bootBackend:     new BrowserStorageBackend(),
+    bootBackend,
     preScanned,
     vault:           bootVault,
     providers,
-    gate:            defaultGate,
     defaultSettings: config.defaultSettings !== undefined ? new Map(Object.entries(config.defaultSettings)) : undefined,
     // A missing secret is asked for, once, and persisted — the browser has no .env to edit.
     resolveSecret:   resolveInteractive,
     version:         env.harnessVersion ?? '?',
+    builtinTools:    [createBrowserPluginTool(extras)],
     host,
   });
 
@@ -295,7 +315,7 @@ export async function boot(env: BootEnv): Promise<void> {
   // an override that survives a reload rather than one the next boot silently discards.
   const updateProvider = async (name: string, patch: ProviderPatch): Promise<readonly string[] | undefined> => {
     const cur = providers.get(name);
-    if (cur === undefined) return undefined;
+    if (cur === undefined || isProviderAlias(cur)) return undefined;
     const next = applyProviderPatch(cur, patch, services.Vault);
     savePersistedProvider(next);
     providers.register(next);
@@ -309,10 +329,16 @@ export async function boot(env: BootEnv): Promise<void> {
     return true;
   };
 
+  // Registered first, so a target the registry refuses is never persisted.
+  const aliasProvider = async (name: string, target: string): Promise<void> => {
+    providers.register({ name, alias: target });
+    savePersistedProvider({ name, alias: target });
+  };
+
   // The portable `provider` tool — list/add/remove over the same persistence the wizard uses.
   services.tools.register(createBrowserProviderTool({
     available: config.availableProviders,
-    list: () => [...providers.values()].map(p => ({
+    list: () => providerRows(providers, p => ({
       name: p.name, module: p.module, model: p.model,
       ...(p.endpoint   !== undefined ? { endpoint:   p.endpoint   } : {}),
       ...(p.parameters !== undefined ? { parameters: p.parameters } : {}),
@@ -324,17 +350,28 @@ export async function boot(env: BootEnv): Promise<void> {
     add:    applyDraft,
     update: updateProvider,
     remove: removeProvider,
-    get:    name => providers.get(name),
+    alias:  aliasProvider,
+    get:    name => { const e = providers.get(name); return e === undefined || isProviderAlias(e) ? undefined : e; },
   }));
 
   // Let the frontend offer "add another provider" from the UI (runs the wizard form).
   (globalThis as unknown as Record<string, unknown>).__mbProviders = {
     add:  async () => applyDraft(await runProviderSetup(config.availableProviders, { title: 'Add a provider', cancelable: true })),
-    list: () => [...providers.keys()],
+    // Profiles only: a picker offers what a person chooses to run on, and an alias is a role name for code.
+    list: () => [...providers.values()].filter(p => !isProviderAlias(p)).map(p => p.name),
   };
 
   // Then the rest — frontends, tools, storage, knowledge, hooks. The frontend plugin mounts the UI.
   await loadPlugins(config.plugins, services);
+  // Then what the user added in earlier sessions, as the CLI loads matbot.yaml's `plugins:`. A stale
+  // specifier (a URL that 404s now) is warned about and skipped; it must not abort boot.
+  for (const specifier of await extras.list()) {
+    try {
+      await services.loadPlugin(specifier);
+    } catch (e) {
+      console.warn(`[matbot] Could not load the added plugin "${specifier}":`, e);
+    }
+  }
   loaded();
 
   console.warn('[matbot] web runtime ready —', services.tools.list().length, 'tools,', providers.size, 'providers.');

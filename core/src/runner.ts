@@ -2,16 +2,16 @@ import type {
   Session, Message, MessageContent, ModelContent, Usage, UsageSite, ProviderMeta, TruncatedToolResult,
   TurnEvent, RunConfig, ProviderAdapter, ProviderConfig,
   Tool, ToolRegistry, ToolContext, Store, FileStore, MediaStore, SystemContextRegistry, Vault, PromptFn,
-  PermissionGate,
+  PermissionGate, FailureClass,
 } from './types.js';
 import type { MatbotPlugin } from './plugin.js';
 import type { ToolPresenter, SessionAppender, TurnToolSource } from '@matatbread/matbot-plugin-api';
-import { recordSpan, recordUsage, withUsageSite, scopeIterable } from '@matatbread/matbot-plugin-api/host';
+import { recordSpan, recordUsage, withUsageSite, scopeIterable, callFrame, callFramesOf } from '@matatbread/matbot-plugin-api/host';
 import { HookRegistry } from './hooks.js';
 import { appendMessage, createMessage } from './session.js';
-import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt } from '@matatbread/matbot-plugin-api';
+import { foldOntoUserTurn, bindPluginOps, bindGate, defaultingPrompt, failureOf, isRoboSubmit, withSenderShown } from '@matatbread/matbot-plugin-api';
 import { addUsage } from './usage.js';
-import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia } from './media.js';
+import { MEDIA_RESIDENCY_BYTES, resolveSessionMedia, withAttachmentsShown } from './media.js';
 
 // Establish a usage call site across an async iteration. Wrapping the *loop* would not work: this
 // runner is itself an async generator, so it suspends at every `yield` and resumes under the consumer's
@@ -26,7 +26,7 @@ const siteScoped = <T>(site: UsageSite, src: AsyncIterable<T>): AsyncIterable<T>
 // Creator of the marker recording that a provider cut a response short. Marker-role, so it is durable
 // and visible to a reader while elided from every submission: the model's own text is already truncated
 // in the transcript, and a block telling it so invites narrating the cut-off rather than continuing.
-const TRUNCATION_CREATOR = 'matbot-truncation';
+export const TRUNCATION_CREATOR = 'matbot-truncation';
 
 /** An AbortSignal's reason as a turn-terminal string. `reason` is `any` by spec (a caller may abort with
  *  anything), so the two abort exits both had to narrow it; they narrowed it identically. */
@@ -41,10 +41,28 @@ const abortReason = (signal: AbortSignal): string =>
  * with a string — escaping the generator and skipping the `end()` commit that the branch calling this
  * exists to perform. The one place in this package that took `any` rather than narrow.
  */
-const errorText = (e: unknown): string => {
+// The cause rides along because it is usually the useful half: `TypeError: fetch failed` says nothing,
+// `SocketError: other side closed` says what. A cause that is not an Error is shown as data.
+export const errorText = (e: unknown): string => {
   const cause = typeof e === 'object' && e !== null && 'cause' in e ? (e as { cause?: unknown }).cause : undefined;
-  return cause ? `${String(e)} (${String(cause)})` : String(e);
+  if (!cause) return String(e);
+  const why = cause instanceof Error || typeof cause !== 'object' ? String(cause) : safeJson(cause);
+  return `${String(e)} (${why})`;
 };
+const safeJson = (v: unknown): string => { try { return JSON.stringify(v); } catch { return String(v); } };
+
+// A failure's class in words, for a reader that gets only the text — a model that delegated the work. It
+// says what happened and leaves the decision to that reader; unclassified is said too, since silence would
+// read as "nothing to add" rather than "nobody said".
+export function withFailureNote(text: string, failure: FailureClass | undefined): string {
+  switch (failure) {
+    case 'unavailable': return `${text} [temporary: the same request may work if tried again later]`;
+    case 'denied':      return `${text} [refused: trying again will not change this]`;
+    case 'invalid':     return `${text} [the request itself is wrong: trying it again unchanged will not help]`;
+    case undefined:     return `${text} [not classified: nothing said whether trying again could help]`;
+    default:            return text;
+  }
+}
 
 /** How long a tool executor may keep the turn alive AFTER the turn was aborted, before the runner stops
  *  reading it. An abort must abort: any executor can fail to end — a child process whose stdout was
@@ -145,7 +163,6 @@ export interface RunSessionOpts {
   signal:         AbortSignal;
   vault?:         Vault;
   workdir?:       string;
-  configPath?:    string;
   files?:         FileStore;
   /** Handed to tools as `ToolContext.appender`: set only by a runner whose sessions the machine's own
    *  appender cannot reach (an ephemeral one). */
@@ -384,7 +401,9 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
       const u = turnUsage;
       if (u === undefined) return;
       turnUsage = undefined;
-      withUsageSite({ kind: 'round', round }, () => recordUsage(config.provider, u, {
+      // Under the profile that ran, never an alias of it (`config.provider` may be one): an entry is priced
+      // by the model's rates, and an alias moves.
+      withUsageSite({ kind: 'round', round }, () => recordUsage(providerConfig.name, u, {
         startedAt:  new Date(roundStartedAt).toISOString(),
         durationMs: Date.now() - roundStartedAt,
       }));
@@ -400,16 +419,12 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
     // message can be a marker (e.g. a retract-redo leaves the retraction marker as the tail) — folding
     // there would drop the ephemeral with it. -1 ⇒ nothing to fold onto (no non-marker history).
     const foldIdx = ephemeral.length > 0 ? session.messages.findLastIndex(m => m.role !== 'marker') : -1;
-    const history = foldIdx >= 0 || attachments.size > 0 || sessionMedia.size > 0
+    // Whether any message needs rewriting for the wire — an attachment to show, a robo-submit's sender — in one
+    // pass, since this runs before every provider call and a session with neither should cost one scan.
+    const rewrite = session.messages.some(m => isRoboSubmit(m) || m.content.some(c => c.type === 'file-ref'));
+    const history = foldIdx >= 0 || attachments.size > 0 || rewrite
       ? session.messages.flatMap((m, i) => {
-          // Per BLOCK, never the whole array: `sessionMedia` was resolved once before this loop, and a
-          // raced verdict's `foldOntoUserTurn` (claimVerdicts, above) extends this same user message
-          // mid-turn. Substituting the array would put back the pre-fold copy on every later round —
-          // dropping durable robo-user blocks from the wire while leaving them persisted and on screen.
-          const refs    = sessionMedia.get(m.id);
-          const inlined = refs
-            ? { ...m, content: m.content.map(c => (c.type === 'file-ref' ? refs.get(c.fileId) ?? c : c)) }
-            : m;
+          const inlined = withAttachmentsShown(withSenderShown(m), sessionMedia.get(m.id));
           const folded  = i === foldIdx ? { ...inlined, content: [...inlined.content, ...ephemeral] } : inlined;
           const media   = attachments.get(m.id);
           return media ? [folded, media] : [folded];
@@ -454,7 +469,7 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             yield { type: 'progress', pct: ev.pct, ...(ev.message !== undefined ? { message: ev.message } : {}), traceId };
             break;
           case 'thinking-block':
-            assistantParts.push({ type: 'thinking', thinking: ev.thinking, signature: ev.signature });
+            assistantParts.push({ type: 'thinking', thinking: ev.thinking, signature: ev.signature, ...(ev.meta !== undefined ? { meta: ev.meta } : {}) });
             break;
           case 'redacted-thinking':
             assistantParts.push({ type: 'redacted-thinking', data: ev.data });
@@ -512,7 +527,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // carries no session (a failure is not a transcript), so this yields the terminal itself rather
         // than the session — but it commits first, exactly like every other exit.
         bookRound();
-        yield* end({ type: 'error', error: errorText(e), traceId });
+        const failure = failureOf(e);
+        yield* end({ type: 'error', error: errorText(e), traceId, ...(failure !== undefined ? { failure } : {}) });
         return;
       }
     }
@@ -672,9 +688,8 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
         // default, so a gate handed it could never tell "no human is reachable" from "a human answered
         // with the default" — and would get the fallback back one layer too late to reason about.
         // `ToolContext.prompt` keeps the stand-in exactly as before; only the gate sees the truth.
-        ...bindGate(opts.permissionGate, tool, opts.prompt, opts.toolRegistry ?? { resolve: n => tools.get(n) ?? null }),
+        ...bindGate(opts.permissionGate, tool, opts.prompt, { session: session.id }, opts.toolRegistry ?? { resolve: n => tools.get(n) ?? null }),
         ...(opts.workdir     !== undefined ? { workdir:     opts.workdir     } : {}),
-        ...(opts.configPath  !== undefined ? { configPath:  opts.configPath  } : {}),
         ...(opts.files       !== undefined ? { files:       opts.files       } : {}),
         ...(opts.appender    !== undefined ? { appender:    opts.appender    } : {}),
         ...(turnTools.size   > 0         ? { turnTools                      } : {}),
@@ -703,18 +718,25 @@ export async function* runSession(opts: RunSessionOpts): AsyncIterable<TurnEvent
             case 'stderr':   yield { type: 'tool:stderr', callId: tc.id, chunk: toolEv.chunk, traceId }; break;
             case 'file':     yield { type: 'file', handle: toolEv.handle, traceId }; break;
             case 'result':   result = toolEv.value; break;
-            case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data }); break;
+            // Built from `creator` and `data` alone: where the marker came from is the host's to say (CallFrame),
+            // so this call's frame leads and only the frames a box attached for nested calls follow it.
+            case 'marker':   toolMarkers.push({ type: 'marker', creator: toolEv.creator, data: toolEv.data,
+                                                by: [callFrame(tc.name, tool, tc.id), ...(callFramesOf(toolEv) ?? [])] }); break;
             case 'model-content': toolMedia.push(...toolEv.content); break;
             case 'progress': yield { type: 'tool:progress', callId: tc.id, pct: toolEv.pct, ...(toolEv.message !== undefined ? { message: toolEv.message } : {}), traceId }; break;
             case 'error':    result = {
               error: toolEv.message,
+              // Beside the message, so the model can tell "try again later" from "this will never work"
+              // without the tool having had to say so in prose — the choice to retry is the model's.
+              ...(toolEv.failure !== undefined ? { failure: toolEv.failure } : {}),
               ...(toolEv.stdout !== undefined ? { stdout: toolEv.stdout } : {}),
               ...(toolEv.stderr !== undefined ? { stderr: toolEv.stderr } : {}),
             }; isError = true; break;
           }
         }
       } catch (e) {
-        result  = { error: String(e) };
+        const failure = failureOf(e);
+        result  = { error: errorText(e), ...(failure !== undefined ? { failure } : {}) };
         isError = true;
       } finally {
         deadline.dispose();

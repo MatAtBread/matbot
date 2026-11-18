@@ -1,5 +1,6 @@
 import { registerHooks, createRequire } from 'node:module';
 import { dirname } from 'node:path';
+import { typescriptHooks } from '@matatbread/matbot-host-node/typescript-hooks';
 import { createHooks } from './ts-hooks.js';
 
 // Host-shared packages that must stay singletons across the plugin/host boundary:
@@ -32,4 +33,10 @@ function hostSharedDirs() {
 // In-thread, through `registerHooks()`. `register()` runs hooks on a thread of their own, and since Node 24.12
 // the main thread blocks on a round trip to it for every resolve and every load — most of a boot's time, with
 // the few hundred modules matbot loads. It is also deprecated (DEP0205).
+//
+// Two layers, and the order is the point: the hooks registered LAST run first. host-node's go first, so they
+// sit underneath and answer what any Node host needs (a `.js` import resolved to its `.ts`, types stripped
+// under node_modules too); the CLI's go on top, and add only what is the CLI's own — plugins fetched over
+// http, and hot-reload freshness stamped onto whatever the layer below resolved.
+registerHooks(typescriptHooks());
 registerHooks(createHooks({ exclude: hostSharedDirs() }));

@@ -1,3 +1,5 @@
+import type { Session } from '@matatbread/matbot-plugin-api';
+
 /**
  * A trigger is a data-driven hook: a set of natural-language conditions and the single tool call to
  * make when any of them is judged to match. The conditions are the OR — many ways to recognise the
@@ -123,6 +125,33 @@ export interface TriggerSpec {
   invoke:     TriggerInvoke;
   enabled?:   boolean;
   cooldown?:  TriggerCooldown;
+}
+
+/** What a {@link TriggerFilter} is told about the evaluation it is asked about. An object so that it can
+ *  gain fields without changing `admit`'s signature; a filter reads only what it needs. */
+export interface TriggerFilterContext {
+  /** The conversation being judged, as it stands when the surface is judged. */
+  session: Session;
+  /** `user` before the answer (the `screen` hook), `agent` after it (the `followup` hook). */
+  surface: TriggerSurface;
+}
+
+/**
+ * Withholds triggers from one conversation: a read-only *view* over the stored set, as `ToolPresenter` is
+ * over the tool registry. The plugin that holds the policy registers it (`services.register('TriggerFilter',
+ * filter)`), and triggers reads `services.TriggerFilter` at every evaluation, so neither load order matters and
+ * unloading that plugin withdraws it. Absent ⇒ every trigger is judged.
+ *
+ * `admit` is offered the enabled triggers with a condition on the surface being judged, in stored order,
+ * and answers with those that may be judged. A withheld trigger's conditions never reach the classifier, so
+ * it cannot fire whatever the classifier replies. The answer is read as a subset of the offer: a trigger it
+ * was not offered is ignored and the offered order kept, so a filter cannot invent a trigger or churn the
+ * classifier's cached prompt. A filter that throws is skipped, with a warning, and every trigger is judged:
+ * a broken policy must not switch triggers off. One filter per machine, like any service key; a second
+ * composes by capturing the one it displaces and intersecting with its answer.
+ */
+export interface TriggerFilter {
+  admit(triggers: readonly Trigger[], ctx: TriggerFilterContext): readonly Trigger[] | Promise<readonly Trigger[]>;
 }
 
 /**

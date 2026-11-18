@@ -5,6 +5,7 @@ import type { JSONSchema } from './primitives.js';
 import type { PermissionDecision, PermissionRequest } from './permission.js';
 import type { Vault } from './vault.js';
 import type { SessionAppender } from './session-append.js';
+import type { FailureClass } from '../errors.js';
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
@@ -38,7 +39,9 @@ export type ToolEvent<Result = unknown> =
   // marker. Independent of `result` — a tool may emit markers and no result (a silent side-effect,
   // e.g. a trigger-fired tool), a result and no markers, or both.
   | { type: 'marker';   creator: string; data: unknown }
-  | { type: 'error';    message: string; code?: number; stdout?: string; stderr?: string };
+  // `failure` is whether trying again could help (see `FailureClass`), and reaches the model beside the
+  // message. `code` is the tool's own number — an exit status, or an HTTP status a transport may answer with.
+  | { type: 'error';    message: string; code?: number; failure?: FailureClass; stdout?: string; stderr?: string };
 
 /**
  * Per-tool call-contract registry: maps a tool's `name` to a {@link ToolContract} arm (or a union of
@@ -83,10 +86,25 @@ export type ToolEvent<Result = unknown> =
  * matches (a non-literal discriminant, or an absence-discriminant the positive patterns can't express),
  * the result falls back to the union of every arm — always sound, just less narrow.
  *
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface ToolContracts {}
+
+/**
+ * Per-tool registry of types whose content depends on the session a type-check runs within, keyed by tool
+ * name like {@link ToolContracts}. Empty in every declaration: for one check made on a session's behalf, the
+ * checker augments it with what each tool's {@link Tool.sessionType} answers for that session, under that
+ * tool's own name and no other. A tool's contract reads its own key (`session_data`'s `read` of a literal id
+ * finds the entry's type there), and a check made for no session — a global function, which cannot know
+ * what any session holds — sees it empty, so the same contract reads `unknown`.
+ *
+ * In plugin-api because the generated tool types are one file that copies a plugin's own declarations into
+ * itself: plugin-api is the one module every check resolves and can augment.
+ *
+ * One of matbot's open-registry augmentation points; see docs/DEVELOPING.md *Open-registry augmentation*.
+ */
+export interface SessionTypes {}
 
 // Phantom carriers for ToolContract's two parameters. `unique symbol` keys rather than `__result`/`__args`
 // so the type is *uninhabitable*: a plugin author cannot name these keys, so no value of ToolContract can
@@ -96,15 +114,23 @@ export interface ToolContracts {}
 // generated-code checker closes it deterministically; this closes the same hole in the type itself.
 declare const RESULT: unique symbol;
 declare const ARGS:   unique symbol;
+declare const CALL:   unique symbol;
 
 /**
  * One overload arm of a multi-action tool registered in {@link ToolContracts}: the `Result` it yields
  * for a call whose params match the discriminating pattern `Args`. `Args` defaults to `unknown` (an
  * arm that matches any params). Purely type-level — the fields below are phantom and uninstantiable.
+ *
+ * `Call` is for a tool whose result is shaped by the call's own params, which a fixed `Result` cannot say:
+ * the exact, generic call signature {@link ToolProxy} declares instead of `(params: Args) => Promise<Result>`.
+ * `Result` and `Args` remain the whole contract everywhere else (the executor, the wire text, validation),
+ * so they must describe every call the signature admits. Leave it out unless a key or a field of the result
+ * really does depend on the params.
  */
-export interface ToolContract<Result, Args = unknown> {
+export interface ToolContract<Result, Args = unknown, Call = unknown> {
   readonly [RESULT]: Result;
   readonly [ARGS]:   Args;
+  readonly [CALL]:   Call;
 }
 
 /**
@@ -150,8 +176,9 @@ type UnionToIntersection<U> =
 // fallback for a foreign/MCP tool carrying only a JSON-Schema `inputSchema`) keeps a loose, optional-param
 // signature so it stays callable; a typed arm requires its declared params.
 type ArmCallSig<E> =
-  E extends ToolContract<infer R, infer P>
-    ? (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
+  E extends ToolContract<infer R, infer P, infer C>
+    ? C extends (...args: never[]) => unknown ? C
+    : (unknown extends P ? (params?: unknown) => Promise<R> : (params: P) => Promise<R>)
     : never;
 
 // The union of a tool's arm params — the parameter type of the trailing catch-all signature below.
@@ -211,7 +238,6 @@ export interface ToolContext {
    *  work should default to this so the child inherits the same model rather than the config default. */
   provider?:   string;
   workdir?:    string;
-  configPath?: string;
   files?:      FileStore;
   /**
    * The appender belonging to the runner this turn is on, when it is not the machine's — an ephemeral
@@ -249,6 +275,13 @@ export interface ToolContext {
    * `if (!await ctx.gate(…))` is always false. Test `.allowed`.
    */
   gate(req: PermissionRequest & { namespace?: string }): Promise<PermissionDecision>;
+  /**
+   * {@link gate}'s answer with nobody to ask, read now and queried SYNCHRONOUSLY — for a call site that
+   * interposes on a synchronous API and so can neither prompt nor await (see
+   * {@link PermissionGate.snapshot}). Qualified and namespace-checked exactly as {@link gate} is. Take one
+   * per invocation; take a fresh one after {@link gate} has obtained an answer it should reflect.
+   */
+  gateSnapshot(): Promise<(req: PermissionRequest & { namespace?: string }) => PermissionDecision>;
   /** Hot-load a plugin by specifier without restarting the process. Returns the loaded plugin.
    *  `refresh` (default false) forces a remote (github/http) plugin to be re-downloaded rather than
    *  re-loaded from its `.plugins/` cache — pass true to pick up changed upstream source. */
@@ -268,8 +301,11 @@ export interface ToolContext {
  * `files`, `prompt` and plugin (un)loading stay off a surface authored by a model and reachable only
  * through the tool contracts. A tool with real source takes `ToolContext` and needs none of this.
  *
- * `progress` is the one method here and does not breach that, because the reason capabilities are kept
- * off this surface is authority: it carries none — write-only, reading nothing and reaching nothing.
+ * `progress` does not breach that, because the reason capabilities are kept off this surface is authority:
+ * it carries none — write-only, reading nothing and reaching nothing. `writeSecret` is the one capability
+ * here, and is here because a body is the only place it can be safe: it stores a value the body OBTAINED
+ * without the value passing through the model, which a tool taking it as a parameter cannot do. It is
+ * write-only (nothing on this surface reads the vault) and gated per function version.
  *
  * Not `ToolCallContext` — that name belongs to the `toolcall` hook's context; this is the composed
  * caller's own view, not a hook's view of a call about to run.
@@ -288,6 +324,15 @@ export interface ComposedCallContext {
    * its own nested `tool.x(…)` calls already stream on unreachable from the one place a long run happens.
    */
   readonly progress:  (pct: number, message?: string) => void;
+  /**
+   * Store `value` in the vault as `name`, for a credential the body obtained — a key a server issued — so it
+   * can be used as `{ Vault: name }` (an `http` or `mcp_action` header) without ever reaching the model.
+   * The user is asked first (`tool_function.write-secret`); replacing a key that exists is asked every time
+   * (`tool_function.replace-secret`). Refused: an empty value (a body cannot remove a key), and one written
+   * in the function's own text, which is already in the conversation. Once stored, the value is redacted
+   * from everything this call returns or reports.
+   */
+  readonly writeSecret: (name: string, value: string) => Promise<void>;
 }
 
 /**
@@ -320,6 +365,11 @@ export interface Tool<R = unknown> {
    *  (`contractArms`), so two tools' types of one name never meet. Absent ⇒ the contract names only
    *  plugin-api types and TypeScript's own. */
   toolContractTypes?: string;
+  /** The type this tool contributes under its own name to {@link SessionTypes} for a type-check of code
+   *  running within `session` — TypeScript source, such as `session_data`'s map from each entry's id to
+   *  what it holds. The contract stays the same everywhere and only a check made on a session's behalf
+   *  learns more; a global function is checked without it. Absent, or `undefined` ⇒ the key is unset. */
+  sessionType?: (session: Session) => string | undefined;
   executor:     ToolExecutor<R>;
   pluginName?:  string;
 }

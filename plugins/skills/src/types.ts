@@ -27,6 +27,14 @@ export interface SkillDoc {
    * only by the explicit hide/unhide actions; never touched by `save`, so a content edit preserves it.
    */
   hidden?: boolean;
+  /**
+   * A skill proposed by a process rather than written by a person — dream-time's clustering of facts that
+   * had no home — awaiting adoption. Withheld from the model as `hidden` is (out of the knowledge index and
+   * the catalogue), but unlike a hidden skill it IS analysed, because the process that proposed it ranks
+   * facts against its metadata: a candidate keeps growing until it is adopted, which clears this, or
+   * deleted. Set when the skill is created (so it is never indexed in between) or by `setCandidate`.
+   */
+  candidate?: boolean;
   createdAt:    string;
   updatedAt:    string;
   /**

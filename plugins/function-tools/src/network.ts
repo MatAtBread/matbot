@@ -41,8 +41,8 @@ async function decide(ctx: ToolContext, { namespace, fn, who }: Asker, origin: s
     namespace, gate: 'connect', subject: `${fn} ${origin}`, fallback: false,
     label: `Allow ${who} to connect to **${origin}**? It can send there anything it can read.`,
     standing: [
-      { subject: `${fn} ${origin}`, label: `Always allow ${who} to connect to ${origin}` },
-      { subject: `* ${origin}`,     label: `Always allow ANY function to connect to ${origin}` },
+      { subject: `${fn} ${origin}`, label: `${who} to connect to ${origin}` },
+      { subject: `* ${origin}`,     label: `ANY function to connect to ${origin}` },
     ],
   });
   if (!permit.allowed) throw new Error(refusalMessage(permit, `Connecting to ${origin}`));

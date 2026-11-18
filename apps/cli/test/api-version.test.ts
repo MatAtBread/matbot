@@ -9,7 +9,7 @@ import type { MatbotMachine } from '@matatbread/matbot-core';
 //
 // The gate compares majors exactly and warns only on a *newer* declared minor, so at 0.x the correction
 // is a no-op for anything already in the wild. This test pins that: the fixtures below declare '0.1'
-// literally (not via the const), and must still load against a runtime advertising 0.4.
+// literally (not via the const), and must still load against a runtime advertising a later 0.x minor.
 const legacyFixture = new URL('./fixtures/valid-plugin.ts', import.meta.url).href;
 
 const noopServices = {

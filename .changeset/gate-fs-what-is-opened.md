@@ -1,0 +1,5 @@
+---
+"@matatbread/matbot-gate-fs-node": patch
+---
+
+What a call opens is now what was asked about. A path is read once and only that string goes to node, so a `Buffer` or `URL` changed after an async call, a glob's patterns and `cwd`, and an options getter cannot change it; a path that is not valid UTF-8 is refused. A stream asks again when it opens, so assigning its `path` or `flags`, or calling `Utf8Stream.reopen`, is asked about, and its `constructor` is the guarded class. A flag is asked about as what it does: `readFile(p, { flag: 'w' })` needs the write gate and `open(p, 'r+')` needs both. A symlink changed while a question is open is asked about again, and a dangling one is asked about at the file a write through it would create. The module's property descriptors are guarded, and it can no longer be written through. The README now states what this does not stop: rewriting a built-in the gate reads, walking a prototype by hand to node's own classes, and using a descriptor number the body did not open.

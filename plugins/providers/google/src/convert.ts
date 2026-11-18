@@ -1,5 +1,5 @@
 import type { Message, Tool } from '@matatbread/matbot-plugin-api';
-import { foreignToolNote } from '@matatbread/matbot-provider-openai-compat';
+import { foreignToolNote, signedBy } from '@matatbread/matbot-provider-openai-compat';
 import { textDocument } from '@matatbread/matbot-core/providers-base';
 
 // ── Native Gemini (generateContent) wire types ────────────────────────────────
@@ -132,9 +132,12 @@ function dataUrlToInline(url: string): GeminiPart | undefined {
   return { inlineData: { mimeType: mimeType ?? 'application/octet-stream', data: payload ?? '' } };
 }
 
-export function toGeminiContents(messages: Message[], currentProvider?: string): GeminiContent[] {
-  // A thought signature is only valid for the exact provider (and context) that minted it, so we trust
-  // one *only* when the message that produced it came from the provider we're now sending to. Presence
+export function toGeminiContents(messages: Message[], current?: { name: string; model: string }): GeminiContent[] {
+  // A thought signature is only valid for the model (and context) that minted it, so we trust one *only*
+  // when it came from the model we're now sending to: by the model recorded beside it, or — for history
+  // written before that was recorded — when the message came from the profile we're now sending to. The
+  // profile name alone is no longer enough for new history, because a message records the name that was
+  // chosen, and an alias keeps its name while the model behind it changes. Presence
   // alone is not enough: a `functionCall` signature is Gemini-only, but a *thinking*-block signature can
   // just as well be Anthropic's — replaying that in Gemini's `thoughtSignature` slot yields a hard
   // "Corrupted thought signature" 400. So: a functionCall from another provider (no signature, or a
@@ -143,13 +146,14 @@ export function toGeminiContents(messages: Message[], currentProvider?: string):
   const dropIds = new Set<string>();
   const nameById = new Map<string, string>();
   const argsById = new Map<string, unknown>();
+  const own = (m: Message, meta: Parameters<typeof signedBy>[0]): boolean =>
+    signedBy(meta, current?.model) ?? (current !== undefined && m.providerName === current.name);
   for (const m of messages) {
-    const ownSig = m.providerName === currentProvider;
     for (const c of m.content)
       if (c.type === 'tool-call') {
         nameById.set(c.id, c.name);
         argsById.set(c.id, c.input);
-        if (c.meta?.google?.thoughtSignature === undefined || !ownSig) dropIds.add(c.id);
+        if (c.meta?.google?.thoughtSignature === undefined || !own(m, c.meta)) dropIds.add(c.id);
       }
   }
 
@@ -189,7 +193,7 @@ export function toGeminiContents(messages: Message[], currentProvider?: string):
           // Round-trip a thinking block's signature only when this turn came from the current provider
           // (see the trust rule above): a foreign thinking signature (e.g. Anthropic's) is not a valid
           // Gemini thought signature and is rejected as "corrupted". Otherwise elide the block.
-          if (c.signature && msg.providerName === currentProvider)
+          if (c.signature && own(msg, c.meta))
             parts.push({ text: c.thinking, thought: true, thoughtSignature: c.signature });
           break;
         case 'tool-call': {

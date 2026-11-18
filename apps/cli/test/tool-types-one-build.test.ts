@@ -20,7 +20,7 @@ async function index(opts: { failFirstBuild?: boolean } = {}) {
   let changed: () => void = () => { throw new Error('the index never subscribed to registry changes'); };
   let registered: unknown;
   const machine = {
-    configPath: join(mkdtempSync(join(tmpdir(), 'tool-types-')), 'matbot.yaml'),
+    projectDir: mkdtempSync(join(tmpdir(), 'tool-types-')),
     Notifier: {
       consume: (onChange: () => void) => { changed = onChange; },
       notify: () => {},

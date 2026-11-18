@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile, readFile, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planProvision, applyProvision, discardProvision, isRegistryRange,
-         hostOwnPackageDir } from '@matatbread/matbot-tool-plugin';
+import { planProvision, applyProvision, discardProvision, isRegistryRange } from '../src/plugins/provision.js';
+import { hostOwnPackageDir } from '../src/plugins/remote-cache.js';
 import { spawn } from 'node:child_process';
 
 const runNpm = (args: string[], cwd: string): Promise<void> => new Promise((res, rej) => {
@@ -89,14 +89,14 @@ test('the host singleton is never fetched from the registry, even declared as a 
 // them would be this module resolving dependencies itself. So such a manifest is left entirely alone.
 test('a workspace/catalog manifest is left alone rather than partly provisioned', async () => {
   const { dir, cleanup } = await pluginDir({
-    dependencies: { '@matatbread/matbot-files-node': 'workspace:^', typescript: 'catalog:', debug: '^4.3.4' },
+    dependencies: { '@matatbread/matbot-storage-filesystem': 'workspace:^', typescript: 'catalog:', debug: '^4.3.4' },
   });
   try {
     const plan = await planProvision(dir);
     assert.deepEqual(plan.packages, [], 'nothing is installed when any range is not a registry range');
     assert.deepEqual(
       plan.unsupported.map(u => `${u.name}@${u.range}`).sort(),
-      ['@matatbread/matbot-files-node@workspace:^', 'typescript@catalog:'],
+      ['@matatbread/matbot-storage-filesystem@workspace:^', 'typescript@catalog:'],
     );
     assert.equal(await exists(join(dir, 'package-lock.json')), false, 'npm is not even asked');
     // The host singleton is still linked. "Leave the manifest alone" is about not handing unresolvable

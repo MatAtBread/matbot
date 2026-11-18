@@ -1,14 +1,21 @@
 /**
  * The definition of a store managed by this plugin — its own persisted record, kept in the
  * plugin's meta store. One {@link StoreDef} governs one `Store<StoreRecord>` namespace and the
- * generated `<namespace>_action` tool over it. A def exists exactly when a tool is exposed for
- * that store; the def's `id` IS the managed namespace, so a def and its store share a name.
+ * generated `<id>_action` tool over it. A def exists exactly when that tool is registered.
  */
 export interface StoreDef {
+  /** The store's name, which the generated tool is named after. */
   id:          string;
   version:     string;
-  /** The namespace of the governed `Store<StoreRecord>`. Equal to `id`. */
+  /** The namespace of the governed `Store<StoreRecord>`: `store-<id>` for a store `create` made,
+   *  `id` itself for one its owning plugin exposed through `defineStore` (and for a def from before
+   *  0.5.0 until it is first used, when it moves to `store-<id>`). */
   namespace:   string;
+  /** The plugin that exposed its OWN store through `defineStore`, and so registers its tool from its own
+   *  setup — which is why this plugin's boot leaves the def alone: registering it first put the tool under
+   *  tool-store's name, so the owner's re-registration became a collision, and the store stayed exposed
+   *  with its owner unloaded. Absent for a store `create` made, and for a def from before 0.5.0. */
+  owner?:      string;
   /** Plain-English description of what the store holds. Shown in the generated tool's description. */
   description: string;
   /** The document shape as a flattened TypeScript type/interface (a string). Surfaced verbatim

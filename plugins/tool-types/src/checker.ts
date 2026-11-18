@@ -9,6 +9,7 @@
 // own virtual file, the same resolved typescript module), so a checker failure is a plumbing bug
 // that must surface as the caller's error, not be absorbed by a quieter path.
 
+import { fileURLToPath } from 'node:url';
 import { renderToolCheckOmitted } from '@matatbread/matbot-plugin-api';
 import type { ToolCheckDiagnostic, ToolCheckReport } from '@matatbread/matbot-plugin-api';
 
@@ -35,7 +36,7 @@ interface DiagnosticRecord {
 // plugin is a module: it has a top of file to add an import to, `@matatbread/matbot-plugin-api` is a real
 // dependency of its build dir, and nothing else is importable. A `tool_function` body is
 // `async function __fn(…) { … }`: no top of file, no static imports, and a different importable set
-// entirely — whatever this installation permits. These were written for the first and fired in both, so
+// entirely — node's builtins and installed packages, by name. These were written for the first and fired in both, so
 // a body that mistyped `node:fs` was told there are no modules here.
 const HINTS: { codes: number[]; pattern?: RegExp; only?: 'project' | 'snippet'; hint: string }[] = [
   {
@@ -78,10 +79,9 @@ const HINTS: { codes: number[]; pattern?: RegExp; only?: 'project' | 'snippet'; 
   {
     codes: [2307],
     only: 'snippet',
-    // No list: the declarations above already carry one, derived from the same permitted set, and a
-    // second copy here would be the thing that goes stale. What this adds is WHY a specifier can be
-    // absent, since "not permitted" and "has no declarations" are repaired differently.
-    hint: 'this module is not typed here. The comment block at the top of these declarations says what this installation permits; a node builtin has real types (either spelling: `node:os` or `os`), while a bare package or an http(s) URL has none, and importing one of those needs noTypeCheck.',
+    // What this adds is WHY a specifier can be absent: a refused one is IMPORT-GATE's finding, at the same
+    // position, and this one's is dropped there, so what is left is a module with no declarations.
+    hint: 'this module is not typed here. A node builtin has real types (either spelling: `node:os` or `os`); a package has them only if it is installed with declarations of its own, and otherwise importing it needs noTypeCheck.',
   },
   {
     codes: [2305],
@@ -176,12 +176,14 @@ function reportOf(diags: DiagnosticRecord[], mode: Mode): ToolCheckReport {
   };
 }
 
-async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecord[] | null> {
+type CheckParameters = NonNullable<ToolCheckReport['parameters']>;
+
+async function runWorker(data: Record<string, unknown>, importRefused?: (spec: string) => boolean): Promise<{ diags: DiagnosticRecord[] | null; parameters?: CheckParameters }> {
   const { Worker } = await import('node:worker_threads');
   const { createRequire } = await import('node:module');
   const typescriptPath = createRequire(import.meta.url).resolve('typescript');
 
-  const result = await new Promise<{ ok?: boolean; diagnostics?: DiagnosticRecord[]; error?: string }>((resolve, reject) => {
+  const result = await new Promise<{ ok?: boolean; diagnostics?: DiagnosticRecord[]; parameters?: CheckParameters; error?: string }>((resolve, reject) => {
     // Parsed AS TypeScript, never left to node to guess: without the flag eval'd code runs as JS and is
     // retried as TS only if it fails to parse, and `new Set<string>(x)` parses fine as two comparisons —
     // so it would have thrown `string is not defined` but for an unrelated annotation elsewhere in the
@@ -193,13 +195,31 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
       execArgv: ['--input-type=commonjs-typescript'],
     });
     const timer = setTimeout(() => { void w.terminate(); reject(new Error('typecheck worker timed out')); }, 120_000);
-    w.once('message', m => { clearTimeout(timer); resolve(m as never); void w.terminate(); });
+    // At most one question before the result: which of the literal specifiers it found are refused. A
+    // predicate is a closure over this thread's gate snapshot and cannot be cloned into the worker, and a
+    // list cannot be computed in advance, packages being an open set; so the worker finishes the program,
+    // asks, and completes its findings from the answer.
+    w.on('message', (m: { ask?: string[] }) => {
+      if (m.ask !== undefined) {
+        // A predicate that throws is a plumbing fault, and surfaces as one: thrown here it would be an
+        // uncaught exception in a listener, and answered "not refused" a fail-open nobody saw.
+        let refused: string[];
+        try { refused = m.ask.filter(spec => importRefused?.(spec) === true); }
+        catch (e) { clearTimeout(timer); void w.terminate(); reject(e); return; }
+        w.postMessage({ refused });
+        return;
+      }
+      clearTimeout(timer); resolve(m as never); void w.terminate();
+    });
     w.once('error', e => { clearTimeout(timer); reject(e); });
     w.once('exit', code => { clearTimeout(timer); if (code !== 0) reject(new Error(`typecheck worker exited with ${code}`)); });
   });
 
   if (result.error !== undefined) throw new Error(result.error);
-  return result.ok ? null : (result.diagnostics ?? []);
+  return {
+    diags: result.ok ? null : (result.diagnostics ?? []),
+    ...(result.parameters !== undefined ? { parameters: result.parameters } : {}),
+  };
 }
 
 /**
@@ -214,7 +234,7 @@ async function runWorker(data: Record<string, unknown>): Promise<DiagnosticRecor
 export async function checkProjectDir(
   buildDir: string, opts?: { ownContracts?: readonly string[] },
 ): Promise<CheckResult> {
-  const diags = await runWorker({
+  const { diags } = await runWorker({
     mode: 'project', buildDir,
     ...(opts?.ownContracts !== undefined ? { ownContracts: [...opts.ownContracts] } : {}),
   });
@@ -236,28 +256,31 @@ export async function checkSnippetAgainst(opts: {
   prefixLen:     number;
   prefixLines:   number;
   apiIndexPath?: string;
-  /** `paths` entries for the module specifiers this installation permits a body to import — one per
-   *  permitted module, so a module outside the set does not resolve and is a compile error rather than
-   *  something that typechecks and is refused at run time. Built by the caller, which knows the set. */
+  /** `paths` entries for the builtins a body may import — one per module the gate does not refuse, so
+   *  nothing is typed that the call will never hand over. Built by the caller, which holds the answer. */
   importPaths?: Record<string, string[]>;
   /** Declaration files for the globals a body HAS beyond the standard library, loaded as roots: on node,
    *  `Buffer`. Module types arrive only through {@link importPaths}, which load on an import, so a body
    *  using a node global without importing anything would otherwise fail on a name it really has. */
   globalTypes?: readonly string[];
-  /** The restriction itself, when there is one — `paths` cannot enforce it. Loading ONE builtin's
-   *  declaration file pulls in the ambient `declare module 'node:…'` blocks of everything its own
-   *  declarations reference (`node:fs` reaches `node:stream`, which reaches most of the rest), so a
-   *  forbidden specifier resolves anyway and typechecks clean. A literal `import('…')` is therefore
-   *  checked STRUCTURALLY against this list, the way the cast gate and ENV-GATE close the other holes
-   *  the type system cannot. Absent ⇒ unrestricted, and nothing is checked. */
-  permittedImports?: readonly string[];
+  /** Whether the gate refuses an import outright ({@link ToolCheckOptions.importRefused}) — `paths`
+   *  cannot enforce that. Loading ONE builtin's declaration file pulls in the ambient `declare module
+   *  'node:…'` blocks of everything its own declarations reference (`node:fs` reaches `node:stream`,
+   *  which reaches most of the rest), so a refused specifier resolves anyway and typechecks clean, and an
+   *  installed package resolves by ordinary lookup. A literal `import('…')` is therefore checked
+   *  STRUCTURALLY, the way the cast gate and ENV-GATE close the other holes the type system cannot: the
+   *  worker sends the literal specifiers it found back here once, and this answers which are refused.
+   *  Absent ⇒ nothing is refused, and nothing is asked. */
+  importRefused?: (spec: string) => boolean;
   /** The identifiers the RUNNER does not bind, from `FunctionRunner.withheldGlobals` — the list ENV-GATE
    *  rejects. It comes from the runner because a copy here could not be kept in step with it, and a name
    *  that is shadowed but not rejected typechecks and then fails at the first call. Absent ⇒ nothing is
    *  rejected: with no runner there is no claim about what a body does not have. */
   withheldGlobals?: readonly string[];
+  /** Functions in the snippet whose parameter schemas to report ({@link ToolCheckOptions.parametersOf}). */
+  parametersOf?: readonly string[];
 }): Promise<ToolCheckReport> {
-  const diags = await runWorker({
+  const { diags, parameters } = await runWorker({
     mode: 'snippet',
     root: opts.root,
     source: opts.source,
@@ -267,10 +290,14 @@ export async function checkSnippetAgainst(opts: {
     ...(opts.apiIndexPath !== undefined ? { apiIndexPath: opts.apiIndexPath } : {}),
     ...(opts.importPaths  !== undefined ? { importPaths:  opts.importPaths  } : {}),
     ...(opts.globalTypes  !== undefined ? { globalTypes:  opts.globalTypes  } : {}),
-    ...(opts.permittedImports !== undefined ? { permittedImports: opts.permittedImports } : {}),
+    ...(opts.importRefused !== undefined ? { askImports: true } : {}),
     ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
-  });
-  return reportOf(diags ?? [], 'snippet');
+    ...(opts.parametersOf !== undefined && opts.parametersOf.length > 0
+      ? { parametersOf: [...opts.parametersOf], parametersModule: fileURLToPath(new URL('./parameters.cts', import.meta.url)) }
+      : {}),
+  }, opts.importRefused);
+  const report = reportOf(diags ?? [], 'snippet');
+  return parameters !== undefined ? { ...report, parameters } : report;
 }
 
 // The worker body: CommonJS (Worker eval mode is CJS, so `require` exists and no loader hooks are
@@ -454,41 +481,28 @@ try {
       return d.getSourceFile().fileName === virtual && d.getStart() >= minStart;
     });
   };
-  // The permit's boundary rule and the by-name rule, inlined: the worker is a CommonJS realm with no
-  // loader hooks, so it cannot import 'importPermitted' or 'importableByName' from plugin-api, which is
-  // where both rules live and are documented.
+  // The by-name rule, inlined: the worker is a CommonJS realm with no loader hooks, so it cannot import
+  // 'importableByName' from plugin-api, which is where the rule lives and is documented.
   const byName = function (spec) {
     return spec !== '' && !/[^\\w@.~+!$&'()*,;=:/-]/.test(spec) && !/^[./]/.test(spec)
       && (spec.indexOf('node:') === 0 || !/^[a-z][a-z0-9+.-]*:/i.test(spec))
       && !spec.split('/').some(function (seg) { return seg === '.' || seg === '..'; });
   };
-  // The node runner's canonicalImport, which is what the gate asks about: 'os' is 'node:os', so a
-  // restriction of 'node:' admits it at both.
-  const isBuiltin = require('node:module').isBuiltin;
-  const canonical = function (spec) {
-    return spec.indexOf(':') < 0 && isBuiltin(spec) ? 'node:' + spec : spec;
-  };
-  const permits = workerData.permittedImports;
   const API_PKG = '@matatbread/matbot-plugin-api';
   const withheld = new Set<string>(workerData.withheldGlobals ?? []);
-  const permitted = function (spec) {
-    return permits.some(function (p) {
-      return spec === p
-        || (p.charAt(p.length - 1) === '/' || p.charAt(p.length - 1) === ':'
-              ? spec.indexOf(p) === 0
-              : spec.indexOf(p + '/') === 0);
-    });
-  };
   // Where an import was reported on by a rule of ours, so tsc's own complaint about the same specifier is
   // dropped. Both fire whenever the module does not resolve, and tsc's is actively misleading here: it
-  // offers "Do you need to install type definitions for node?" about a module the INSTALLATION forbids,
+  // offers "Do you need to install type definitions for node?" about a module the gate refuses,
   // which is not a thing the author can fix — or, for a specifier that lands on a declaration-only
   // package, a path inside matbot's own node_modules. Which of the three tsc emits depends on whether
   // @types/node happens to be reachable from the program root, so these rules are the deterministic ones.
   const importStarts = new Set();
-  // Every literal import()'s specifier and where it sits, recorded whether or not a restriction exists:
-  // the rewrite below is about SPELLING, which no permit decides.
+  // Every literal import()'s specifier and where it sits, recorded whether or not anything is refused:
+  // the rewrite below is about SPELLING, which no permission decides.
   const importSpecs = new Map();
+  // The literal imports the gate may refuse — by name, and not the types-only package — asked about once
+  // the program is checked (see runWorker).
+  const importSites = [];
   const envVisit = function (node, sf) {
     if (envGate && node.getStart(sf) >= minStart) {
       if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
@@ -510,13 +524,8 @@ try {
           synth.push(mk(sf, node.arguments[0], 90006,
             "'" + spec + "' cannot be imported by a function body, which imports only node builtins ('node:fs') and packages already installed where matbot runs, by name — never a path or a URL. To use other code, install it as a package, or as a matbot plugin with the 'plugin' tool."));
           importStarts.add(at);
-        } else if (permits !== undefined && !permitted(canonical(spec))) {
-          synth.push(mk(sf, node.arguments[0], 90006,
-            permits.length === 0
-              ? "module imports are switched off on this installation, so '" + spec + "' cannot be imported. Compute with the tools available instead."
-              : "'" + spec + "' is not permitted on this installation, which allows only: " + permits.join(', ')
-                + ". This is configuration, not a permission anyone can grant at the call — use a permitted module, or none."));
-          importStarts.add(at);
+        } else {
+          importSites.push({ sf: sf, node: node.arguments[0], spec: spec, at: at });
         }
       }
       if (ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.ImportKeyword) {
@@ -664,13 +673,21 @@ try {
   };
   for (const gf of gateFiles) { visit(gf, gf); contractVisit(gf, gf); envVisit(gf, gf); escapeVisit(gf, gf); }
 
+  const finish = function (refused) {
+  try {
+  // Before the rewrites below, which defer to a position a gate has already spoken at.
+  for (const site of importSites) {
+    if (!refused.has(site.spec)) continue;
+    synth.push(mk(site.sf, site.node, 90006,
+      "'" + site.spec + "' is refused to this function by the permission policy in force — a standing answer, so the import would be refused at the call too. Use another module, or none; this is not something to work around."));
+    importStarts.add(site.at);
+  }
+
   // A bare 'node' is not the builtins namespace — it resolves to @types/node's index.d.ts, which is
   // references and ambient blocks with no export, so tsc reports "File '<matbot's own node_modules>/
   // @types/node/index.d.ts' is not a module": a path the body never named and its author cannot act on.
   // Rewritten only where tsc ALREADY failed on it, so a package genuinely called 'node' is untouched,
-  // and only where no gate has spoken at that position, so one mistake stays one finding. It is also what
-  // a restriction of ["node"] permits — a package of that name, no builtin — which is why this fires with
-  // no restriction in force too.
+  // and only where no gate has spoken at that position, so one mistake stays one finding.
   for (const d of targets) {
     if (d.code !== 2306 && d.code !== 2307) continue;
     if (importSpecs.get(d.start) !== 'node' || importStarts.has(d.start)) continue;
@@ -699,7 +716,7 @@ try {
       if (spec !== undefined) {
         synth.push({ file: d.file, start: d.start, length: d.length, code: 90006,
                      category: ts.DiagnosticCategory.Error, __syn: true,
-                     messageText: "'" + spec + "' has no type declarations here, so nothing it returns can be checked. The comment block at the top of these declarations lists the modules this installation types — use one of those, or define this function with noTypeCheck." });
+                     messageText: "'" + spec + "' has no type declarations here, so nothing it returns can be checked. Use a builtin that has them, or define this function with noTypeCheck." });
         importStarts.add(d.start);
         continue;
       }
@@ -752,7 +769,22 @@ try {
     }
     return out;
   };
-  parentPort.postMessage({ ok: errors.length === 0, diagnostics: errors.map(rec) });
+  // Read from the program just checked, so a schema describes exactly the types that were graded.
+  const parameters = workerData.parametersOf && virtual !== null
+    ? require(workerData.parametersModule).parametersOf(ts, program.getTypeChecker(), program.getSourceFile(virtual), workerData.parametersOf)
+    : undefined;
+  parentPort.postMessage({ ok: errors.length === 0, diagnostics: errors.map(rec), ...(parameters ? { parameters } : {}) });
+  } catch (e) {
+    parentPort.postMessage({ error: String((e && e.message) || e) });
+  }
+  };
+
+  const asked = workerData.askImports ? [...new Set(importSites.map(function (s) { return s.spec; }))] : [];
+  if (asked.length === 0) finish(new Set());
+  else {
+    parentPort.once('message', function (m) { finish(new Set(m.refused)); });
+    parentPort.postMessage({ ask: asked });
+  }
 } catch (e) {
   parentPort.postMessage({ error: String((e && e.message) || e) });
 }

@@ -24,7 +24,7 @@ interface ManifestDoc {
 
 /**
  * The Drive-synced plugin set, persisted as one doc in the active StorageBackend's `plugin-manifest`
- * namespace (Drive, once this plugin is active). This is *separate* from the browser plugin's local
+ * namespace (Drive, once this plugin is active). This is *separate* from the web bundle's local
  * `extra-plugins` list: the local loader is unchanged and keeps managing whatever was installed
  * locally (including this plugin itself), while this set holds what's added once Drive is connected
  * and is restored when the Drive plugin loads. Symmetric ownership — each loader restores its own set.

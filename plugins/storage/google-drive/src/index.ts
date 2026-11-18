@@ -1,5 +1,5 @@
 import type { MatbotPluginSpec, MatbotMachine } from '@matatbread/matbot-plugin-api';
-import { PLUGIN_API_VERSION } from '@matatbread/matbot-plugin-api';
+import { PLUGIN_API_VERSION, isProviderAlias } from '@matatbread/matbot-plugin-api';
 import { GoogleDriveStorageBackend, DRIVE_SCOPE } from './drive-backend.js';
 import { DriveAuth } from './drive-auth.js';
 import { runDriveSetup } from './drive-setup-overlay.js';
@@ -68,8 +68,8 @@ let syncedProviders: { services: MatbotMachine; set: DriveProviderSet } | undefi
  * default) was active. It then re-points the vault at Drive and restores the Drive-synced plugin set.
  *
  * It deliberately does NOT declare `storageBackend.open`: that boot pre-scan hook gets no config and
- * cannot show UI, so activation always runs through `setup()` (i.e. `plugin add`, which the browser
- * plugin then replays on every boot). On node there is no `document`, so it throws and the host keeps
+ * cannot show UI, so activation always runs through `setup()` (i.e. `plugin add`, which the web bundle
+ * then loads again on every boot). On node there is no `document`, so it throws and the host keeps
  * its filesystem backend.
  */
 export const plugin: MatbotPluginSpec = {
@@ -144,8 +144,14 @@ export const plugin: MatbotPluginSpec = {
     // so `${…}` credential placeholders resolve against Drive.
     const providerSet = new DriveProviderSet(backend.createStore('provider-manifest'));
     services.tools.register(createBrowserProviderTool(driveProviderAdmin(providerSet, services)));
-    for (const cfg of await providerSet.list()) {
-      services.providers.register(cfg);
+    // Profiles before aliases, since an alias needs its target in place, and the manifest keeps its
+    // entries in write order, not dependency order. An alias the live set refuses is skipped, not fatal.
+    const synced = await providerSet.list();
+    for (const cfg of synced) if (!isProviderAlias(cfg)) services.providers.register(cfg);
+    for (const cfg of synced) {
+      if (!isProviderAlias(cfg)) continue;
+      try { services.providers.register(cfg); }
+      catch (e) { console.warn(`[google-drive] skipping synced provider alias "${cfg.name}":`, e instanceof Error ? e.message : e); }
     }
     syncedProviders = { services, set: providerSet };
   },

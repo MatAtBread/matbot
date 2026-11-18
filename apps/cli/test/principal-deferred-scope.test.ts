@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { installPrincipalCarrier, runAs, currentPrincipal, tryCurrentPrincipal } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // `runAs` re-establishes the principal across deferred work returned out of the scope — an unpulled async
 // iterator (the tool ABI's shape) or a promise of one. Before that, the identity was established for the

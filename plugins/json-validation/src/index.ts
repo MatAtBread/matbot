@@ -91,9 +91,11 @@ function validate(schema: JSONSchema, value: unknown, path: string, errs: ToolIn
     // rejection on their own. But once the call is being refused anyway, an undeclared key is the likelier
     // cause — an `action` sent to a tool that has none reads as "prompt missing" otherwise — so it is
     // named first. Reported only alongside a refusal, this can never reject a call the schema admits.
+    // Worded exactly as ts-validation words the same key: the hook merge says an error once by path and
+    // message, so different words for one fault reported it twice, each with its own copy of the value.
     if (missing.length && additional === undefined && schema['properties'] !== undefined) {
       for (const [key, v] of Object.entries(obj)) {
-        if (!props[key]) errs.push({ path: `${path}${propPath(key)}`, message: 'not a declared property', value: v });
+        if (!props[key]) errs.push({ path: `${path}${propPath(key)}`, message: 'unexpected property', value: v });
       }
     }
     for (const key of missing) {

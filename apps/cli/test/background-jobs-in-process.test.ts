@@ -8,8 +8,9 @@ import type {
 import { MemoryStore } from '@matatbread/matbot-core/storage-base';
 import { makeSessionTools } from '@matatbread/matbot-sessions';
 import { inProcessRunner, createBackgroundJobsPlugin } from '../../../plugins/background-jobs/src/index.ts';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import type { Trigger, TriggerFilter, TriggerSurface } from '../../../plugins/triggers/src/index.ts';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());
@@ -38,7 +39,8 @@ function reporter(seen: Message[][]): ProviderAdapter {
   };
 }
 
-function machineWith(adapter: ProviderAdapter, extra: Tool[] = []): { machine: MatbotMachine; sessions: Store<Session>; appended: Array<{ sessionId: string | undefined; messages: readonly AppendMessage[] }> } {
+function machineWith(adapter: ProviderAdapter, extra: Tool[] = []): { machine: MatbotMachine; sessions: Store<Session>; appended: Array<{ sessionId: string | undefined; messages: readonly AppendMessage[] }>; registered: Map<string, unknown> } {
+  const registered = new Map<string, unknown>();
   const sessions = new MemoryStore<Session>();
   const appended: Array<{ sessionId: string | undefined; messages: readonly AppendMessage[] }> = [];
   const appender: SessionAppender = { append: async (sessionId, messages) => {
@@ -57,6 +59,7 @@ function machineWith(adapter: ProviderAdapter, extra: Tool[] = []): { machine: M
   const machine = {
     sessions,
     SessionAppender: appender,
+    async register(key: string, value: unknown) { registered.set(key, value); },
     providers: new Map([['p', config]]),
     ephemeral(opts?: { appender?: SessionAppender }) {
       const store = new MemoryStore<Session>();
@@ -72,7 +75,7 @@ function machineWith(adapter: ProviderAdapter, extra: Tool[] = []): { machine: M
       };
     },
   } as unknown as MatbotMachine;
-  return { machine, sessions, appended };
+  return { machine, sessions, appended, registered };
 }
 
 test('an in-process job reports to its conversation, labelled with the job, and leaves no session behind', { timeout: 15000 }, async () => {
@@ -82,7 +85,7 @@ test('an in-process job reports to its conversation, labelled with the job, and 
   await sessions.set(chat.id, chat);
   const before = (await sessions.query({})).items.length;
 
-  const runner = inProcessRunner(machine)!;
+  const runner = (await inProcessRunner(machine))!;
   const outcome = await runAs(PRINCIPAL, () => runner.run(
     { id: 'job-1', name: 'Balance', prompt: 'Check the balance and tell the user.', session: chat.id, provider: 'p', principal: PRINCIPAL },
     new AbortController().signal,
@@ -180,7 +183,8 @@ test('cancelling a job stops its turn, not just the scheduler\'s view of it', { 
   };
   const { machine } = machineWith(adapter, [slow]);
   const ac = new AbortController();
-  const running = runAs(PRINCIPAL, () => inProcessRunner(machine)!.run({ id: 'job-2', prompt: 'p', provider: 'p', principal: PRINCIPAL }, ac.signal));
+  const runner = (await inProcessRunner(machine))!;
+  const running = runAs(PRINCIPAL, () => runner.run({ id: 'job-2', prompt: 'p', provider: 'p', principal: PRINCIPAL }, ac.signal));
 
   await started;
   ac.abort();
@@ -188,4 +192,50 @@ test('cancelling a job stops its turn, not just the scheduler\'s view of it', { 
   assert.ok(toolSawAbort, 'the running tool was told to stop');
   assert.equal(calls, 1, 'and no further round started');
   assert.equal(outcome?.appended, 0);
+});
+
+test('a job\'s triggers setting withholds triggers from its own turn, and from no other session', { timeout: 15000 }, async () => {
+  const trigger = { id: 't', version: 'v', conditions: [], invoke: { tool: 'x' }, createdAt: '', updatedAt: '' } as unknown as Trigger;
+  const answers: Array<{ surface: TriggerSurface; admitted: number }> = [];
+  let filter: TriggerFilter | undefined;
+  const probe: Tool = {
+    name: 'probe', description: 'asks the filter about the session it runs in', inputSchema: { type: 'object', properties: {} },
+    executor: { async *execute(_input: unknown, ctx: ToolContext) {
+      for (const surface of ['user', 'agent'] as const) {
+        answers.push({ surface, admitted: (await filter!.admit([trigger], { session: ctx.session, surface })).length });
+      }
+      yield { type: 'result', value: 'ok' };
+    } },
+  };
+  let call = 0;
+  const adapter: ProviderAdapter = {
+    name: 'fake',
+    async health() { return { ok: true } as never; },
+    complete(): AsyncIterable<CompletionEvent> {
+      const n = call++ % 2;
+      return (async function* () {
+        if (n === 0) yield { type: 'tool-call', id: `c${call}`, name: 'probe', input: {} };
+        else         yield { type: 'text-delta', delta: 'done' };
+        yield { type: 'done' };
+      })();
+    },
+  };
+  const { machine, registered } = machineWith(adapter, [probe]);
+  const runner = (await inProcessRunner(machine))!;
+  filter = registered.get('TriggerFilter') as TriggerFilter;
+  assert.ok(filter, 'the runner registers a TriggerFilter');
+
+  for (const triggers of ['reply', 'none', undefined] as const) {
+    await runAs(PRINCIPAL, () => runner.run(
+      { id: 'j', prompt: 'p', provider: 'p', principal: PRINCIPAL, ...(triggers !== undefined ? { triggers } : {}) },
+      new AbortController().signal,
+    ));
+  }
+  assert.deepEqual(answers, [
+    { surface: 'user', admitted: 0 }, { surface: 'agent', admitted: 1 },   // reply: the prompt is not judged
+    { surface: 'user', admitted: 0 }, { surface: 'agent', admitted: 0 },   // none
+    { surface: 'user', admitted: 1 }, { surface: 'agent', admitted: 1 },   // absent: as a conversation
+  ]);
+  const other = createSession({ title: 'chat' });
+  assert.equal((await filter.admit([trigger], { session: other, surface: 'user' })).length, 1, 'a conversation is judged as before');
 });

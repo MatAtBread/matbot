@@ -144,6 +144,7 @@ export interface SkillSummary {
   name:         string;
   toolBinding?: string;
   hidden:       boolean;
+  candidate:    boolean;
 }
 
 /**
@@ -153,8 +154,8 @@ export interface SkillSummary {
  * catalogue advertisement only — firing a skill on a condition is the triggers subsystem's concern.
  */
 export interface SkillManager {
-  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
-   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
+  /** Aborts when the manager is cleared (teardown). A `services.mounted.observe` needs no such signal —
+   *  the host already ends it with the plugin that made it. */
   readonly signal: AbortSignal;
   /** The provider used to derive a skill's catalogue summary / knowledge analysis: the `analysisProvider`
    *  setting if pinned and configured, else the first configured provider (works with zero config). */
@@ -166,8 +167,10 @@ export interface SkillManager {
   all(): Promise<SkillDoc[]>;
   list(): Promise<SkillSummary[]>;
   get(name: string): Promise<SkillDoc | undefined>;
-  /** Create a new skill or update an existing one's content by name. `catalogue` omitted ⇒ unchanged. */
-  save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc>;
+  /** Create a new skill or update an existing one's content by name. `catalogue` omitted ⇒ unchanged.
+   *  `opts.candidate` applies to a skill this call CREATES (see {@link SkillDoc.candidate}); an existing
+   *  skill's state changes only by {@link setCandidate}. */
+  save(name: string, content: string, catalogue?: boolean, opts?: { candidate?: boolean }): Promise<SkillDoc>;
   /** Delete a skill by name. Returns the removed doc, or `undefined`. */
   delete(name: string): Promise<SkillDoc | undefined>;
   /** Hide or unhide a skill: hiding retracts it from the knowledge index and the catalogue
@@ -175,9 +178,12 @@ export interface SkillManager {
    *  re-indexes it. Orthogonal to `save` — a content edit never changes the hidden state. No-op if
    *  already in the requested state. Returns the updated doc, or `undefined` if no such skill. */
   setHidden(name: string, hidden: boolean): Promise<SkillDoc | undefined>;
+  /** Make a skill a candidate, or adopt one (`false`): adopting puts it in reach of the model, as
+   *  unhiding does. No-op if already in the requested state. Returns the updated doc, or `undefined`. */
+  setCandidate(name: string, candidate: boolean): Promise<SkillDoc | undefined>;
   /** Import-only create: once a skill exists, the import is a no-op. Returns `true` if one was imported. */
   importIfAbsent(name: string, content: string, catalogSummary?: string): Promise<boolean>;
-  /** Teardown: end the mounted-swap subscription and cancel detached analyses. */
+  /** Teardown: abort `signal` and cancel detached analyses. */
   clear(): void;
 }
 
@@ -198,7 +204,6 @@ export class SkillManagerImpl implements SkillManager {
   private readonly inflight = new Map<string, AbortController>();
   private readonly store:    Store<SkillDoc>;
   private readonly services: MatbotMachine;
-  // Aborts on teardown (clear()), ending the mounted-swap subscription set up in setupSkills.
   private readonly lifecycle = new AbortController();
 
   // Read live so a runtime register('KnowledgeIndex', …) swap is honoured (the member is a
@@ -210,8 +215,6 @@ export class SkillManagerImpl implements SkillManager {
     this.services = services;
   }
 
-  /** Ends with the manager (teardown). Hand to `services.mounted.observe` so a StorageBackend swap
-   *  re-reads the new backend's skills, and the loop stops when the plugin unloads. */
   get signal(): AbortSignal { return this.lifecycle.signal; }
 
   // The provider used to derive a skill's catalogue summary / knowledge analysis. The user pins one
@@ -251,6 +254,7 @@ export class SkillManagerImpl implements SkillManager {
       name:   s.name,
       ...(s.toolBinding !== undefined ? { toolBinding: s.toolBinding } : {}),
       hidden: s.hidden ?? false,
+      candidate: s.candidate ?? false,
     }));
   }
 
@@ -279,7 +283,7 @@ export class SkillManagerImpl implements SkillManager {
   // `catalogue` (the system-prompt advertisement flag) is optional: omitted ⇒ left unchanged (the
   // common content-only save), present ⇒ set. It rides on `save` so the editor persists content,
   // triggers, and the flag in one action.
-  async save(name: string, content: string, catalogue?: boolean): Promise<SkillDoc> {
+  async save(name: string, content: string, catalogue?: boolean, opts: { candidate?: boolean } = {}): Promise<SkillDoc> {
     const now = new Date().toISOString();
     const doc = await this.get(name);
 
@@ -290,6 +294,7 @@ export class SkillManagerImpl implements SkillManager {
         name,
         content,
         ...(catalogue !== undefined ? { catalogue } : {}),
+        ...(opts.candidate === true ? { candidate: true } : {}),
         createdAt: now,
         updatedAt: now,
       };
@@ -336,6 +341,18 @@ export class SkillManagerImpl implements SkillManager {
     return saved;
   }
 
+  async setCandidate(name: string, candidate: boolean): Promise<SkillDoc | undefined> {
+    const doc = await this.get(name);
+    if (doc === undefined) return undefined;
+    if ((doc.candidate ?? false) === candidate) return doc;
+    const saved = await this.casMutate(doc, cur => {
+      const { candidate: _was, ...rest } = cur;
+      return this.bump(candidate ? { ...rest, candidate: true } : rest);
+    }, true);
+    this.emitChange('saved', saved);
+    return saved;
+  }
+
   /**
    * Import-only create: once a skill exists, the store owns it and the import is a no-op.
    * Used by the node filesystem watcher to seed `.md` files without clobbering edits, and by
@@ -365,7 +382,7 @@ export class SkillManagerImpl implements SkillManager {
   }
 
   clear(): void {
-    this.lifecycle.abort();                                // end the mounted-swap subscription
+    this.lifecycle.abort();
     for (const ac of this.inflight.values()) ac.abort();   // cancel detached analyses on teardown
     this.inflight.clear();
   }
@@ -408,7 +425,10 @@ export class SkillManagerImpl implements SkillManager {
       // for free); the index is the thing that makes the skill findable at all. Caching first meant a doc
       // this principal cannot write — a skill shared in read-only — threw on the optimisation and took the
       // indexing with it, leaving the skill invisible to search with only a console warning to say so.
-      await this.knowledge.index(entry);
+      // A candidate is analysed — its proposer ranks against the metadata cached on it — but withheld from
+      // the index, so the model cannot find it until it is adopted.
+      if (doc.candidate) await this.knowledge.remove(doc.id);
+      else               await this.knowledge.index(entry);
       if (cache !== undefined) await this.cacheKnowledge(doc.id, cache);
     } catch (e) {
       console.warn(`[skills] reindex failed for ${doc.name}:`, e);

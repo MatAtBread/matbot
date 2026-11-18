@@ -333,3 +333,39 @@ test('the brackets are MATCHED, so a union of promises is not mangled into nonse
   assert.equal(unwrapPromise('Promise<A | B>'), 'A | B');
   assert.equal(unwrapPromise('Promise<{ a: 1 | 2 }>'), '{ a: 1 | 2 }');
 });
+
+// On node the inputSchema comes from the checker's RESOLVED parameter types, which see what the text cannot:
+// a named type, an alias, `Omit<…>`. The conventions are the text path's — the JSON projection, a union of
+// scalars as a type/enum pair, and `{}` wherever a schema could not honestly constrain the value.
+test('the checker reports each parameter\'s schema from its resolved type', { timeout: 60000 }, async () => {
+  const source = [
+    "interface Opts { mode: 'fast' | 'slow'; limit?: number; when: Date; flags: Record<string, boolean>; run(): void }",
+    'type Picked = Omit<Opts, \'limit\'>;',
+    'async function __fn(city: string, opts: Picked, n?: number, on: boolean | null = null, either: { a: number } | string = \'x\'): Promise<void> {}',
+    'export const pkg = async (args: { id: string; deep: { level: 1 | 2 } }): Promise<void> => {};',
+  ].join('\n');
+  const report = await checkSnippetAgainst({
+    root: join(import.meta.dirname, '..', '..', '..'), source, prefixLen: 0, prefixLines: 0,
+    parametersOf: ['__fn', 'pkg', 'absent'],
+  });
+  assert.equal(report.ok, true, JSON.stringify(report.diagnostics));
+  const fn = report.parameters?.['__fn'] ?? [];
+  assert.deepEqual(fn.map(p => [p.name, p.optional]), [['city', false], ['opts', false], ['n', true], ['on', true], ['either', true]]);
+  assert.deepEqual(fn[1]?.schema, {
+    type: 'object',
+    properties: {
+      mode:  { type: 'string', enum: ['fast', 'slow'] },
+      when:  { type: 'string' },                                   // a Date is what its toJSON returns
+      flags: { type: 'object', additionalProperties: { type: 'boolean' } },
+    },
+    required: ['mode', 'when', 'flags'],                           // `run` is a method: never on the wire
+  });
+  assert.deepEqual(fn[3]?.schema, { type: ['null', 'boolean'] }, 'boolean is the open type, not an enum of true and false');
+  assert.deepEqual(fn[4]?.schema, {}, 'a structural arm makes the union unconstrained, as the text path does');
+  assert.deepEqual(report.parameters?.['pkg']?.[0]?.schema, {
+    type: 'object',
+    properties: { id: { type: 'string' }, deep: { type: 'object', properties: { level: { type: 'number', enum: [1, 2] } }, required: ['level'] } },
+    required: ['id', 'deep'],
+  });
+  assert.equal(report.parameters?.['absent'], undefined, 'a name the snippet does not declare is absent');
+});

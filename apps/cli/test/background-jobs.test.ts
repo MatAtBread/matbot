@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { runAs, installPrincipalCarrier, ItemChangeKind, RegistryChangeKind } from '@matatbread/matbot-core';
 import { executeQuery } from '@matatbread/matbot-core/storage-base';
 import type { AppendMessage, MatbotMachine, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { connectToParent, relayable, serveJob, type Endpoint } from '../../../plugins/background-jobs-node/src/channel.ts';
 import { plugin as jobsPlugin, superviseChild } from '../../../plugins/background-jobs-node/src/index.ts';
 
@@ -39,12 +39,16 @@ test('a job reaches its parent over the real IPC channel, and exits by itself', 
   const code = await new Promise<number | null>(r => child.once('close', c => r(c)));
 
   assert.equal(code, 0, 'the job exited on its own — an unreleased channel would have kept it alive');
-  const result = JSON.parse(out) as { job: { id: string }; sent: unknown; refused: string };
+  const result = JSON.parse(out) as { job: { id: string }; sent: unknown; asked: unknown; refused: string };
   assert.equal(result.job.id, 'job-1');
   assert.deepEqual(result.sent, { sessionId: 's1', messageIds: ['m1'] });
-  assert.deepEqual(appended, [[{ role: 'assistant', content: [{ type: 'text', text: 'hello from job-1', origin: 'robo' }] }]],
-    'what arrives is assistant text the parent can trust the shape of');
-  assert.match(result.refused, /only assistant messages/, 'a job cannot speak as the user');
+  assert.deepEqual(appended, [
+    [{ role: 'assistant', content: [{ type: 'text', text: 'hello from job-1', origin: 'robo' }] }],
+    // A user message is a robo-submit — a request the parent's appender runs as a turn — and still robo:
+    // a job asks the conversation something, it never speaks as the person.
+    [{ role: 'user', content: [{ type: 'text', text: 'what now?', origin: 'robo' }], mode: 'queue' }],
+  ], 'what arrives is robo-authored text the parent can trust the shape of');
+  assert.match(result.refused, /only assistant or user messages/, 'nothing else crosses');
   assert.equal(notified.length, 1, 'a posted announcement was flushed before the job exited');
 });
 
@@ -82,7 +86,7 @@ function memStore<T extends { id: string; version: string }>(seed: T[] = []): { 
   return { store, docs };
 }
 
-test('it reports to the conversation it was made from, and lists the old plugin\'s schedules to be moved', { timeout: 20000 }, async () => {
+test('it reports to the conversation it was made from, and warns of the old plugin\'s schedules', { timeout: 20000 }, async () => {
   const hourFromNow = new Date(Date.now() + 3_600_000).toISOString();
   const jobs    = memStore<{ id: string; version: string; session?: string }>();
   const legacy  = memStore([{ id: 'old1', version: 'v1', prompt: 'Summarise the news', nextRun: hourFromNow, intervalMs: 86_400_000, output: 'news.md' }]);
@@ -91,7 +95,6 @@ test('it reports to the conversation it was made from, and lists the old plugin\
 
   const tools = new Map<string, Tool>();
   const services = {
-    configPath:  '/nowhere/matbot.yaml',
     isSubAgent:  () => false,
     sessions:    sessions.store,
     createStore: (ns: string) => (ns === 'schedules' ? legacy.store : jobs.store),
@@ -102,7 +105,13 @@ test('it reports to the conversation it was made from, and lists the old plugin\
   const warnings: string[] = [];
   const warn = console.warn;
   console.warn = (...a: unknown[]) => { warnings.push(a.join(' ')); };
-  try { await jobsPlugin.setup!(services); } finally { console.warn = warn; }
+  // The CLI publishes the config it booted with; the plugin starts jobs as copies of it, so it needs one.
+  const config = process.env['MATBOT_CONFIG'];
+  process.env['MATBOT_CONFIG'] = '/nowhere/matbot.yaml';
+  try { await jobsPlugin.setup!(services); } finally {
+    console.warn = warn;
+    if (config === undefined) delete process.env['MATBOT_CONFIG']; else process.env['MATBOT_CONFIG'] = config;
+  }
   for (const t of jobsPlugin.tools ?? []) tools.set(t.name, t as Tool);
 
   try {
@@ -132,16 +141,10 @@ test('it reports to the conversation it was made from, and lists the old plugin\
     const named = await call('background_job', { prompt: 'p', at: '2h', session: 'nope' });
     assert.match(named.find(e => e.type === 'error')?.message ?? '', /Session "nope" not found/);
 
-    // The old plugin's schedule is listed, marked, never run — and can be moved: create, then cancel.
+    // The old plugin's schedule is not one of this plugin's jobs, and is left where it is.
     const listed = value(await call('background_job_action', { action: 'list' })) as unknown as Array<Record<string, unknown>>;
-    assert.deepEqual(listed.find(r => r['id'] === 'old1'),
-      { id: 'old1', version: 'v1', prompt: 'Summarise the news', nextRun: hourFromNow, intervalMs: 86_400_000, output: 'news.md', legacy: true });
-
-    const suspend = await call('background_job_action', { action: 'suspend', id: 'old1' });
-    assert.match(suspend.find(e => e.type === 'error')?.message ?? '', /legacy schedule/);
-
-    assert.deepEqual(value(await call('background_job_action', { action: 'cancel', id: 'old1' })), { cancelled: true, id: 'old1', legacy: true });
-    assert.equal(legacy.docs.has('old1'), false);
+    assert.equal(listed.find(r => r['id'] === 'old1'), undefined);
+    assert.equal(legacy.docs.has('old1'), true);
   } finally {
     await jobsPlugin.teardown?.();
   }

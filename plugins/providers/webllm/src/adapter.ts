@@ -1,4 +1,5 @@
 import type { ProviderAdapter, ProviderConfig, Message, Tool, CompletionEvent, HealthStatus } from '@matatbread/matbot-plugin-api';
+import { withFailure } from '@matatbread/matbot-plugin-api';
 import { ReplyParser, toChatMessages, toolCallFormat, type Piece } from './format.js';
 import { CHARS_PER_TOKEN, fitToWindow, forgetFit, isWindowOverflow, omittedNote } from './window.js';
 import { DEFAULT_LIBRARY, cacheBackend, checkModel, library, loadEngine, offeredModels, type CacheBackend, type ChatRequest, type InitProgressReport, type Loaded } from './webllm.js';
@@ -102,7 +103,7 @@ export class WebLLMAdapter implements ProviderAdapter {
       const kept   = fitted.omitted > 0 ? [...fitted.messages, noteMessage(omittedNote(fitted.omitted))] : fitted.messages;
       const chat   = toChatMessages(kept, offered);
       if (chat.at(-1)?.role !== 'user')
-        throw new Error('webllm: the conversation must end with a user turn or a tool result — WebLLM cannot continue an assistant message.');
+        throw withFailure(new Error('webllm: the conversation must end with a user turn or a tool result — WebLLM cannot continue an assistant message.'), 'invalid');
       return {
         omitted: fitted.omitted,
         shrunk:  fitted.shrunk,
@@ -186,10 +187,10 @@ export class WebLLMAdapter implements ProviderAdapter {
             continue;
           }
           if (isWindowOverflow(e))
-            throw new Error(`webllm: the conversation does not fit the ${contextWindow}-token context window even with its `
+            throw withFailure(new Error(`webllm: the conversation does not fit the ${contextWindow}-token context window even with its `
               + 'earlier turns left out — the system prompt, the tool list and the current turn alone are too long. '
               + 'Raise `contextWindow` (it costs GPU memory), offer fewer tools (the tool-router plugin, or '
-              + '`parameters.tools: false`), or start a new conversation.', { cause: e });
+              + '`parameters.tools: false`), or start a new conversation.', { cause: e }), 'invalid');
           throw e;
         } finally {
           // What the model was sent and what it wrote, verbatim, at the level DevTools hides unless "Verbose".
