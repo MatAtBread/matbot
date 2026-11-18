@@ -2,6 +2,7 @@ import type TS from 'typescript';
 import type { Runtime } from '@matatbread/matbot-plugin-api';
 import { contractArms } from '@matatbread/matbot-plugin-api';
 import { compileToolValidator, generateValidator, type ToolValidator, type ValidatorSource } from './validator.js';
+import { anchorPackage } from './anchor.js';
 
 // Derive a self-contained `declare module … { interface ToolContracts {…} interface MatbotServices {…} }`
 // from the live type graph, so a compiled (or hand-rolled) plugin's compilation sees correct types for
@@ -121,7 +122,6 @@ export async function collectToolTypeRoots(
   const { readFileSync, readdirSync, statSync, existsSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
-  const { createRequire } = await import('node:module');
 
   // Anchor plugin-api: the monorepo source if present, then the project's own install, and finally THIS
   // module's own resolution — which always works, because tool-types peer-depends on plugin-api, so
@@ -135,22 +135,14 @@ export async function collectToolTypeRoots(
   // — which compiled clean and only happened to resemble the real `Principal`. A wrong guess compiles too,
   // and the cast gate cannot see it: nothing was cast, a contract was asserted. Same failure the scaffold's
   // dangling plugin-api link used to cause, and the same fix.
-  const anchor = (dir: string, name: string): string | undefined => {
-    const monorepo = join(projectRoot, dir, 'src', 'index.ts');
-    if (existsSync(monorepo)) return monorepo;
-    for (const from of [join(projectRoot, '_'), fileURLToPath(import.meta.url)]) {
-      try { return createRequire(from).resolve(name); } catch { /* try the next anchor */ }
-    }
-    return undefined;
-  };
-  const pluginApiIndex = anchor('plugin-api', '@matatbread/matbot-plugin-api');
+  const pluginApiIndex = anchorPackage(projectRoot, 'plugin-api', '@matatbread/matbot-plugin-api');
   if (!pluginApiIndex) return null;
 
   // Core is a root too, for the tools `assembleMachine` registers itself (`about_matbot`, `single_turn`,
   // `gate_action`). Nothing else reliably reaches them: no plugin owns them, so no `resolvedUrl` does, and
   // the `plugins/` glob below finds core only through some plugin's import of it — which made those three
   // typed or not by whichever plugins an installation happened to load.
-  const coreIndex = anchor('core', '@matatbread/matbot-core');
+  const coreIndex = anchorPackage(projectRoot, 'core', '@matatbread/matbot-core');
   const roots = new Set<string>([pluginApiIndex, ...(coreIndex !== undefined ? [coreIndex] : [])]);
 
   // A loaded plugin's `resolvedUrl` → an on-disk type-bearing source file. `.ts`/`.d.ts` used directly;

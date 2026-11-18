@@ -7,6 +7,7 @@ import type { FunctionRunner, MatbotMachine, MatbotPluginSpec, ToolCheckOptions,
 import { getRegisteredPlugins } from '@matatbread/matbot-core';
 import { buildToolTypesData, compileToolValidators, type SyntheticContract, type ToolTypesData } from './build-dts.js';
 import { checkSnippetAgainst } from './checker.js';
+import { anchorPackage } from './anchor.js';
 import type { ToolValidator } from './validator.js';
 
 // Where to resolve from when the host names no project: this package's own install, from which plugin-api,
@@ -315,13 +316,13 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
     const prefix = `${await this.dtsUnder(runner)}\n`;
     const source = `${prefix}${snippet}\nexport {};\n`;           // trailing export ⇒ this file is a module
 
-    // Anchor `@matatbread/matbot-plugin-api` — it isn't a bare-resolvable dep of the project root, so map it
-    // to the monorepo source (or the installed package). Without this the imports fail and every type
-    // collapses to `any`, silently passing bad snippets.
-    const monorepoApi = join(root, 'plugin-api', 'src', 'index.ts');
-    let apiIndex: string | undefined = existsSync(monorepoApi) ? monorepoApi : undefined;
+    // Anchor `@matatbread/matbot-plugin-api` (see anchorPackage). Without it the dts's imports fail, `tool`
+    // is `any`, and every tool call in the snippet passes — so a check that cannot find it is a plumbing
+    // fault, and is refused as one rather than reported as a pass.
+    const apiIndex = anchorPackage(root, 'plugin-api', '@matatbread/matbot-plugin-api');
     if (apiIndex === undefined) {
-      try { apiIndex = createRequire(join(root, '_')).resolve('@matatbread/matbot-plugin-api'); } catch { /* unresolved */ }
+      throw new Error('cannot type-check: @matatbread/matbot-plugin-api resolves neither from the project ' +
+                      `directory (${root}) nor from tool-types itself, so every tool call would typecheck as \`any\`.`);
     }
 
     // Worker-hosted check (see checker.ts) — off the main loop, and each diagnostic comes back as an
@@ -333,7 +334,7 @@ export class ToolTypeIndexImpl implements ToolTypeIndex {
       root, source,
       prefixLen: prefix.length,
       prefixLines: prefix.split('\n').length - 1,
-      ...(apiIndex !== undefined ? { apiIndexPath: apiIndex } : {}),
+      apiIndexPath: apiIndex,
       ...(Object.keys(importPaths).length > 0 ? { importPaths } : {}),
       globalTypes: nodeGlobalTypes(),
       // Not only its `paths`: one builtin's declaration file drags in the ambient `declare module

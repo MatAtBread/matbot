@@ -662,6 +662,12 @@ a second host's needs.
   root-relative or absolute specifier — is fetched on demand exactly as before. A warm boot still makes no
   requests. A prefetch still running after 20 s (`MATBOT_PREFETCH_BUDGET_MS`) is left to the on-demand path.
   Declared `files` are fetched concurrently too, and mirrored files are written aside and renamed into place.
+- **`tool-types` checks a function body's tool calls wherever the project is.** The snippet check looked
+  for `@matatbread/matbot-plugin-api` only from the project directory, so where it is not installed there
+  (a pnpm project, a globally installed CLI, a directory holding only `matbot.yaml`) the import failed,
+  `tool` was `any`, and every tool call in a `tool_function` body passed the check: a wrong argument type,
+  an unknown property, a tool that does not exist. It now falls back to tool-types' own resolution, as the
+  dts build always did, and a check that still cannot find it is refused rather than passed.
 - **`tool-types` fetched over http can derive a function's parameter schema.** Its checker's worker `require`s
   `src/parameters.cts` by path, which no import names, so a fetch never brought it, and on node every
   function-tools check asking for a schema (a `define`) failed with "Cannot find module". The file is now
