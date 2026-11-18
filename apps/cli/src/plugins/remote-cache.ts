@@ -16,7 +16,8 @@
 
 import { writeFile, readFile, readdir, mkdir, access, stat, realpath, rename, symlink, rm, rmdir, readlink, lstat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
+import { createRequire, stripTypeScriptTypes } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import path from 'node:path';
 import { mirrorPath, mirroredFile, candidatesFor, recordOrigin } from './cache-layout.js';
@@ -340,7 +341,7 @@ async function findEntryManifest(entryUrl: string, dotPlugins: string, live: boo
 // matbot source imports siblings with explicit `.js` extensions (verbatimModuleSyntax); the raw
 // file on disk is `.ts`. Mirror the web bundle: fetch the `.js`, fall back to `.ts`, and write the
 // content at the `.ts` path so the ts-hooks `.js`→`.ts` resolve remap finds it at load time.
-async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl: string; content: string }> {
+async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl: string; content: string; fetched: boolean }> {
   const candidates = candidatesFor(url);
 
   // Every candidate is tried on disk BEFORE any is tried on the network, because the two orders
@@ -349,7 +350,7 @@ async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl:
   // already have — one wasted round trip per module per boot, and a failure with no network at all.
   for (const candidate of candidates) {
     const mirrored = await readMirrored(candidate, dotPlugins);
-    if (mirrored !== undefined) return { finalUrl: candidate, content: mirrored };
+    if (mirrored !== undefined) return { finalUrl: candidate, content: mirrored, fetched: false };
   }
 
   // An unreachable candidate is a miss, not the answer: the candidates are a preference order over
@@ -360,7 +361,7 @@ async function fetchModule(url: string, dotPlugins: string): Promise<{ finalUrl:
     let r;
     try { r = await fetchText(candidate); }
     catch (e) { unreachable ??= e; continue; }
-    if (r.ok) return { finalUrl: candidate, content: r.text };
+    if (r.ok) return { finalUrl: candidate, content: r.text, fetched: true };
   }
   if (unreachable !== undefined) {
     throw new Error(`could not fetch module ${url}: ${unreachable instanceof Error ? unreachable.message : String(unreachable)}`);
@@ -482,8 +483,10 @@ export async function discardRestore(spec: string, dotPlugins: string): Promise<
  *
  * It used to fetch the whole module graph, predicted by three regexes over the source. Node's resolver
  * does that job properly — lazily, including dynamic imports, root-relative specifiers and absolute URLs —
- * so the graph is now fetched on demand by the module hook (apps/cli/remote-loader.js) as each import is
- * actually resolved. What is left here is what the hook cannot do for itself: the pre-fetch gate (a
+ * so the graph is fetched on demand by the module hook (apps/cli/remote-loader.js) as each import is
+ * actually resolved. On a cold fetch the graph is also PREFETCHED here (`prefetchGraph`), as a hint the
+ * hook then finds on disk: the hook stays the authority on what loads. What is left here is what the hook
+ * cannot do for itself: the pre-fetch gate (a
  * package.json read before any of this plugin's code is on disk, let alone evaluated), the entry to hand
  * the loader, the scheme record the hook reconstructs URLs with, the self-link under the package's
  * canonical name so a sibling plugin can import it by name, and the declared non-code assets no import
@@ -519,11 +522,18 @@ export async function materializeRemote(spec: string, dotPlugins: string, resolv
   await registerByName(manifest.pkg, pkgRoot, dotPlugins);
   await linkHostSingletons(dotPlugins);
 
-  const { finalUrl, content } = await fetchModule(manifest.entryUrl, dotPlugins);
+  const { finalUrl, content, fetched } = await fetchModule(manifest.entryUrl, dotPlugins);
   const entry = mirrorPath(finalUrl, dotPlugins);
   await writeCached(entry, content);
 
-  await fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins);
+  const limit = limiter(PREFETCH_CONCURRENCY);
+  await Promise.all([
+    // Only when the entry came from the network, i.e. a first fetch or a refresh. Nothing records a miss,
+    // so a hint naming nothing (an import in a comment) would otherwise be asked about on every warm boot,
+    // which makes no requests at all. An interrupted cold fetch leaves the rest to the hook, as before.
+    fetched ? prefetchGraph({ url: finalUrl, content }, manifest.pkg, manifest.pkgUrl, dotPlugins, limit) : undefined,
+    fetchDeclaredFiles(manifest.pkg, manifest.pkgUrl, dotPlugins, limit),
+  ]);
 
   // A declared dependency is the one place a plugin states what it needs that this route does not bring —
   // and the only place a matbot-plugin dependency (`mcp` → `mcp-http`, `background-jobs-node` → `background-jobs`, …) is
@@ -684,37 +694,179 @@ async function linkHostSingletons(dotPlugins: string): Promise<void> {
 // A raw host can't be directory-listed, so we mirror the *concrete* files the package declares in
 // `files` (skipping directory entries like "src" — those are code, covered by the crawl — and globs).
 // Best-effort: a missing asset warns and is skipped rather than aborting the install.
-async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, dotPlugins: string): Promise<void> {
+async function fetchDeclaredFiles(pkg: Record<string, unknown>, pkgUrl: string, dotPlugins: string, limit: Limiter): Promise<void> {
   const files = Array.isArray(pkg['files']) ? pkg['files'] : [];
-  for (const raw of files) {
-    if (typeof raw !== 'string') continue;
+  await Promise.all(files.map(async raw => {
+    if (typeof raw !== 'string') return;
     const rel = raw.replace(/^\.?\//, '');
     const last = rel.split('/').pop() ?? '';
-    if (rel.includes('*') || !last.includes('.')) continue; // glob or directory entry — not fetchable here
+    if (rel.includes('*') || !last.includes('.')) return; // glob or directory entry — not fetchable here
     let url: string, cachePath: string;
     try {
       url = new URL(rel, pkgUrl).href;
       cachePath = mirrorPath(url, dotPlugins);
     } catch (e) {
       console.warn(`[matbot] declared file "${rel}" not fetched: ${e instanceof Error ? e.message : String(e)}`);
-      continue;
+      return;
     }
-    try { await access(cachePath); continue; } catch { /* not mirrored yet */ }
+    try { await access(cachePath); return; } catch { /* not mirrored yet */ }
     // Best-effort includes the network being gone. An asset that never cached (a 404, an interrupted
     // first boot) is retried on every boot, so without this an offline boot dies on the retry — for a
     // file the plugin may not even read.
     let bytes;
     try {
-      const res = await fetch(url);
-      if (!res.ok) { console.warn(`[matbot] declared file "${rel}" not fetched (HTTP ${res.status})`); continue; }
-      bytes = new Uint8Array(await res.arrayBuffer());
+      bytes = await limit(async () => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return new Uint8Array(await res.arrayBuffer());
+      });
     } catch (e) {
       console.warn(`[matbot] declared file "${rel}" not fetched: ${e instanceof Error ? e.message : String(e)}`);
-      continue;
+      return;
     }
-    await mkdir(path.dirname(cachePath), { recursive: true });
-    await writeFile(cachePath, bytes);
+    await writeCached(cachePath, bytes);
+  }));
+}
+
+// ── Prefetch: a hint, never the authority ─────────────────────────────────────────
+//
+// A module the hook has to fetch is fetched with the main thread blocked (remote-loader.js), one after
+// another, each `.js` specifier paying a 404 before its `.ts`. So on a cold fetch, the modules the source
+// names are mirrored here first, concurrently, while nothing is blocked. This is not the scan that was
+// removed: that one WAS the fetch, so whatever it missed failed to load. Here whatever is missed (a
+// computed `import()`, a root-relative or absolute specifier, anything the regexes get wrong) is fetched
+// by the hook exactly as before, and a wrong guess costs one request. What makes that true:
+//
+//   - Only literal RELATIVE specifiers inside the plugin's own package are followed. The rest are the
+//     hook's, whose rules for them (URL identity, root-relative resolution) are not repeated here.
+//   - A file lands where the hook would put it, at `mirrorPath` of the candidate the hook would choose. The
+//     candidates are FIRED together but COMMITTED in the hook's preference order, and a lower one only
+//     once every preferred one answered "not found". Taking whichever arrived first would put the `.ts`
+//     on disk while a `.js` exists, and the hook, finding it there, would load the wrong module.
+//   - The source is read after Node's own type stripping, so a type-only import, which Node never
+//     resolves, is never fetched; `import { type A } from './a.js'` survives stripping as
+//     `import {} from './a.js'`, which does load, and so is.
+//   - It is bounded: a concurrency cap, and a deadline after which what is still in flight is abandoned
+//     to the hook. It has finished, written or abandoned, by the time it returns, so nothing it does can
+//     race the hook writing the same file.
+
+const PREFETCH_CONCURRENCY = 8;
+const PREFETCH_BUDGET_MS = 20_000;
+
+const STATIC_FROM  = /\b(?:import|export)\s[^'"`;]*?\bfrom\s*(['"])([^'"\n]+)\1/g;
+const SIDE_EFFECT  = /\bimport\s*(['"])([^'"\n]+)\1/g;
+const DYNAMIC_LIT  = /\bimport\s*\(\s*(['"])([^'"\n]+)\1\s*[,)]/g;
+// What can be fetched as text and scanned. A `.wasm` or `.node` import is left to the hook.
+const SCANNABLE    = /(?:\.(?:[mc]?[jt]s|json)|\/[^./]*)$/;
+
+type Limiter = <T>(fn: () => Promise<T>) => Promise<T>;
+
+function limiter(n: number): Limiter {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return async fn => {
+    if (active >= n) await new Promise<void>(go => waiting.push(go));
+    active++;
+    try { return await fn(); }
+    finally { active--; waiting.shift()?.(); }
+  };
+}
+
+/** The literal relative specifiers a module's source would have Node resolve. */
+function relativeImports(source: string, url: string): string[] {
+  const bare = url.split(/[?#]/)[0] ?? url;
+  if (bare.endsWith('.json')) return [];
+  let code = source;
+  // A source the stripper refuses (an enum, a namespace) is one Node's loader refuses too.
+  if (/\.[mc]?ts$/.test(bare)) { try { code = stripTypeScriptTypes(source); } catch { return []; } }
+  const found = new Set<string>();
+  for (const re of [STATIC_FROM, SIDE_EFFECT, DYNAMIC_LIT]) {
+    for (const m of code.matchAll(re)) {
+      const spec = m[2];
+      if (spec !== undefined && /^\.\.?\//.test(spec) && !/[?#]/.test(spec)) found.add(spec);
+    }
   }
+  return [...found];
+}
+
+/** The concrete code paths a manifest names besides its entry: every `exports` target, `main`, `module`. */
+function declaredEntries(pkg: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') out.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v !== null && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  walk(pkg['exports']);
+  walk(pkg['main']);
+  walk(pkg['module']);
+  return out.filter(t => t.startsWith('./') && !t.includes('*') && !/\.d\.[mc]?ts$/.test(t));
+}
+
+type Probe = { ok: true; text: string } | { ok: false; status?: number };
+
+async function probe(url: string, signal: AbortSignal): Promise<Probe> {
+  try {
+    const res = await fetch(url, { signal });
+    // Read, not cancelled: a cancelled body costs the connection, and most of a prefetch's answers are
+    // the `.js` misses in front of each `.ts`, so each would be followed by a fresh TLS handshake.
+    if (!res.ok) { await res.arrayBuffer(); return { ok: false, status: res.status }; }
+    return { ok: true, text: await res.text() };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function prefetchModule(url: string, dotPlugins: string, limit: Limiter, signal: AbortSignal): Promise<{ url: string; content: string } | undefined> {
+  const candidates = candidatesFor(url);
+  for (const candidate of candidates) {
+    const mirrored = await readMirrored(candidate, dotPlugins);
+    if (mirrored !== undefined) return { url: candidate, content: mirrored };
+  }
+  const stops = candidates.map(() => new AbortController());
+  const asked = candidates.map((c, i) => limit(() => probe(c, AbortSignal.any([signal, stops[i]!.signal]))));
+  try {
+    for (const [i, candidate] of candidates.entries()) {
+      const got = await asked[i]!;
+      if (got.ok) {
+        await writeCached(mirrorPath(candidate, dotPlugins), got.text);
+        return { url: candidate, content: got.text };
+      }
+      // Anything but a definite miss (an error, a 5xx, the deadline) says nothing about whether this
+      // candidate exists, so committing a lower one could choose differently from the hook. Leave it.
+      if (got.status !== 404 && got.status !== 410) return undefined;
+    }
+    return undefined;
+  } catch {
+    return undefined;   // mirrorPath refused the URL, or the write failed: the hook will say why, if it is imported
+  } finally {
+    for (const s of stops) s.abort();
+  }
+}
+
+async function prefetchGraph(entry: { url: string; content: string }, pkg: Record<string, unknown>, pkgUrl: string,
+                             dotPlugins: string, limit: Limiter): Promise<void> {
+  const scope = new URL('./', pkgUrl).href;
+  const deadline = AbortSignal.timeout(Number(process.env['MATBOT_PREFETCH_BUDGET_MS']) || PREFETCH_BUDGET_MS);
+  const seen = new Set<string>([entry.url]);
+  const running = new Set<Promise<void>>();
+
+  const visit = (url: string): void => {
+    if (seen.has(url) || !url.startsWith(scope) || !SCANNABLE.test(url) || deadline.aborted) return;
+    seen.add(url);
+    const task = prefetchModule(url, dotPlugins, limit, deadline)
+      .then(got => { if (got !== undefined) scan(got); })
+      .catch(() => { /* a hint that fails is a module the hook fetches, which is all a miss ever costs */ })
+      .finally(() => running.delete(task));
+    running.add(task);
+  };
+  const scan = (m: { url: string; content: string }): void => {
+    for (const spec of relativeImports(m.content, m.url)) visit(new URL(spec, m.url).href);
+  };
+
+  scan(entry);
+  for (const rel of declaredEntries(pkg)) visit(new URL(rel, pkgUrl).href);
+  while (running.size > 0) await Promise.all(running);
 }
 
 // Resolve a bare specifier the way the host would, from a chain of bases: the install root
@@ -778,8 +930,15 @@ function hostPackageDir(req: NodeRequire, name: string): string | undefined {
 // Never overwrites: the mirrored tree is the cache, and a refresh evicts rather than rewrites. "Already
 // there" means a FILE: a directory of that name returned as the entry fails later as a directory import
 // with nothing to say why, where writing over it fails here, naming the path.
-async function writeCached(localPath: string, content: string): Promise<void> {
+//
+// Written aside and renamed into place, because another process sharing the cache (a background job
+// booting) can be reading the tree while this fills it, and a module read half-written fails as a syntax
+// error naming nothing that is actually wrong.
+async function writeCached(localPath: string, content: string | Uint8Array): Promise<void> {
   if ((await stat(localPath).catch(() => undefined))?.isFile()) return;
   await mkdir(path.dirname(localPath), { recursive: true });
-  await writeFile(localPath, content, 'utf8');
+  const aside = `${localPath}.${randomUUID()}.tmp`;
+  await writeFile(aside, content);
+  try { await rename(aside, localPath); }
+  catch (e) { await rm(aside, { force: true }); throw e; }
 }

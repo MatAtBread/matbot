@@ -652,6 +652,20 @@ a second host's needs.
   At boot a plugin that failed to load is probed as well, so a copy it nests is named beside its failure.
   A package's `exports` is read as Node reads it for `import` — conditions in the order the package lists
   them — in all three places the CLI reads one, which had each used a different order.
+- **CLI: a plugin fetched over http no longer blocks the process on its first import** ([#116](https://github.com/MatAtBread/matbot/issues/116)).
+  A cold fetch (first `plugin add`, or `plugin reload --refresh`) mirrors the modules the plugin's source names
+  concurrently, 8 requests at a time, before anything is imported, so the import finds them on disk. They were
+  fetched one at a time as Node resolved each import, with the main thread blocked throughout, and each `.js`
+  specifier paid a 404 before its `.ts`: every session on the host froze for the whole download. The scan is
+  a hint, not the mechanism: only literal relative imports inside the package are followed, after Node's own
+  type stripping (so a type-only import is never fetched), and whatever it misses — a computed `import()`, a
+  root-relative or absolute specifier — is fetched on demand exactly as before. A warm boot still makes no
+  requests. A prefetch still running after 20 s (`MATBOT_PREFETCH_BUDGET_MS`) is left to the on-demand path.
+  Declared `files` are fetched concurrently too, and mirrored files are written aside and renamed into place.
+- **`tool-types` fetched over http can derive a function's parameter schema.** Its checker's worker `require`s
+  `src/parameters.cts` by path, which no import names, so a fetch never brought it, and on node every
+  function-tools check asking for a schema (a `define`) failed with "Cannot find module". The file is now
+  declared in `files`, which is what a fetch mirrors beyond what is imported.
 - **CLI `plugin` tool** (formerly `tool-plugin`) — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
   refused; write `github:owner/repo/sub` (with `#ref` after it, if any), which fetches the same files. It
   never worked as an install, and since 0.4.5 it was folded into the path with a warning. Refused when the
