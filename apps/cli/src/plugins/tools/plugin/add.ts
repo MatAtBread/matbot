@@ -226,7 +226,8 @@ export async function* addPlugin(configPath: string, specifier: string, ctx: Too
     if (remotePlan !== undefined && remotePlan.unsupported.length > 0) {
       const ranges = remotePlan.unsupported.map(u => `${u.name}@${u.range}`).join(', ');
       yield { type: 'stdout', chunk:
-        `Not installing its dependencies (${ranges}): not registry ranges, so npm is not asked.\n` };
+        `Not installing its dependencies (${ranges}): not registry ranges, so npm is not asked. ` +
+        `Install them alongside matbot, or add the plugin from npm.\n` };
     }
   }
 
