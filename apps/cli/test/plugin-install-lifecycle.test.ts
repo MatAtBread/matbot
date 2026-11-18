@@ -215,7 +215,17 @@ async function registry(p: { dir: string }, manifest: Record<string, unknown>, o
   const addr = server.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}`;
   await writeFile(join(opts.at ?? p.dir, '.npmrc'), `registry=${origin}/\naudit=false\nfund=false\nupdate-notifier=false\n`);
-  return { stop: () => new Promise<void>(d => server.close(() => d())) };
+  // In the environment too, which npm ranks above any .npmrc: `pnpm run` exports `npm_config_registry`
+  // (the public registry) to every script, so under `pnpm test` the npm these tests spawn asked that instead.
+  const inherited = process.env['npm_config_registry'];
+  process.env['npm_config_registry'] = `${origin}/`;
+  return {
+    stop: () => new Promise<void>(d => {
+      if (inherited === undefined) delete process.env['npm_config_registry'];
+      else process.env['npm_config_registry'] = inherited;
+      server.close(() => d());
+    }),
+  };
 }
 
 test('an npm plugin is checked before it is installed, recorded, and remove offers back exactly that', { timeout: 120_000 }, async () => {
