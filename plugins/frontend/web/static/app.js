@@ -632,12 +632,37 @@ function refreshSessions(delay = 150) {
   return sessionsRefresh;
 }
 
+const DWELL_MS = 5000;
+let dwellId = null;
+let dwellTimer = null;
+
+function endDwell() {
+  if (dwellTimer !== null) { clearTimeout(dwellTimer); dwellTimer = null; }
+  dwellId = null;
+}
+
+// A session the UI opened BY ITSELF — the boot default — rather than one the reader chose. The list is
+// sorted by `updatedAt`, so the session a background job has just written to is always the one the boot
+// default opens, and marking it read on the way in destroyed the one dot worth having. It stays unread
+// for a dwell period, visible on its own row, and only then counts as shown.
+function armDwell(id) {
+  endDwell();
+  dwellId = id;
+  dwellTimer = setTimeout(() => {
+    const still = dwellId;        // the id at the START of the dwell
+    endDwell();
+    // The reader moved on: this one was never read, and keeps its dot until they come back to it.
+    if (still !== null && still === currentSessionId) markShown(still);
+  }, DWELL_MS);
+}
+
 // Reading the session on screen, in a page someone can see, is showing it to them — so it is marked read.
 // A peer session read for a link, or a page in a background tab, is not.
 const shownNow = id => id === currentSessionId && document.visibilityState === 'visible';
 // A sessions plugin without read tracking refuses the unknown field, which must not stop the session opening.
 async function apiGetSession(id)  {
-  if (shownNow(id)) {
+  // A session inside its dwell is on screen but has not been read yet: the dot it carries is the point.
+  if (shownNow(id) && id !== dwellId) {
     try { return await callTool('session_action', { action: 'get', sessionId: id, markRead: true }); } catch { /* read plainly */ }
   }
   try { return await callTool('session_action', { action: 'get', sessionId: id }); }
@@ -2312,7 +2337,9 @@ function renderSessions(sessions) {
       (s.id === currentSessionId ? ' active' : '') +
       (busy ? ' busy' : '') +
       (prompting ? ' prompting' : '') +
-      (!busy && s.id !== currentSessionId && s.state === 'unread' ? ' unread' : '');
+      // The open session is excluded — it is being read. A dwelling one is the exception: on screen, not yet
+      // read, so its dot is exactly what the reader is owed.
+      (!busy && s.state === 'unread' && (s.id !== currentSessionId || s.id === dwellId) ? ' unread' : '');
     el.dataset.sid = s.id;
 
     const labelEl = document.createElement('span');
@@ -3310,12 +3337,17 @@ function renderSession(session, startIdx, scrollTarget) {
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
-async function openSession(id, scrollTarget) {
+// `origin` is who chose this session: 'user' (a click, a hash, a fork) counts as being shown to the
+// reader at once; 'boot' is the UI opening something by itself, which dwells before it counts.
+async function openSession(id, scrollTarget, origin = 'user') {
   closeSidebar();
+  if (origin === 'boot') armDwell(id); else endDwell();
   currentSessionId = id;
   const ownerOf = sessionOwner(id);
   void refreshShareState(id, ownerOf);
-  sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
+  // A dwelling session keeps its dot: it has not been read yet, and clearing it here is what hid the
+  // one indicator worth having.
+  if (origin !== 'boot') sessionListEl.querySelector('[data-sid="' + id + '"]')?.classList.remove('unread');
   location.hash = sessionHash(id);
   void refreshSessions();
   // The owner is needed before rendering, not just for the badge: a shared-in session's markers link to
@@ -4797,12 +4829,14 @@ async function init() {
   const tildeIdx    = rawFragment.indexOf('~');
   const fragmentSid = tildeIdx >= 0 ? rawFragment.slice(0, tildeIdx) : rawFragment;
   const fragmentNav = tildeIdx >= 0 ? (() => { try { return JSON.parse(rawFragment.slice(tildeIdx + 1)); } catch { return null; } })() : null;
-  const startId     = (fragmentSid && sessions.some(s => s.id === fragmentSid))
-    ? fragmentSid : sessions[0]?.id;
+  // A session named in the fragment is one the reader navigated to; the fallback is the UI choosing the
+  // most recently updated session by itself, which must dwell before it is marked read.
+  const fromFragment = fragmentSid !== '' && sessions.some(s => s.id === fragmentSid);
+  const startId      = fromFragment ? fragmentSid : sessions[0]?.id;
   if (startId === 'new') {
     await handleNewSession();
   } else if (startId) {
-    await openSession(startId, fragmentNav?.msg);
+    await openSession(startId, fragmentNav?.msg, fromFragment ? 'user' : 'boot');
   } else {
     showEmpty();
     setBusyState(false);
