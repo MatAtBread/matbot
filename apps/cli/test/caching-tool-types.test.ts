@@ -8,7 +8,7 @@ import type { PluginSettings } from '@matatbread/matbot-plugin-api';
 import { cachingFill } from '@matatbread/matbot-caching-tool-types';
 import { buildToolTypesData, compileToolValidators, filterToolTypesData } from '@matatbread/matbot-tool-types';
 import type { ToolTypesData, ToolTypesFill, ToolTypesInputs } from '@matatbread/matbot-tool-types';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 
@@ -212,14 +212,16 @@ test('a tool added or removed is a filter, not a rebuild', async () => {
 });
 
 // No roots means nothing a key could describe, so there is nothing to store either.
-test('nothing to scan passes straight through to the build', async () => {
+// Core is a scan root for its own tools, so a machine with no plugin loaded still has something to
+// describe — and so something to cache.
+test('with no plugin loaded, core is still scanned and the build is cached', async () => {
   const { dir, file } = await project();
   try {
     const { build, builds } = fakeBuild(file);
     const fill = cachingFill(settings(), build);
     await fill(inputs(dir, { pluginEntryUrls: [] }));
     await fill(inputs(dir, { pluginEntryUrls: [] }));
-    assert.equal(builds(), 2);
+    assert.equal(builds(), 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

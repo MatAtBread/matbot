@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSession, installPrincipalCarrier, SessionAppendKind } from '@matatbread/matbot-core';
 import type { MatbotMachine, Message, Notification, PluginSettings, Session, Store, Tool, ToolContext } from '@matatbread/matbot-plugin-api';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 import { plugin as telegram } from '../../../plugins/frontend/telegram/src/plugin.ts';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());

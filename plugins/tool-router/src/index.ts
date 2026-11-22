@@ -3,7 +3,7 @@ import type { MatbotPluginSpec, Message, MessageContent, Tool, ToolContract, Too
 
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
-    tool_search: ToolContract<{ found: Array<{ name: string }>; note: string }, { query: string }>;
+    tool_search: ToolContract<{ found: Array<{ name: string; fallback?: true }>; note: string }, { query: string }>;
   }
 }
 
@@ -152,11 +152,41 @@ function latestCandidates(messages: readonly Message[]): Set<string> {
   }
   return names;
 }
+// The names one search result revealed, best first, each saying whether it is a fallback (a pin trailing
+// the matches) rather than a match. A result recorded before the flag existed reads as all matches.
+function foundIn(result: unknown): { name: string; fallback: boolean }[] {
+  const found = (result as { found?: unknown } | null)?.found;
+  if (!Array.isArray(found)) return [];
+  return found.flatMap(f => {
+    const n = (f as { name?: unknown } | null)?.name;
+    return typeof n === 'string' ? [{ name: n, fallback: (f as { fallback?: unknown }).fallback === true }] : [];
+  });
+}
+// The searches one assistant message made, ranked as ONE list: they happened at the same moment, so none is
+// more recent than another. Each search's first match, then each one's second, and so on, then the fallbacks
+// the same way — so a cull keeps every search's best and sheds the tails, fallbacks first.
+function batchRanking(results: readonly { name: string; fallback: boolean }[][]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const fallback of [false, true]) {
+    const lists = results.map(r => r.filter(f => f.fallback === fallback));
+    for (let i = 0; lists.some(l => i < l.length); i++) {
+      for (const l of lists) {
+        const n = l[i]?.name;
+        if (n !== undefined && !seen.has(n)) { seen.add(n); out.push(n); }
+      }
+    }
+  }
+  return out;
+}
 // Cull `wsNames` to its k most-recent members by turn-distance. Walk the transcript building a
 // most-recently-referenced-first ordering — a tool CALL and the search that REVEALED it both count as
-// references — then keep the front k. A search result's `found` is rank-ordered, so pushing it front-to-back
-// leaves its top match frontmost: a broad search keeps its BEST matches and sheds the tail. Restricted to
-// wsNames (an older search's un-adopted candidates were already excluded from the working set upstream).
+// references — then keep the front k. A batch of searches is one reference, ranked by `batchRanking`, so its
+// best matches land frontmost: a broad search keeps its BEST matches and sheds the tail. It was each result
+// in transcript order, which put the last search of a batch wholly ahead of the others: a batch searching
+// for a tool by name and for something broad kept the broad search's matches and culled the named tool from
+// the very window the search had said it was in. Restricted to wsNames (an older search's un-adopted
+// candidates were already excluded from the working set upstream).
 function keepByRecency(messages: readonly Message[], wsNames: ReadonlySet<string>, k: number): Set<string> {
   const order: string[] = [];                                          // most-recent first
   const touch = (n: string): void => {
@@ -164,15 +194,23 @@ function keepByRecency(messages: readonly Message[], wsNames: ReadonlySet<string
     const i = order.indexOf(n); if (i >= 0) order.splice(i, 1);
     order.unshift(n);
   };
-  const searchIds = new Set<string>();
+  // Which batch (the index of the message that made it) each search belongs to, and every batch's results.
+  const batchOf = new Map<string, number>();
+  messages.forEach((m, i) => { for (const c of m.content) if (c.type === 'tool-call' && c.name === SEARCH) batchOf.set(c.id, i); });
+  const results = new Map<number, { name: string; fallback: boolean }[][]>();
   for (const m of messages) for (const c of m.content) {
-    if (c.type === 'tool-call') { if (c.name === SEARCH) searchIds.add(c.id); else touch(c.name); }
-    else if (c.type === 'tool-result' && searchIds.has(c.id)) {
-      const found = (c.result as { found?: unknown } | null)?.found;
-      if (Array.isArray(found)) for (let i = found.length - 1; i >= 0; i--) {   // reverse → found[0] lands frontmost
-        const n = (found[i] as { name?: unknown } | null)?.name;
-        if (typeof n === 'string') touch(n);
-      }
+    const b = c.type === 'tool-result' ? batchOf.get(c.id) : undefined;
+    if (b !== undefined && c.type === 'tool-result') results.set(b, [...(results.get(b) ?? []), foundIn(c.result)]);
+  }
+  const applied = new Set<number>();
+  for (const m of messages) for (const c of m.content) {
+    if (c.type === 'tool-call') { if (c.name !== SEARCH) touch(c.name); }
+    else if (c.type === 'tool-result') {
+      const b = batchOf.get(c.id);
+      if (b === undefined || applied.has(b)) continue;
+      applied.add(b);
+      const ranked = batchRanking(results.get(b) ?? []);
+      for (let i = ranked.length - 1; i >= 0; i--) touch(ranked[i]!);  // reverse → the best lands frontmost
     }
   }
   return new Set(order.slice(0, k));
@@ -258,14 +296,25 @@ function schemaSpecific(t: Tool): boolean {
 // A labelled two-line reply (not JSON) is what the weak model produces reliably and the parsers below
 // tolerate partial/garbled output. System framing keeps it in extractor-mode (a bare prompt sometimes makes
 // it converse or emit markdown).
+//
+// Width asks whether the tool could answer a request that names neither it nor what it does, not whether its
+// nouns are unbounded. It asked the second, and every operation over an unbounded input read as open — waiting
+// (milliseconds), hashing (text), arithmetic (integers), delegating to a model (prompts), a map-reduce (items) —
+// so those were pinned into every search result, where they inflated each search past the cull trigger and
+// crowded out the tool searched for. Measured on deepseek-flash over 36 tools: the old wording pinned 10 (5 of
+// them operations), this one the 5 that reach outside any domain (web, http, shell, knowledge, the person).
 const DERIVE_SYSTEM =
   'You are a tool analyst. Given a tool name and description, respond with EXACTLY two lines and nothing else:\n' +
   'NOUNS: <the central domain nouns the tool manages, queries, or acts on — a short comma-separated list>\n' +
-  'WIDTH: <one word — "open" if those nouns denote an unbounded/any-instance class (any fact, any URL, the ' +
-  'web, an unknown concept or entity, any shell command) so the tool could help across many unrelated ' +
-  'requests; "specific" if they denote one bounded, named domain (e.g. sessions, triggers, providers, a ' +
-  'platform) so it only helps within that domain>\n' +
+  'WIDTH: <one word — "open" if the tool reaches something no single domain contains (the web, any URL, a ' +
+  'shell, what this system knows, the person using it), so it could be the answer to a request that names ' +
+  'neither the tool nor what it does; "specific" if it is only wanted when a request is about what it does: ' +
+  'one bounded, named domain (e.g. sessions, triggers, providers, a platform), or one operation, however ' +
+  'general its input (e.g. waiting, arithmetic, encoding, asking another model)>\n' +
   'No prose, no markdown, no explanation.';
+// Which wording of WIDTH a model's verdict answered. A cached verdict from an earlier one is judged again
+// (once, outside a sub-agent); the cached nouns are kept, since the NOUNS line did not change.
+const WIDTH_RULE = 2;
 function cleanNouns(raw: string): string | null {
   const s = raw.replace(/\*\*/g, '').replace(/^\s*nouns?\s*:\s*/i, '').trim();
   if (!s || s.length > 800) return null;
@@ -292,7 +341,7 @@ function parseDerivation(raw: string): { nouns: string | null; specificity: 'ope
     specificity: parseWidth(widthLine ?? ''),
   };
 }
-interface NounRec { id: string; version: string; tool: string; nouns: string; source: string; specificity?: string; widthBy?: string }
+interface NounRec { id: string; version: string; tool: string; nouns: string; source: string; specificity?: string; widthBy?: string; widthRule?: number }
 
 export const plugin: MatbotPluginSpec = {
   apiVersion: PLUGIN_API_VERSION,
@@ -398,7 +447,8 @@ searching over declining or improvising.`,
           // iteration's working set, where they become natively callable. Nothing evictable is baked into the
           // transcript, so eviction is just the presenter dropping them. The model must NOT construct a call
           // from this list — it selects from the full tool definitions that now appear in its tool set.
-          const found = names.map(n => ({ name: n }));
+          const matchedSet = new Set(matched);
+          const found = names.map(n => (matchedSet.has(n) ? { name: n } : { name: n, fallback: true as const }));
           const note = matched.length
             ? `${matched.length} matching tool(s) loaded (plus general-purpose fallbacks); they now appear in your available tools with full specifications. Call the best fit from there — prefer a specific match, use a fallback only if none fit — and do not guess arguments from this list.`
             : `No specific tool matched; general-purpose fallbacks are now loaded and appear in your available tools with full specifications. Call one from there, or refine your search.`;
@@ -579,8 +629,10 @@ search. \`get\` reports what is in effect, and \`libraryTools\`, the count compa
       seen.add(key);
       const cached    = primed ? primed.get(key) ?? null : await nounStore.get(key).catch(() => null);
       let nouns       = cached?.nouns;
-      let specificity = cached?.specificity;
-      let widthBy     = cached?.widthBy;
+      const stale     = cached?.widthBy === 'llm' && cached.widthRule !== WIDTH_RULE && !isSub;
+      let specificity = stale ? undefined : cached?.specificity;
+      let widthBy     = stale ? undefined : cached?.widthBy;
+      let judged      = false;
       let source      = cached ? 'cache' : 'uncached-fallback';
       // Width (only when not already cached): the inputSchema shape decides the narrow cases deterministically
       // (no LLM); the ambiguous rest — mostly the wide candidates — fall to the model below.
@@ -593,12 +645,16 @@ search. \`get\` reports what is in effect, and \`libraryTools\`, the count compa
           try {
             const out = parseDerivation((await services.singleTurn({ provider: prov, system: DERIVE_SYSTEM, prompt: `${tool.name}: ${tool.description}` })).text);
             if (nouns === undefined)                          { nouns = out.nouns ?? humanize(tool.name); source = out.nouns ? 'llm' : 'fallback'; }
-            if (specificity === undefined && out.specificity) { specificity = out.specificity; widthBy = 'llm'; }
+            if (specificity === undefined && out.specificity) { specificity = out.specificity; widthBy = 'llm'; judged = true; }
           } catch { /* keep fallbacks below */ }
+          // Not judged again: keep the earlier verdict, unstamped, so the next boot asks once more.
+          if (specificity === undefined && stale) { specificity = cached?.specificity; widthBy = cached?.widthBy; }
           await nounStore.set(key, { id: key, version: key, tool: tool.name, nouns: nouns ?? humanize(tool.name), source,
-            ...(specificity !== undefined ? { specificity } : {}), ...(widthBy !== undefined ? { widthBy } : {}) }).catch(() => {});
+            ...(specificity !== undefined ? { specificity } : {}), ...(widthBy !== undefined ? { widthBy } : {}),
+            ...(judged ? { widthRule: WIDTH_RULE } : {}) }).catch(() => {});
         }
       }
+      if (specificity === undefined && stale) specificity = cached?.specificity;
       nounsByTool.set(tool.name, nouns ?? humanize(tool.name));
       applyWidth(tool.name, specificity);
       rebuildCatalog();

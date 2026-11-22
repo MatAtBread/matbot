@@ -5,9 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import http from 'node:http';
-import { materializeRemote, remoteDependencyNotes, missingPackageOf, restoreRemote, discardRestore,
-         planProvision, applyProvision } from '@matatbread/matbot-tool-plugin';
-import { mirrorPath } from '@matatbread/matbot-tool-plugin/cache-layout';
+import { materializeRemote, remoteDependencyNotes, restoreRemote, discardRestore } from '../src/plugins/remote-cache.js';
+import { missingPackageOf } from '../src/plugins/tools/plugin/add.js';
+import { planProvision, applyProvision } from '../src/plugins/provision.js';
+import { mirrorPath } from '../src/plugins/cache-layout.js';
 
 // A remote plugin is fetched over HTTP and mirrored into `.plugins/`, and the mirrored tree IS the
 // cache. Two properties of that were absent while it was write-only: a warm boot re-downloaded every
@@ -62,9 +63,9 @@ test('a warm materialise asks for nothing, and so works with the server gone', a
   try {
     const first = await materializeRemote(`${srv.origin}/a/`, dotPlugins, dir);
     assert.equal(await readFile(first.entry, 'utf8'), FILES['/a/index.ts']);
-    // The manifest and the entry, and no more: the rest of the graph is fetched by the module hook as
-    // Node resolves it, which is why `helper.ts` is absent here.
-    assert.deepEqual(srv.log.filter(r => r.status === 200).map(r => r.path), ['/a/package.json', '/a/index.ts']);
+    // The manifest, the entry, and what the entry's literal relative imports name (prefetched as a hint).
+    // `helper.ts`'s own root-relative import is not followed: that is the module hook's to resolve.
+    assert.deepEqual(srv.log.filter(r => r.status === 200).map(r => r.path), ['/a/package.json', '/a/index.ts', '/a/helper.ts']);
 
     // Same URLs under a different specifier string, so the in-process manifest memo cannot answer and
     // the mirrored tree has to. Nothing at all should reach the server — not even the `.js` probe that
@@ -216,6 +217,167 @@ test('a declared file that cannot be fetched does not fail the materialise', asy
   }
 });
 
+// ── Prefetch (issue #116) ─────────────────────────────────────────────────────────
+//
+// A module the hook fetches is fetched with the main thread blocked, one at a time. So a cold materialise
+// mirrors what the source predictably names, concurrently, as a HINT: the hook finds those on disk, and
+// fetches whatever the hint missed exactly as before.
+
+/** A server whose handler may hold a response, answer with any status, and count what is in flight. */
+function serveWith(handle: (path: string) => Promise<{ status: number; body?: string }>) {
+  const log: Served[] = [];
+  let inFlight = 0, peak = 0;
+  const server = http.createServer((req, res) => {
+    const p = req.url ?? '';
+    inFlight++; peak = Math.max(peak, inFlight);
+    req.on('close', () => { inFlight--; });
+    void handle(p).then(({ status, body }) => {
+      log.push({ path: p, status });
+      res.writeHead(status, { 'content-type': 'text/plain' });
+      res.end(body);
+    });
+  });
+  return new Promise<{ origin: string; log: Served[]; peak: () => number; stop: () => Promise<void> }>(resolve =>
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+      resolve({
+        origin: `http://127.0.0.1:${port}`, log, peak: () => peak,
+        stop: () => new Promise<void>(done => { server.closeAllConnections(); server.close(() => done()); }),
+      });
+    }));
+}
+
+const PKG = (name: string) => JSON.stringify({ name, matbotRuntime: ['node'], exports: { '.': './index.ts' } });
+
+test('a cold materialise prefetches what the source names, and only what Node would resolve', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-prefetch-'));
+  const dotPlugins = join(dir, '.plugins');
+  const files: Record<string, string> = {
+    '/p/package.json': PKG('@fixture/matbot-prefetch'),
+    '/p/index.ts': [
+      `import { a } from './a.js';`,                        // served as .ts: the usual matbot shape
+      `import { both } from './both.js';`,                  // served as .js AND .ts: the .js is the module
+      `import type { T } from './type-only.js';`,           // erased by Node: never resolved, never fetched
+      `import { type K } from './kept.js';`,                // survives stripping as \`import {} from\`: loads
+      `const name = './computed.js'; await import(name);`,  // computed: the hook's
+      `// export * from './ghost.js'`,                      // a comment: a wrong guess, costing one 404
+      `import '../outside.js';`,                            // outside the package: the hook's
+      `export const plugin = { a, both } as unknown as T;`,
+    ].join('\n'),
+    '/p/a.ts': `export { deep as a } from './lib/deep.js';\n`,
+    '/p/lib/deep.ts': `export const deep = 'deep';\n`,
+    '/p/both.js': `export const both = 'js';\n`,
+    '/p/both.ts': `export const both = 'ts';\n`,
+    '/p/type-only.ts': `export type T = unknown;\n`,
+    '/p/kept.ts': `export type K = 1;\n`,
+    '/p/computed.ts': `export {};\n`,
+    '/outside.ts': `export {};\n`,
+  };
+  const srv = await serve(files);
+  try {
+    await materializeRemote(`${srv.origin}/p/`, dotPlugins, dir);
+    const host = new URL(srv.origin).host;
+    const mirrored = (rel: string) => access(join(dotPlugins, host, rel)).then(() => true, () => false);
+
+    for (const rel of ['p/a.ts', 'p/lib/deep.ts', 'p/both.js', 'p/kept.ts']) {
+      assert.ok(await mirrored(rel), `${rel} prefetched`);
+    }
+    assert.equal(await mirrored('p/both.ts'), false, 'the preferred candidate is the one committed');
+    for (const rel of ['p/type-only.ts', 'p/computed.ts', 'outside.ts']) {
+      assert.equal(await mirrored(rel), false, `${rel} left to the hook`);
+    }
+    const asked = srv.log.map(r => r.path);
+    for (const p of ['/p/type-only.js', '/p/type-only.ts', '/p/computed.ts', '/outside.js', '/outside.ts']) {
+      assert.ok(!asked.includes(p), `${p} never requested`);
+    }
+    assert.ok(asked.includes('/p/ghost.js'), 'the comment cost its wrong guess');
+
+    // Nothing records a miss, so a hint that named nothing would be asked about on every boot. It is not,
+    // because the prefetch runs only when the entry itself came from the network.
+    srv.log.length = 0;
+    await materializeRemote(`${srv.origin}/p/package.json`, dotPlugins, dir);
+    assert.deepEqual(srv.log, [], 'a warm materialise still makes no requests');
+  } finally {
+    await srv.stop().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A 500 on the preferred `.js` says nothing about whether it exists, so committing the `.ts` could pick a
+// different module from the one the hook would pick, later, when the `.js` answers.
+test('a prefetch commits a lower candidate only after a definite miss on the preferred one', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-prefetch-500-'));
+  const dotPlugins = join(dir, '.plugins');
+  const body: Record<string, string> = {
+    '/p/package.json': PKG('@fixture/matbot-prefetch-500'),
+    '/p/index.ts': `import './flaky.js';\n`,
+    '/p/flaky.ts': `export {};\n`,
+  };
+  const srv = await serveWith(async p => p === '/p/flaky.js' ? { status: 500 }
+    : body[p] !== undefined ? { status: 200, body: body[p] } : { status: 404 });
+  try {
+    await materializeRemote(`${srv.origin}/p/`, dotPlugins, dir);
+    await assert.rejects(access(join(dotPlugins, new URL(srv.origin).host, 'p', 'flaky.ts')), 'left to the hook');
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a prefetch that stalls is abandoned to the hook at its deadline', { timeout: 15_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-prefetch-stall-'));
+  const dotPlugins = join(dir, '.plugins');
+  const body: Record<string, string> = {
+    '/p/package.json': PKG('@fixture/matbot-prefetch-stall'),
+    '/p/index.ts': `import './quick.js';\nimport './stuck.js';\n`,
+    '/p/quick.ts': `export {};\n`,
+  };
+  const srv = await serveWith(p => p.startsWith('/p/stuck')
+    ? new Promise(() => {})
+    : Promise.resolve(body[p] !== undefined ? { status: 200, body: body[p] } : { status: 404 }));
+  const before = process.env['MATBOT_PREFETCH_BUDGET_MS'];
+  process.env['MATBOT_PREFETCH_BUDGET_MS'] = '300';
+  try {
+    const started = Date.now();
+    const m = await materializeRemote(`${srv.origin}/p/`, dotPlugins, dir);
+    assert.ok(Date.now() - started < 5_000, 'returned at the deadline, not when the origin answered');
+    assert.equal(await readFile(m.entry, 'utf8'), body['/p/index.ts']);
+    const host = new URL(srv.origin).host;
+    await access(join(dotPlugins, host, 'p', 'quick.ts'));
+    await assert.rejects(access(join(dotPlugins, host, 'p', 'stuck.ts')));
+  } finally {
+    if (before === undefined) delete process.env['MATBOT_PREFETCH_BUDGET_MS'];
+    else process.env['MATBOT_PREFETCH_BUDGET_MS'] = before;
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a prefetch runs concurrently, within its cap', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'matbot-prefetch-cap-'));
+  const dotPlugins = join(dir, '.plugins');
+  const N = 30;
+  const body: Record<string, string> = {
+    '/p/package.json': PKG('@fixture/matbot-prefetch-cap'),
+    '/p/index.ts': Array.from({ length: N }, (_, i) => `import './m${i}.js';`).join('\n'),
+  };
+  for (let i = 0; i < N; i++) body[`/p/m${i}.ts`] = `export const m${i} = ${i};\n`;
+  // Held briefly so overlapping requests are actually in flight together.
+  const srv = await serveWith(p => new Promise(done => setTimeout(() =>
+    done(body[p] !== undefined ? { status: 200, body: body[p] } : { status: 404 }), 20)));
+  try {
+    await materializeRemote(`${srv.origin}/p/`, dotPlugins, dir);
+    const host = new URL(srv.origin).host;
+    for (let i = 0; i < N; i++) await access(join(dotPlugins, host, 'p', `m${i}.ts`));
+    assert.ok(srv.peak() > 1, `concurrent (peak ${srv.peak()})`);
+    assert.ok(srv.peak() <= 8, `capped (peak ${srv.peak()})`);
+  } finally {
+    await srv.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // The mirror maps a plugin package's URLs onto paths, and two spellings survive URL parsing that would put
 // one outside `.plugins/<host>/`. Dot segments do not, encoded or not — the parser has already resolved them.
 test('a mirrored path stays inside its host\'s directory', () => {
@@ -260,8 +422,8 @@ test('a declared dependency nothing satisfies is reported, named well enough to 
 // SUBDIRECTORY of a repo. No package manager can do it usefully here — npm ignores the fragment and
 // installs the whole monorepo under the repo's name (reporting success), pnpm extracts the right
 // package but leaves its `workspace:` peers unmet — and matbot needs neither, because the http route
-// fetches one package's files and resolves bare imports against the host. So the fragment is only a
-// spelling, and this is the mechanism under it.
+// fetches one package's files and resolves bare imports against the host. The fragment is refused since
+// 0.5.0; this is the mechanism under the `github:owner/repo/sub` form that replaces it.
 test('a plugin in a repo subdirectory is fetched as a package, workspace peers and all', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'matbot-remote-subdir-'));
   const dotPlugins = join(dir, '.plugins');

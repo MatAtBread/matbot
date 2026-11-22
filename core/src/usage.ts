@@ -51,17 +51,6 @@ export function turnActivity(messages: Iterable<Message>): TurnEntry[] {
   const out: TurnEntry[] = [];
   for (const m of messages) {
     if (m.activity !== undefined) out.push(...m.activity);
-
-    // Sessions written before accounting moved onto the turn head: an assistant message's own `usage`
-    // object, and a `tool-result`'s `usage` array. Neither shape is written any more.
-    const legacyOwn = (m as { usage?: Usage }).usage;
-    if (legacyOwn !== undefined && m.providerName !== undefined) {
-      out.push({ kind: 'call', provider: m.providerName, usage: legacyOwn, traceId: m.traceId });
-    }
-    for (const c of m.content) {
-      const legacy = c.type === 'tool-result' ? (c as { usage?: UsageRecord[] }).usage : undefined;
-      if (legacy !== undefined) out.push(...legacy.map((r): TurnEntry => ({ kind: 'call', ...r })));
-    }
   }
   return out;
 }

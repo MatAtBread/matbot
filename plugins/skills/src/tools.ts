@@ -10,11 +10,12 @@ declare module '@matatbread/matbot-plugin-api' {
       | ToolContract<{ skills: SkillSummary[] },                  { action: 'list' }>
       | ToolContract<{ id: string; name: string; content: string }, { action: 'load'; name: string }>
       | ToolContract<{ id: string; name: string; content: string }, { action: 'use'; name: string }>
-      | ToolContract<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean }, { action: 'metadata'; name: string }>
+      | ToolContract<{ id: string; name: string; knowledge: NonNullable<SkillDoc['knowledge']> | null; catalogue: boolean; hidden: boolean; candidate: boolean }, { action: 'metadata'; name: string }>
       | ToolContract<{ id: string; name: string },               { action: 'save'; name: string; content: string; catalogue?: boolean }>
       | ToolContract<{ id: string; name: string },               { action: 'delete'; name: string }>
       | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'hide'; name: string }>
-      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'unhide'; name: string }>;
+      | ToolContract<{ id: string; name: string; hidden: boolean }, { action: 'unhide'; name: string }>
+      | ToolContract<{ id: string; name: string; candidate: false }, { action: 'adopt'; name: string }>;
     skills_config:
       | ToolContract<{ analysisProvider: string | null; fallback: string | null; available: string[] }, { action: 'get' }>
       | ToolContract<{ analysisProvider: string },                { action: 'set'; provider: string }>
@@ -33,7 +34,8 @@ type SkillInput =
   | { action: 'save';     name: string; content: string; catalogue?: boolean }
   | { action: 'delete';   name: string }
   | { action: 'hide';     name: string }
-  | { action: 'unhide';   name: string };
+  | { action: 'unhide';   name: string }
+  | { action: 'adopt';    name: string };
 
 export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill_action'>> {
   const executor: ToolExecutor<ToolResultOf<'skill_action'>> = {
@@ -80,7 +82,7 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
           if (!doc) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
           // Derived LLM analysis (absent until the background analysis has run and cached it), plus
           // `catalogue` — whether the skill is advertised in the system prompt.
-          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false, hidden: doc.hidden ?? false } };
+          yield { type: 'result', value: { id: doc.id, name: doc.name, knowledge: doc.knowledge ?? null, catalogue: doc.catalogue ?? false, hidden: doc.hidden ?? false, candidate: doc.candidate ?? false } };
           return;
         }
 
@@ -113,8 +115,17 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
           return;
         }
 
+        case 'adopt': {
+          const { name } = args as Extract<SkillInput, { action: 'adopt' }>;
+          if (!name) { yield { type: 'error', message: 'action "adopt" requires "name".' }; return; }
+          const doc = await manager.setCandidate(name, false);
+          if (doc === undefined) { yield { type: 'error', message: `Skill not found: "${name}"` }; return; }
+          yield { type: 'result', value: { id: doc.id, name: doc.name, candidate: false } };
+          return;
+        }
+
         default:
-          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete, hide, unhide.` };
+          yield { type: 'error', message: `Unknown action "${String(args.action)}". Expected one of: list, load, use, metadata, save, delete, hide, unhide, adopt.` };
       }
     },
   };
@@ -130,6 +141,14 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
       '`load` vs `use`: load returns the raw markdown (for inspection or editing); use returns the same ' +
       'content wrapped as an instruction to follow it now. A trigger that should make a skill take ' +
       'effect invokes `use`; tooling that reads a skill invokes `load`.\n\n' +
+      'A skill is consulted only when something reaches it. An informational skill gathers what is known ' +
+      'about one subject a user\'s message could name (a person, a place, a device or system in the user\'s ' +
+      'world, a project) and that the model could not know from training: when a message names it, content ' +
+      'search returns the whole skill, so the term arrives in context. A skill found is read whole into the ' +
+      'conversation and cannot be taken out, so name and open it with the specific terms a user would use for ' +
+      'its subject, never general ones; one that is missed can always be asked for. A procedural skill says how to get something done here: steps, or conventions for ' +
+      'using tools together. Not skill material: what this software can report about itself (its tools, ' +
+      'settings, models, how it is built), current status, tasks and plans, or a history of events.\n\n' +
       'Most skills are surfaced by content search; to make one apply automatically on a behavioural ' +
       'condition, create a trigger with the `trigger_action` tool whose `invoke` is this tool with ' +
       '`{ action: "use", name }`.\n\n' +
@@ -137,13 +156,16 @@ export function createSkillTool(manager: SkillManager): Tool<ToolResultOf<'skill
       '(contextual_search / find_fact) and from the catalogue — but stays fully manageable here ' +
       '(list/load/metadata/save/delete still work). Use this to retire a skill that has been compiled ' +
       'into a tool, without deleting its source. `unhide` reverses it. Hidden state is independent of ' +
-      '`save` — editing content never changes it.',
+      '`save` — editing content never changes it.\n\n' +
+      'A `candidate` skill (shown in `list`) was proposed by dream-time from facts that had no home. It is ' +
+      'withheld from the model as a hidden skill is, while dream-time keeps filing matching facts into it. ' +
+      '`adopt` makes it an ordinary skill; `delete` rejects it, and its facts go back to dream-time\'s backlog.',
     inputSchema: {
       type:       'object',
       required:   ['action'],
       properties: {
-        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete', 'hide', 'unhide'], description: 'The operation to perform.' },
-        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete/hide/unhide.' },
+        action:    { type: 'string', enum: ['list', 'load', 'use', 'metadata', 'save', 'delete', 'hide', 'unhide', 'adopt'], description: 'The operation to perform.' },
+        name:      { type: 'string', description: 'Skill name (case-insensitive). Required for load/use/metadata/save/delete/hide/unhide/adopt.' },
         content:   { type: 'string', description: 'Skill content in markdown — required for action "save".' },
         catalogue: { type: 'boolean', description: 'Optional for "save": advertise this skill in the system prompt (using its generated summary). Omit to leave unchanged.' },
       },

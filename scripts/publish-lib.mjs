@@ -73,14 +73,17 @@ export function planRelease(pkgs, harness, differs, taken) {
   const lowest = p => {
     const versions = taken.get(p.name) ?? [];
     const highest = highestVersion(versions);
-    if (highest === undefined) return p.version;
+    // A package npm has never had sets no floor: its written number is `changeset version`'s patch bump.
+    if (highest === undefined) return undefined;
     return differs.has(p.name) ? nextFreePatch(highest, versions) : highest;
   };
-  let version = highestVersion(releasing.map(lowest));
   const written = highestVersion(releasing.map(p => p.version));
+  let version = highestVersion(releasing.map(lowest).filter(v => v !== undefined)) ?? written;
   const [wm, wn] = parseVersion(written)?.core ?? [];
   const [vm, vn] = parseVersion(version)?.core ?? [];
-  if (wm > vm || (wm === vm && wn > vn)) version = written;
+  // The jump is the minor, not the patch written on top of it: 0.5.0 bumped to 0.5.1 before 0.5.0 shipped
+  // is still 0.5.0.
+  if (wm > vm || (wm === vm && wn > vn)) version = `${wm}.${wn}.0`;
 
   const blocks = (p, v) => {
     const versions = taken.get(p.name) ?? [];

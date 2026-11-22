@@ -6,20 +6,20 @@ import { checkSnippetAgainst, ToolTypeIndexImpl } from '@matatbread/matbot-tool-
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import { createVmFunctionRunner } from '@matatbread/matbot-function-runner-node';
 
-// The permitted set is expressed as `paths`, one entry per module, NOT as `types: ['node']`. The
-// difference is the whole point: with `types` every builtin resolves, so a module the install forbids
-// typechecks clean and is refused only at run time — correct against the types it was shown, which is the
-// one failure the check gate exists to prevent and the repair loop cannot repair.
+// The typed set is expressed as `paths`, one entry per module, NOT as `types: ['node']`. The difference
+// is the whole point: with `types` every builtin resolves, so a module the gate refuses typechecks clean
+// and is refused only at run time — correct against the types it was shown, which is the one failure the
+// check gate exists to prevent and the repair loop cannot repair.
 const root = join(import.meta.dirname, '..', '..', '..');
 const nodeTypes = dirname(createRequire(import.meta.url).resolve('@types/node/package.json'));
 const PREFIX = `declare const tool: unknown;\n`;
 
-async function check(snippet: string, permitted: string[], apiIndexPath?: string): Promise<string[]> {
+async function check(snippet: string, typed: string[], apiIndexPath?: string): Promise<string[]> {
   const source = `${PREFIX}${snippet}\nexport {};\n`;
   const report = await checkSnippetAgainst({
     root, source, prefixLen: PREFIX.length, prefixLines: PREFIX.split('\n').length - 1,
     ...(apiIndexPath !== undefined ? { apiIndexPath } : {}),
-    importPaths: Object.fromEntries(permitted.map(p => [p, [join(nodeTypes, `${p.slice('node:'.length)}.d.ts`)]])),
+    importPaths: Object.fromEntries(typed.map(p => [p, [join(nodeTypes, `${p.slice('node:'.length)}.d.ts`)]])),
     // ENV-GATE rejects what the RUNNER withholds, so the list comes from the runner rather than from a
     // copy here: a name shadowed but not rejected typechecks and fails at the first call.
     withheldGlobals: createVmFunctionRunner(0).withheldGlobals!,
@@ -27,7 +27,7 @@ async function check(snippet: string, permitted: string[], apiIndexPath?: string
   return report.diagnostics.map(d => `${d.label}: ${d.message}${d.hint !== undefined ? ` | HINT: ${d.hint}` : ''}`);
 }
 
-test('a permitted builtin is typed for real, not loosened to any', async () => {
+test('a typed builtin is typed for real, not loosened to any', async () => {
   const ok = await check(`async function f() { const os = await import('node:os'); return os.hostname(); }`, ['node:os']);
   assert.deepEqual(ok, []);
   // If the types had collapsed, this would pass too — which is how a validator that checks nothing looks.
@@ -36,7 +36,7 @@ test('a permitted builtin is typed for real, not loosened to any', async () => {
   assert.match(typo[0]!, /hstname/);
 });
 
-test('a module outside the permitted set does not resolve, so it fails the CHECK', async () => {
+test('a module with no paths entry does not resolve, so it fails the CHECK', async () => {
   const out = await check(`async function f() { const fs = await import('node:fs'); return fs.readFileSync('x'); }`, ['node:os']);
   assert.ok(out.length > 0, 'a forbidden module must not typecheck');
   assert.match(out.join('\n'), /node:fs/);
@@ -47,7 +47,7 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
   // to omit: `eval` and `Function` are lib.es globals, so they typecheck in every configuration and fail
   // at the first call, and `process.cwd()` drew only tsc's "install type definitions for node" — advice
   // to make a withheld global typecheck. The tool description promises none of them is there.
-  const index = indexFor(['node:']);
+  const index = indexFor();
   for (const [snippet, expected] of [
     [`async function f() { return process.cwd(); }`,                 /'process' is not defined/],
     [`async function f() { return eval('1'); }`,                     /'eval' is not defined/],
@@ -75,7 +75,7 @@ test('ENV-GATE covers what the runner WITHHOLDS, not only what a module wrapper 
 test('ESCAPE-GATE refuses what reaches past the runner without naming anything it withholds', async () => {
   // `Function` is no longer withheld by name — the runner's constructors refuse a body however they are
   // reached — so the checker names what it is for, along with the other plain spellings of the same thing.
-  const index = indexFor(['node:']);
+  const index = indexFor();
   for (const [snippet, expected] of [
     [`async function f() { return new Function('return 1')(); }`,                          /'Function' compiles a string/],
     [`async function f() { return console.log.constructor('return 1')(); }`,               /'constructor' compiles a string/],
@@ -109,17 +109,18 @@ test('ESCAPE-GATE refuses what reaches past the runner without naming anything i
 
 test('Buffer is a global a body has, typed for real whatever may be imported', async () => {
   // Module types load only on an import, so a body using `Buffer` and importing nothing failed on a name
-  // it really has. Under `permit: []` nothing at all is imported, which is the case that proves it.
-  for (const permit of [undefined, [], ['node:os']]) {
-    const index = indexFor(permit);
-    const ok = await index.check(`async function f() { return Buffer.from('aGk=', 'base64').toString('utf8'); }`);
-    assert.deepEqual(ok.diagnostics.map(d => `${d.label}: ${d.message}`), [], JSON.stringify(permit));
+  // it really has. With every module refused nothing at all is imported, which is the case that proves it.
+  const index = indexFor();
+  for (const importRefused of [undefined, refusing('node:', 'node:buffer')]) {
+    const opts = importRefused !== undefined ? { importRefused } : {};
+    const ok = await index.check(`async function f() { return Buffer.from('aGk=', 'base64').toString('utf8'); }`, opts);
+    assert.deepEqual(ok.diagnostics.map(d => `${d.label}: ${d.message}`), []);
     // If it had collapsed to any, this would pass too.
-    const typo = await index.check(`async function f() { return Buffer.frm('x'); }`);
+    const typo = await index.check(`async function f() { return Buffer.frm('x'); }`, opts);
     assert.equal(typo.diagnostics.length, 1, JSON.stringify(typo.diagnostics));
     assert.match(typo.diagnostics[0]!.message, /frm/);
   }
-  assert.doesNotMatch(await indexFor(undefined).dts(), /Absent:[^\n]*Buffer/);
+  assert.doesNotMatch(await indexFor().dts(), /Absent:[^\n]*Buffer/);
 });
 
 test('a builtin whose name already carries the prefix is typed too', async () => {
@@ -127,10 +128,10 @@ test('a builtin whose name already carries the prefix is typed too', async () =>
   // prefix, having no unprefixed spelling — so prefixing unconditionally wrote `node:node:sqlite` and
   // those four got no entry at all. `await import('node:sqlite')` then failed the check with tsc's
   // "install type definitions for node", which is the message IMPORT-GATE exists to replace.
-  const dts = await indexFor(['node:']).dts();
-  for (const m of ['node:sqlite', 'node:sea', 'node:test']) assert.ok(dts.includes(`//   ${m}\n`), m);
-  assert.doesNotMatch(dts, /node:node:/);
-  const out = await indexFor(['node:']).check(
+  const paths = await pathsOf(indexFor(), []);
+  for (const m of ['node:sqlite', 'node:sea', 'node:test']) assert.ok(paths[m] !== undefined, m);
+  assert.ok(!Object.keys(paths).some(k => k.startsWith('node:node:')));
+  const out = await indexFor().check(
     `async function f() { const s = await import('node:sqlite'); return typeof s.DatabaseSync; }`);
   assert.deepEqual(out.diagnostics.map(d => `${d.label}: ${d.message}`), []);
 });
@@ -146,19 +147,27 @@ test('the phantom globals node types would otherwise declare are still rejected'
   assert.doesNotMatch(out[0]!, /install type definitions/, 'the directed message replaces tsc generic advice');
 });
 
-// ── what the dts tells the author ────────────────────────────────────────────
-// The permitted set is derived from the runner and reported in the dts, because that string is what a
-// body is GRADED against: an author told elsewhere that imports work would still have to guess whether
-// the checker agreed.
+// ── what the dts tells the author, and what a refusal does to the check ──────
 
-// The REAL runner, not a stand-in: the environment half of this text is its own words and the withheld
-// list is its own list, so a fake one here would be testing a fake's prose and would not notice the two
-// drifting apart — which is the failure the division exists to prevent.
-const indexFor = (permit: string[] | undefined): ToolTypeIndexImpl => new ToolTypeIndexImpl({
+// The REAL runner, not a stand-in: the withheld list is its own list, so a fake one here would not notice
+// the note and what is actually bound drifting apart — which is the failure the division exists to prevent.
+const RUNNER = createVmFunctionRunner(0);
+const indexFor = (): ToolTypeIndexImpl => new ToolTypeIndexImpl({
   tools: { list: () => [], resolve: () => null },
   Notifier: { consume: () => {} },
-  FunctionRunner: createVmFunctionRunner(0, permit !== undefined ? { permit } : {}),
+  FunctionRunner: RUNNER,
 } as unknown as MatbotMachine, () => Promise.resolve(null));
+
+// What `function-tools` hands a check: the gate's standing denials for this function, asked about the
+// spelling the gate is asked (`canonicalImport`). The denials nest as a gate's do — at a trailing `:` or
+// `/` — so `node:` refuses every builtin and `node:fs` refuses that module alone.
+const refusing = (...denied: string[]) => (spec: string): boolean => {
+  const c = RUNNER.canonicalImport!(spec);
+  return denied.some(d => c === d || ((d.endsWith(':') || d.endsWith('/')) && c.startsWith(d)));
+};
+
+const pathsOf = (index: ToolTypeIndexImpl, refused: string[]): Promise<Record<string, string[]>> =>
+  (index as unknown as { importPaths(r: ReadonlySet<string>): Promise<Record<string, string[]>> }).importPaths(new Set(refused));
 
 // No runner at all — any install that did not add the plugin, and the browser. Nothing is withheld and
 // nothing is gated, so the gates fall silent and only tsc is left talking.
@@ -180,42 +189,27 @@ test('tsc never tells a body to install type definitions', async () => {
 
   // With a runner the withheld-globals wording is the one that fires, not this fallback: one rule speaks
   // per mistake, and the one that knows most about it goes first.
-  const withRunner = (await indexFor(['node:']).check(`async function f() { return process.cwd(); }`)).diagnostics;
+  const withRunner = (await indexFor().check(`async function f() { return process.cwd(); }`)).diagnostics;
   assert.equal(withRunner.length, 1, JSON.stringify(withRunner));
   assert.match(withRunner[0]!.message, /the runner withholds it/);
 });
 
 test('the environment fingerprint is stable, and a verdict carries it', async () => {
   // Content-derived, never identity-derived: a stored verdict is compared against this across a restart.
-  assert.equal(await indexFor(['node:os']).environment(), await indexFor(['node:os']).environment());
-  assert.notEqual(await indexFor(['node:os']).environment(), await indexFor(['node:fs']).environment());
-  assert.notEqual(await indexFor(['node:os']).environment(), await indexFor(undefined).environment());
-  assert.notEqual(await indexFor(undefined).environment(), await indexNoRunner().environment());
-  // Order is not an environment.
-  assert.equal(await indexFor(['node:os', 'node:fs']).environment(), await indexFor(['node:fs', 'node:os']).environment());
+  assert.equal(await indexFor().environment(), await indexFor().environment());
+  assert.notEqual(await indexFor().environment(), await indexNoRunner().environment());
 
-  const index = indexFor(['node:os']);
-  const report = await index.check(`async function f() { return 1; }`);
+  // A permission is not part of it: a verdict that passed refused none of the body's imports, and a
+  // refusal given later is the gate's to report at the call.
+  const index = indexFor();
+  const report = await index.check(`async function f() { return 1; }`, { importRefused: refusing('node:') });
   assert.deepEqual(report.diagnostics, []);
   assert.equal(report.environment, await index.environment());
 });
 
-test('the dts lists the modules this installation permits, expanding a prefix', async () => {
-  const dts = await indexFor(['node:fs/promises', 'node:os']).dts();
-  assert.match(dts, /A body may import these, each subject to permission at the call/);
-  assert.match(dts, /\/\/\s+node:fs\/promises/);
-  assert.match(dts, /\/\/\s+node:os/);
-  assert.doesNotMatch(dts, /node:child_process/, 'only what was permitted');
-
-  const all = await indexFor(['node:']).dts();
-  // A prefix expands to the builtins that actually have declarations — submodules included.
-  for (const m of ['node:fs/promises', 'node:stream/web', 'node:crypto']) assert.match(all, new RegExp(m.replace('/', '\\/')));
-  assert.doesNotMatch(all, /node:nonesuch/);
-});
-
-test('unrestricted says the rule rather than listing 49 builtins', async () => {
-  const dts = await indexFor(undefined).dts();
-  assert.match(dts, /may import node builtins, each subject to permission at the call/);
+test('the dts says the rule rather than listing builtins, and names what is withheld', async () => {
+  const dts = await indexFor().dts();
+  assert.match(dts, /may import node builtins and installed packages, each subject to permission at the call/);
   assert.doesNotMatch(dts, /\/\/\s+node:crypto/, 'the list would be most of the file');
   // Every withheld name is named, and from the runner's own list rather than prose repeated here: the
   // note and what is actually bound cannot drift apart.
@@ -224,25 +218,14 @@ test('unrestricted says the rule rather than listing 49 builtins', async () => {
   }
 });
 
-test('`permit: []` is the one way to say never, and the dts says so', async () => {
-  const dts = await indexFor([]).dts();
-  assert.match(dts, /Module imports are switched off on this installation/);
+test('with no runner the dts promises no question at the call', async () => {
+  // Nothing routes the import to a gate there, so "you will be asked" would be a promise nothing keeps.
+  const dts = await indexNoRunner().dts();
+  assert.match(dts, /may import node builtins and installed packages:/);
+  assert.doesNotMatch(dts, /subject to permission|you will be asked/);
 });
 
-test('a specifier with no declaration file is listed as untyped, not as imports being off', async () => {
-  // Leaving it out of `paths` is right: an entry we cannot type must not resolve, and a fake type is a
-  // worse answer than an honest refusal. But the NOTE is the author's only account of what this install
-  // allows, and deriving "switched off" from the typed set said imports were off whenever a restriction
-  // named no builtin — while the gate was perfectly willing to ask about `lodash`.
-  const dts = await indexFor(['node:nope', 'lodash', 'https://esm.sh/x/']).dts();
-  assert.doesNotMatch(dts, /switched off/);
-  assert.match(dts, /A body may import these/);
-  assert.ok(dts.includes('//   lodash   (untyped'));
-  // A URL is not merely untyped: no body can import it, so noTypeCheck must not be offered as the way in.
-  assert.ok(dts.includes('//   https://esm.sh/x/   (a path or a URL'));
-});
-
-test('a path or a URL is refused at the check, whatever is permitted', async () => {
+test('a path or a URL is refused at the check, whatever is refused', async () => {
   // The gate refuses these without asking, so a body naming one would otherwise pass the check and fail
   // at its first call.
   for (const spec of ['./helper.js', '/etc/x.mjs', 'https://esm.sh/lodash', 'lodash/../../x']) {
@@ -254,20 +237,24 @@ test('a path or a URL is refused at the check, whatever is permitted', async () 
   assert.deepEqual(await check(`async function f() { const os = await import('node:os'); return os.hostname(); }`, ['node:os']), []);
 });
 
-test('a permitted builtin types its submodules, so what runs is what is graded', async () => {
-  // `node:fs` admits `node:fs/promises` at the gate (the boundary rule the runner documents), so the
-  // check must type it too. Emitting the exact specifier alone left a permitted import failing the
-  // check, reachable only with `noTypeCheck` — the one divergence between running and grading.
-  const dts = await indexFor(['node:fs']).dts();
-  assert.match(dts, /\/\/\s+node:fs$/m);
-  assert.match(dts, /\/\/\s+node:fs\/promises$/m, 'the submodule the permit admits is listed too');
-  assert.doesNotMatch(dts, /node:fs\s+\(untyped/);
+test('a refusal reaches exactly what the gate answer covers', async () => {
+  // Each builtin is its own question to the gate. A denial of `node:fs` says nothing about
+  // `node:fs/promises`, which the gate would still ask about — so it stays typed; one of `node:fs/` covers
+  // the subtree, as it would at the call.
+  const exact = await pathsOf(indexFor(), ['node:fs']);
+  assert.equal(exact['node:fs'], undefined);
+  assert.equal(exact['fs'], undefined, 'nor its unprefixed spelling');
+  assert.ok(exact['node:fs/promises'] !== undefined);
 
-  // Through the real index, so the `paths` it derives is what grades the snippet — the submodule is not
-  // in the restriction and must still resolve.
-  const report = await indexFor(['node:fs']).check(
-    `async function f() { const fs = await import('node:fs/promises'); return fs.readFile('x'); }`);
-  assert.deepEqual(report.diagnostics.map(d => `${d.label}: ${d.message}`), []);
+  const index = indexFor();
+  const sub = await index.check(
+    `async function f() { const fs = await import('node:fs/promises'); return fs.readFile('x'); }`,
+    { importRefused: refusing('node:fs') });
+  assert.deepEqual(sub.diagnostics.map(d => `${d.label}: ${d.message}`), []);
+  const tree = await index.check(
+    `async function f() { const fs = await import('node:fs/promises'); return fs.readFile('x'); }`,
+    { importRefused: refusing('node:fs/') });
+  assert.deepEqual(tree.diagnostics.map(d => d.label), ['IMPORT-GATE']);
 });
 
 test("a bare 'node' is answered as the spelling mistake it is, never with a path into our node_modules", async () => {
@@ -275,59 +262,50 @@ test("a bare 'node' is answered as the spelling mistake it is, never with a path
   // "File '<.../.pnpm/@types+node@x/.../index.d.ts>' is not a module": a package the body never named, in a
   // directory the author has no business reading, handed to the repair loop. It fires with no restriction
   // in force, which is where no other rule is speaking.
-  const open = await indexFor(undefined).check(`async function f() { return import('node'); }`);
+  const open = await indexFor().check(`async function f() { return import('node'); }`);
   assert.equal(open.diagnostics.length, 1, open.diagnostics.map(d => d.message).join('\n'));
   assert.equal(open.diagnostics[0]?.label, 'IMPORT-GATE');
   assert.match(open.diagnostics[0]!.message, /no module called 'node'.*'node:' prefix/s);
   assert.doesNotMatch(open.diagnostics[0]!.message, /node_modules|is not a module/);
 
-  // A restriction that forbids it says so instead — one mistake stays one finding, and the rewrite does
-  // not pile a second explanation onto a gate that has already spoken at that position.
-  const restricted = await indexFor(['node:fs']).check(`async function f() { return import('node'); }`);
-  assert.equal(restricted.diagnostics.length, 1, restricted.diagnostics.map(d => d.message).join('\n'));
-  assert.match(restricted.diagnostics[0]!.message, /not permitted on this installation/);
-  assert.doesNotMatch(restricted.diagnostics[0]!.message, /node_modules|is not a module/);
+  // A gate that refuses it says so instead — one mistake stays one finding, and the rewrite does not pile
+  // a second explanation onto a gate that has already spoken at that position.
+  const refused = await indexFor().check(`async function f() { return import('node'); }`, { importRefused: refusing('node') });
+  assert.equal(refused.diagnostics.length, 1, refused.diagnostics.map(d => d.message).join('\n'));
+  assert.match(refused.diagnostics[0]!.message, /refused to this function by the permission policy/);
+  assert.doesNotMatch(refused.diagnostics[0]!.message, /node_modules|is not a module/);
 });
 
-test("permit: ['node'] types no builtin, and says so rather than offering noTypeCheck", async () => {
-  // The boundary rule reads a bare entry as a PACKAGE name (`node` admits `node/sub`, never `node:os`), so
-  // an install meaning the builtins and missing the colon permits nothing a body can use. No `@types/node`
-  // declaration file is mapped — the question this answers — and the note must not then invite the one
-  // import that cannot work.
-  const index = indexFor(['node']);
-  const dts = await index.dts();
-  assert.doesNotMatch(dts, /^\/\/\s+node:/m, 'no builtin is listed');
-  assert.match(dts, /\/\/   node   \(a PACKAGE of that name/);
-  assert.doesNotMatch(dts, /node   \(untyped/);
-
-  const out = await index.check(`async function f() { const os = await import('node:os'); return os.hostname(); }`);
-  assert.equal(out.diagnostics[0]?.label, 'IMPORT-GATE');
-  // Its types are genuinely absent, not merely unpermitted: the real check for "is @types/node loaded".
-  const typed = await indexFor(['node:os']).check(`async function f() { const os = await import('node:os'); return os.hostname(); }`);
-  assert.deepEqual(typed.diagnostics.map(d => d.label), []);
-});
-
-test('a forbidden module is rejected STRUCTURALLY, and not as advice to install types', async () => {
-  // `paths` alone cannot carry the restriction: one builtin's declaration file drags in the ambient
+test('a refused module is rejected STRUCTURALLY, and not as advice to install types', async () => {
+  // `paths` alone cannot carry a refusal: one builtin's declaration file drags in the ambient
   // `declare module 'node:…'` blocks of everything its own declarations reference, and whether tsc then
-  // resolves a forbidden specifier depends on what is reachable from the program root. So the rule is
+  // resolves a refused specifier depends on what is reachable from the program root. So the rule is
   // structural, like ENV-GATE and the cast gate — and it replaces a message that told the author to
-  // install type definitions for a module their INSTALLATION forbids, which they cannot act on.
-  const out = await indexFor(['node:fs']).check(
-    `async function f() { const os = await import('node:os'); return os.hostname(); }`);
+  // install type definitions for a module the gate refuses, which they cannot act on.
+  const index = indexFor();
+  const out = await index.check(
+    `async function f() { const os = await import('node:os'); return os.hostname(); }`, { importRefused: refusing('node:os') });
   assert.equal(out.diagnostics.length, 1, out.diagnostics.map(d => d.label).join(', '));
   assert.equal(out.diagnostics[0]?.label, 'IMPORT-GATE');
-  assert.match(out.diagnostics[0]!.message, /not permitted on this installation, which allows only: node:fs/);
+  assert.match(out.diagnostics[0]!.message, /'node:os' is refused to this function by the permission policy in force/);
+  assert.match(out.diagnostics[0]!.message, /not something to work around/);
   assert.doesNotMatch(out.diagnostics[0]!.message, /install type definitions/);
 
-  // With imports switched off the message says that instead: there is no permitted module to suggest.
-  const off = await indexFor([]).check(`async function f() { return import('node:os'); }`);
-  assert.match(off.diagnostics[0]!.message, /switched off on this installation/);
-
-  // Unrestricted ⇒ nothing to enforce, and the gate at the call is the control.
-  const open = await indexFor(undefined).check(
-    `async function f() { const os = await import('node:os'); return os.hostname(); }`);
+  // Nothing refused ⇒ nothing to enforce, and the gate at the call is the control.
+  const open = await index.check(`async function f() { const os = await import('node:os'); return os.hostname(); }`);
   assert.deepEqual(open.diagnostics.map(d => d.label), []);
+});
+
+test('a refused PACKAGE is rejected too, though it resolves by ordinary lookup', async () => {
+  // A package is typed by whatever is installed, not by `paths`, so leaving it out of `paths` refuses
+  // nothing: `typescript` is installed with its own declarations and typechecks clean. Only the question
+  // the worker asks about each literal specifier catches it.
+  const index = indexFor();
+  const snippet = `async function f() { const ts = await import('typescript'); return ts.version; }`;
+  assert.deepEqual((await index.check(snippet)).diagnostics.map(d => `${d.label}: ${d.message}`), []);
+  const out = await index.check(snippet, { importRefused: refusing('typescript') });
+  assert.deepEqual(out.diagnostics.map(d => d.label), ['IMPORT-GATE']);
+  assert.match(out.diagnostics[0]!.message, /'typescript' is refused/);
 });
 
 // ── the type side and the gate must agree, in both directions ────────────────
@@ -367,38 +345,30 @@ test('a body is refused plugin-api, which resolves for types and not at run time
 
 test('a builtin is typed under either spelling, because the runtime takes either', async () => {
   // `import('os')` resolves to `node:os` at run time, so typing only the prefixed form refused at the
-  // check what the gate then permitted. Under a restriction the bare form follows the prefixed one,
+  // check what the gate then permitted. A refusal of the prefixed form takes the bare one with it,
   // because that is the spelling the gate asks about (`canonicalImport`).
-  const unrestricted = await indexFor(undefined).dts();
-  assert.match(unrestricted, /A body may import node builtins/);
-
-  const index = indexFor(undefined);
-  const paths = await (index as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(undefined);
+  const paths = await pathsOf(indexFor(), []);
   assert.ok(paths['node:os'] !== undefined, 'the prefixed spelling');
   assert.ok(paths['os'] !== undefined, 'and the bare one, which the runtime accepts');
-
-  const restricted = await (indexFor(['node:']) as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(['node:']);
-  assert.ok(restricted['node:os'] !== undefined);
-  assert.ok(restricted['os'] !== undefined, 'a `node:` restriction admits `os` at the gate, so it is typed');
-  const other = await (indexFor(['node:fs']) as unknown as { importPaths(r?: readonly string[]): Promise<Record<string, string[]>> }).importPaths(['node:fs']);
-  assert.equal(other['os'], undefined, 'and one that does not admit node:os does not type os');
+  const refused = await pathsOf(indexFor(), ['node:os']);
+  assert.equal(refused['os'], undefined, 'a refusal of node:os does not type os');
 
   // IMPORT-GATE judges the spelling the gate asks about, so it agrees with `paths` on both.
-  const ok = await indexFor(['node:']).check(`async function f() { const os = await import('os'); return os.hostname(); }`);
+  const ok = await indexFor().check(`async function f() { const os = await import('os'); return os.hostname(); }`,
+    { importRefused: refusing('node:fs') });
   assert.deepEqual(ok.diagnostics.map(d => `${d.label}: ${d.message}`), []);
-  const no = await indexFor(['node:fs']).check(`async function f() { const os = await import('os'); return os.hostname(); }`);
+  const no = await indexFor().check(`async function f() { const os = await import('os'); return os.hostname(); }`,
+    { importRefused: refusing('node:os') });
   assert.ok(no.diagnostics.some(d => d.label === 'IMPORT-GATE'), no.diagnostics.map(d => d.label).join(','));
 });
 
-test('a builtin declared inside its parent file is typed, under either spelling and under a parent permit', async () => {
+test('a builtin declared inside its parent file is typed, under either spelling', async () => {
   // @types/node gives most builtins a file of their own, but declares a few subpaths inside the parent's
   // (path/posix in path.d.ts, util/types in util.d.ts, test/reporters in test.d.ts). Looking only for an
   // own file left these failing the check while the gate admitted them.
-  for (const permit of [undefined, ['node:path', 'node:util', 'node:test']]) {
-    for (const spec of ['node:path/posix', 'path/win32', 'node:util/types', 'node:test/reporters']) {
-      const out = await indexFor(permit).check(`async function f() { const m = await import('${spec}'); return m; }`);
-      assert.deepEqual(out.diagnostics.map(d => `${d.label}: ${d.message}`), [], `${spec} under ${JSON.stringify(permit)}`);
-    }
+  for (const spec of ['node:path/posix', 'path/win32', 'node:util/types', 'node:test/reporters']) {
+    const out = await indexFor().check(`async function f() { const m = await import('${spec}'); return m; }`);
+    assert.deepEqual(out.diagnostics.map(d => `${d.label}: ${d.message}`), [], spec);
   }
 });
 

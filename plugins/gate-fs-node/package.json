@@ -1,0 +1,50 @@
+{
+  "name": "@matatbread/matbot-gate-fs-node",
+  "matbotRuntime": [
+    "node"
+  ],
+  "version": "0.5.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Node-only: confines a tool_function body's node:fs access to permitted paths by wrapping the imported module through ImportedModuleWrapper. A guardrail against an over-reaching body, not a sandbox. Optional; needs a FunctionRunner that offers ImportedModuleWrapper.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent",
+    "typescript"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/gate-fs-node"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@types/node": "catalog:"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^",
+    "@matatbread/matbot-function-runner-node": "workspace:^",
+    "typescript": "catalog:"
+  }
+}

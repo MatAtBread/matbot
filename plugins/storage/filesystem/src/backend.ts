@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { Store, FileStore, StorageBackend } from '@matatbread/matbot-plugin-api';
-import { FilesystemFileStore } from '@matatbread/matbot-files-node';
+import { FilesystemFileStore } from './file-store.js';
 import { FilesystemStore } from './store.js';
 
 // The node host's boot backend, and the same thing as an explicit registered one: each namespace is a

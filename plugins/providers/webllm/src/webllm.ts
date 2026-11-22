@@ -2,7 +2,7 @@
 // taken from the package because the package is never installed: the library is several MB, matters only
 // to someone who chooses this provider, and is imported from a CDN at the moment it is first needed.
 
-import { closestIds } from '@matatbread/matbot-plugin-api';
+import { closestIds, withFailure } from '@matatbread/matbot-plugin-api';
 
 export interface InitProgressReport { progress: number; timeElapsed: number; text: string }
 
@@ -183,22 +183,22 @@ export async function checkModel(lib: WebLLM, model: string, withTools: boolean)
   const record = models.find(r => r.model_id === model);
   if (!record) {
     const near = closestModels(model, withTools ? toolModels(lib) : models);
-    throw new Error(`webllm: "${model}" is not a model this WebLLM build can run.`
+    throw withFailure(new Error(`webllm: "${model}" is not a model this WebLLM build can run.`
       + (near.length > 0 ? ` Closest: ${near.join(', ')}.` : '')
-      + ' The webllm_models tool lists them.');
+      + ' The webllm_models tool lists them.'), 'invalid');
   }
   if (withTools && !callsTools(model)) {
     const near = closestModels(model, toolModels(lib), 3);
-    throw new Error(`webllm: "${model}" is not trained on the tool-call format this provider uses, so it would answer `
+    throw withFailure(new Error(`webllm: "${model}" is not trained on the tool-call format this provider uses, so it would answer `
       + 'instead of calling tools. Use a Qwen3, Qwen2.5 or Hermes model'
       + (near.length > 0 ? ` (closest: ${near.join(', ')})` : '')
-      + ', or set `parameters.tools: false` to use it for plain chat.');
+      + ', or set `parameters.tools: false` to use it for plain chat.'), 'invalid');
   }
   const have = await gpuFeatures();
   const missing = have ? (record.required_features ?? []).filter(f => !have.has(f)) : [];
   if (missing.length > 0) {
     const f32 = model.replace('q4f16', 'q4f32');
-    throw new Error(`webllm: "${model}" needs the GPU feature${missing.length > 1 ? 's' : ''} ${missing.join(', ')}, which this GPU lacks.`
-      + (f32 !== model && models.some(r => r.model_id === f32) ? ` Use "${f32}" instead.` : ''));
+    throw withFailure(new Error(`webllm: "${model}" needs the GPU feature${missing.length > 1 ? 's' : ''} ${missing.join(', ')}, which this GPU lacks.`
+      + (f32 !== model && models.some(r => r.model_id === f32) ? ` Use "${f32}" instead.` : '')), 'invalid');
   }
 }

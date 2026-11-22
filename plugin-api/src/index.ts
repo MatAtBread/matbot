@@ -9,7 +9,7 @@
  */
 
 export type * from './types.js';
-export { CONFIRM_YES, CONFIRM_NO, optionValue, optionLabel, isTruncatedToolResult, renderToolCheck, renderToolCheckOmitted, FUNCTION_TIMEOUT, importPermitted, importableByName, permitted, refused, refusalMessage } from './types.js';
+export { CONFIRM_YES, CONFIRM_NO, optionValue, optionLabel, isTruncatedToolResult, renderToolCheck, renderToolCheckOmitted, FUNCTION_TIMEOUT, importableByName, permitted, refused, refusalMessage, HTTP_TOOL_SESSION, FORM_AXIS_SEPARATOR } from './types.js';
 
 export * from './base64.js';
 export * from './bytes.js';
@@ -18,6 +18,7 @@ export * from './errors.js';
 export * from './vault.js';
 export * from './provider-patch.js';
 export * from './provider-models.js';
+export * from './provider-alias.js';
 export * from './session.js';
 export * from './invoke-tool.js';
 export * from './fetch-origin.js';

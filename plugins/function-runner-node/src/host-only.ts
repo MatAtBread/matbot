@@ -46,7 +46,7 @@ const fileOf = ((): (c: unknown) => unknown => {
   return c => apply(getFileName, c, []);
 })();
 
-interface Shared { span: AsyncLocalStorage<true>; ownFiles: string[] }
+interface Shared { span: AsyncLocalStorage<true>; ownFiles: string[]; hidden?: WeakMap<object, Set<PropertyKey>> }
 // One per process, so a reloaded copy of this module shares the span and the replacements, and adds its
 // own file to those whose frames — the check's own — are skipped.
 const KEY = Symbol.for('matbot.functionRunner.hostOnly');
@@ -63,6 +63,31 @@ export function inBody<T>(fn: () => T): T {
  *  the body's span, so a tool's continuations — which have no code of the body's above them — are its own. */
 export function hostCall<T>(fn: () => T): T {
   return apply(SPAN_EXIT, shared.span, [fn]) as T;
+}
+
+/**
+ * Make `owner[key]` read as `standIn` to a body, and as itself to everyone else: for a value a body could
+ * reach by walking an object it was handed, such as a stream prototype's `constructor`, which is node's own
+ * class and opens any file unasked. Replacing the value instead would change it for host code as well, and
+ * `stream.constructor === fs.ReadStream` is the kind of test a package makes. An accessor, so it is decided at
+ * each read, by the same nearest-code rule as the code builders. Assigning it puts a plain value back. Once
+ * per process for an owner and key, however many times it is asked for.
+ */
+export function hideFromBody(owner: object, key: PropertyKey, standIn: unknown): void {
+  const hidden = (shared.hidden ??= new WeakMap());
+  let keys = hidden.get(owner);
+  if (keys === undefined) hidden.set(owner, keys = new Set());
+  if (keys.has(key)) return;
+  const was = descriptor(owner, key);
+  if (was === undefined || !('value' in was) || was.configurable !== true) return;
+  keys.add(key);
+  const value: unknown = was.value;
+  const enumerable = was.enumerable === true;
+  defineProp(owner, key, {
+    get(): unknown { return forBody() ? standIn : value; },
+    set(this: object, v: unknown) { defineProp(this, key, { value: v, writable: true, configurable: true, enumerable }); },
+    enumerable, configurable: true,
+  });
 }
 
 /** Whether the code calling right now is a body's. Fails closed: a stack it cannot read is a body's. */
@@ -154,5 +179,37 @@ function install(): Shared {
     },
     writable: true, configurable: true, enumerable: true,
   });
+  contain(span);
   return { span, ownFiles: [] };
+}
+
+// A failure a body left unhandled — a rejection in a timer it scheduled, a throw in a callback — was the
+// whole process's: node's default for an unhandled rejection or an uncaught exception is to exit, taking
+// every session with it, and any body can cause one (`setTimeout(async () => { throw 1 })`). So a failure
+// raised inside a body's span is logged and goes no further. Node reports both events in the async context
+// they came from, so the span decides, with no stack to read — a rejection carrying no stack (`Promise.reject(1)`)
+// is told apart as surely as one that does.
+//
+// Everything else ends the process exactly as before. Listening at all turns node's default off, so a failure
+// that is not a body's is handed back to it: a rejection is rethrown, which makes it an uncaught exception, and
+// an uncaught exception is rethrown on the next tick with this listener gone, which is node's own crash. When
+// something else is listening too (a host's own policy, a test runner), that is left to decide.
+function contain(span: AsyncLocalStorage<true>): void {
+  const isBody = (): boolean => apply(SPAN_STORE, span, []) === true;
+  const report = (what: string, failure: unknown): void => {
+    console.error(`[function-runner-node] A function body left ${what} that nothing handled. It was contained, and the process goes on:`, failure);
+  };
+  const onRejection = (reason: unknown): void => {
+    if (isBody()) { report('a rejected promise', reason); return; }
+    if (process.listenerCount('unhandledRejection') > 1) return;
+    throw reason;
+  };
+  const onException = (error: unknown): void => {
+    if (isBody()) { report('an exception', error); return; }
+    if (process.listenerCount('uncaughtException') > 1) return;
+    process.off('uncaughtException', onException);
+    process.nextTick(() => { throw error; });
+  };
+  process.on('unhandledRejection', onRejection);
+  process.on('uncaughtException', onException);
 }

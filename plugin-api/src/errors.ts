@@ -23,6 +23,62 @@ function isKind(e: unknown, kind: MatbotErrorKind): boolean {
 }
 
 /**
+ * Why an operation failed, as far as whoever called it needs to know in order to decide what to do next —
+ * which is chiefly whether to try again. matbot does not retry on a caller's behalf: it reports, and the
+ * caller (a person, a frontend, a model) chooses. That choice needs this, because the message alone does
+ * not carry it, and an error that does not say is one the caller can only guess about.
+ *
+ * - `unavailable` — it may work if tried again later: a lost race, an endpoint overloaded or rate-limited,
+ *   a store that could not be reached.
+ * - `denied` — the caller is not allowed to do this, and trying again will not change that.
+ * - `invalid` — the request itself is wrong (a malformed input, a thing that does not exist, a request too
+ *   large); trying it again unchanged will not help.
+ *
+ * It describes what happened, never what to do, so the caller still does the reasoning. Absent is
+ * UNCLASSIFIED — whoever raised the error did not say — and is reported as such rather than guessed at:
+ * only the layer that raised an error knows whether it is transient (a reset socket and a failed DNS lookup
+ * reach a caller as the same `TypeError`). Any `Store`, provider adapter or tool may set it on what it
+ * throws ({@link withFailure}), and matbot carries it to the caller unchanged.
+ *
+ * A property beside the `matbot` brand rather than another brand, because the two answer different
+ * questions: a {@link ReadOnlyError} is what happened, `denied` is what that means to a caller. Open at
+ * runtime like every other duck-typed field — {@link failureOf} answers `undefined` for a value it does not
+ * know, rather than passing it on.
+ */
+export type FailureClass = 'unavailable' | 'denied' | 'invalid';
+
+/** The HTTP status each class answers with, for a transport that has to give one. */
+export const FAILURE_STATUS: Readonly<Record<FailureClass, number>> = {
+  unavailable: 503,
+  denied:      403,
+  invalid:     400,
+};
+
+export function failureOf(e: unknown): FailureClass | undefined {
+  const f = typeof e === 'object' && e !== null ? (e as Record<string, unknown>)['failure'] : undefined;
+  return f === 'unavailable' || f === 'denied' || f === 'invalid' ? f : undefined;
+}
+
+/** Marks `e` with its class and returns it, for `throw withFailure(new Error(…), 'unavailable')`. */
+export function withFailure<E extends Error>(e: E, failure: FailureClass | undefined): E & { failure?: FailureClass } {
+  return failure === undefined ? e : Object.assign(e, { failure });
+}
+
+/**
+ * The class an HTTP status implies. 408, 409, 425 and 429 are the client-range statuses that say "not now"
+ * rather than "not this"; 501 and 505 are server-range statuses that will answer the same way every time.
+ * Anything outside 4xx/5xx is not a failure this can classify.
+ */
+export function failureForStatus(status: number): FailureClass | undefined {
+  if (status === 408 || status === 409 || status === 425 || status === 429) return 'unavailable';
+  if (status === 401 || status === 403) return 'denied';
+  if (status >= 400 && status <= 499) return 'invalid';
+  if (status === 501 || status === 505) return 'invalid';
+  if (status >= 500 && status <= 599) return 'unavailable';
+  return undefined;
+}
+
+/**
  * Thrown by Vault.resolve() when one or more ${NAME} placeholders cannot be resolved.
  * `missingKeys` carries the unresolved key names (e.g. `ANTHROPIC_API_KEY`) so callers
  * can prompt for and store them.
@@ -140,6 +196,7 @@ export function isPromptCancelledError(e: unknown): e is PromptCancelledError {
  */
 export interface ReadOnlyError extends Error {
   matbot: 'ReadOnly';
+  readonly failure:   'denied';
   readonly namespace: string;
   readonly id:        string;
   readonly owner:     string;
@@ -147,7 +204,7 @@ export interface ReadOnlyError extends Error {
 export function readOnlyError(namespace: string, id: string, owner: string): ReadOnlyError {
   const e = new Error(`${namespace} "${id}" was shared by "${owner || 'global'}" and is read-only.`);
   e.name = 'ReadOnlyError';
-  return Object.assign(e, { matbot: 'ReadOnly' as const, namespace, id, owner });
+  return Object.assign(e, { matbot: 'ReadOnly' as const, failure: 'denied' as const, namespace, id, owner });
 }
 export function isReadOnlyError(e: unknown): e is ReadOnlyError {
   return isKind(e, 'ReadOnly');
@@ -165,6 +222,7 @@ export function isReadOnlyError(e: unknown): e is ReadOnlyError {
  */
 export interface MediaRejectedError extends Error {
   matbot: 'MediaRejected';
+  readonly failure: 'invalid';
   /** `no-store` — nothing is registered under `MediaStore`, so there is nowhere to put the bytes.
    *  `too-large` — one file exceeds the per-file cap. `session-quota` — this session's stored media
    *  would exceed its total. `unreadable` — the bytes were malformed: not valid base64, or not the file
@@ -180,7 +238,7 @@ export interface MediaRejectedError extends Error {
 export function mediaRejectedError(reason: MediaRejectedError['reason'], message: string, file?: string): MediaRejectedError {
   const e = new Error(message);
   e.name = 'MediaRejectedError';
-  return Object.assign(e, { matbot: 'MediaRejected' as const, reason, ...(file !== undefined ? { file } : {}) });
+  return Object.assign(e, { matbot: 'MediaRejected' as const, failure: 'invalid' as const, reason, ...(file !== undefined ? { file } : {}) });
 }
 export function isMediaRejectedError(e: unknown): e is MediaRejectedError {
   return isKind(e, 'MediaRejected');

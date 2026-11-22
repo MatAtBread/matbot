@@ -8,8 +8,8 @@ import type {
   Session, Store, Tool, ToolRegistry, ProviderAdapter, ProviderConfig, CompletionEvent,
   PipelineEvent, Principal, MessageContent, UsageRecord,
 } from '@matatbread/matbot-core';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());
@@ -181,9 +181,7 @@ test('a completion that settles after the turn is flushed on the next idle', { t
     hooks,
   });
 
-  // Hold a subscriber for the duration. Session state — and with it the pending accounting — is
-  // disposed once a session goes quiet AND unsubscribed, so a live session is what makes a late
-  // arrival recoverable at all. That is the real supported boundary, so the test sits inside it.
+  // Hold a subscriber, so the late arrival finds the session's state still there; the next test drops it.
   const watcher = await runner.open({ sessionId: session.id, signal: new AbortController().signal });
   void (async () => { for await (const _ of watcher.events) { /* keep the subscription alive */ } })();
 
@@ -207,6 +205,44 @@ test('a completion that settles after the turn is flushed on the next idle', { t
   assert.equal(entries.length, 1, 'flushed on the next idle rather than lost');
   assert.equal(entries[0]!.traceId, firstTraceId,
     'and attributed to the turn that caused it, not the one it was written during');
+});
+
+test('spend recorded after a turn whose session nobody is watching is still written to that turn', { timeout: 15000 }, async () => {
+  const session = createSession();
+  const store   = memStore(session);
+  // A tool that returns at once and goes on spending: what `parallel_map_reduce` does with its wave.
+  let late: Promise<void> | undefined;
+  const detached: Tool = {
+    name: 'slow',
+    description: 'starts work it does not wait for',
+    inputSchema: { type: 'object', properties: {} },
+    executor: {
+      async *execute() {
+        late = wait(150).then(() => { recordUsage('wave', { inputTokens: 7, outputTokens: 3 }); });
+        yield { type: 'result', value: 'started' };
+      },
+    },
+  };
+  const config: ProviderConfig = { name: 'fake', module: 'fake', model: 'fake' };
+  const runner = createSessionRunner({
+    store,
+    resolveProvider: async () => ({ adapter: callsToolOnce(), config }),
+    tools: toolRegistry(detached),
+    loadPlugin: async () => { throw new Error('loadPlugin unused'); },
+    unloadPlugin: async () => false,
+  });
+  // No other subscriber: once this turn's stream ends, the session's state is dropped.
+  const view = await runner.open({ sessionId: session.id, signal: new AbortController().signal, content: text('go'), provider: 'fake', principal });
+  for await (const ev of view.events) if (ev.type === 'idle') break;
+  const head = (await store.get(session.id))!.messages.find(m => m.role === 'user')!;
+
+  await late;
+  // No later turn comes: the spend is written on its own, shortly.
+  await wait(1500);
+  const entries = usageEntries((await store.get(session.id))!.messages).filter(e => e.provider === 'wave');
+  assert.equal(entries.length, 1, 'written, not lost with the state');
+  assert.equal(entries[0]!.traceId, head.traceId, 'to the turn whose tool started the work');
+  assert.equal(entries[0]!.site?.kind, 'tool');
 });
 
 test('every tool call is timed, including one that spends no tokens', { timeout: 15000 }, async () => {

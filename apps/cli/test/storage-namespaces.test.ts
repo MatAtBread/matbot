@@ -9,7 +9,7 @@ import type { StorageBackend } from '@matatbread/matbot-plugin-api';
 import { FilesystemStorageBackend } from '../../../plugins/storage/filesystem/src/backend.ts';
 import { SQLiteStorageBackend }     from '../../../plugins/storage/sqlite/src/backend.ts';
 import { ProfilesStorageBackend }   from '../../../plugins/storage/profiles/src/backend.ts';
-import { createAlsPrincipalCarrier } from '../src/principal-als.ts';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
 
 // `StorageBackend.createStore` is addressed BY name, so a backend could only ever be read by a caller
 // that already knew what to ask for. `namespaces()` is what makes one traversable — copying a backend
@@ -110,26 +110,6 @@ test('sqlite: namespaces differing only by punctuation no longer share a table',
       assert.equal(await backend.createStore('A-B').get('b'), null, 'A_B’s document must not be visible in A-B');
       assert.notEqual(await backend.createStore('A-B').get('a'), null);
       assert.notEqual(await backend.createStore('A_B').get('b'), null);
-    } finally { await backend.close?.(); }
-  });
-});
-
-// A database written under the old naming keeps its data: the table is renamed the first time the
-// namespace is opened, which is the only moment the namespace and its mangled table are both known.
-test('sqlite: a legacy mangled table is adopted, with its documents', async () => {
-  await withTemp(async dir => {
-    const { DatabaseSync } = await import('node:sqlite');
-    const raw = new DatabaseSync(join(dir, 'matbot.db'));
-    raw.exec(`CREATE TABLE "profile_registry_store" (id TEXT PRIMARY KEY NOT NULL, version TEXT NOT NULL, doc TEXT NOT NULL)`);
-    raw.prepare(`INSERT INTO "profile_registry_store" VALUES (?, ?, ?)`)
-      .run('Matt', 'v1', JSON.stringify({ id: 'Matt', version: 'v1' }));
-    raw.close();
-
-    const backend = await SQLiteStorageBackend.open(dir);
-    try {
-      const doc = await backend.createStore('profile-registry').get('Matt');
-      assert.notEqual(doc, null, 'the legacy table must be adopted, not abandoned');
-      assert.deepEqual(await backend.namespaces(), ['profile-registry']);
     } finally { await backend.close?.(); }
   });
 });

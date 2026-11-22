@@ -1,6 +1,6 @@
 import type { Hook, ToolInputError } from './hooks.js';
 import type { Session } from './messages.js';
-import type { ProviderConfig } from './provider.js';
+import type { ProviderConfig, ProviderEntry } from './provider.js';
 import type { Tool } from './tools.js';
 
 // ── Registries ────────────────────────────────────────────────────────────────
@@ -19,8 +19,9 @@ export interface HookRegistrar {
 
 /** Tool CRUD is observed on the {@link Notifier}, as a `RegistryChange` with `registry: 'tools'` — this
  *  registry had its own broadcaster over the same primitive, which is duplication, not layering. One
- *  notification per tool (removeByPlugin announces a `removed` per matched tool); the registering
- *  plugin's name rides in `detail`, advisory as ever — resolve the name for anything authoritative. */
+ *  notification per tool (removeByPlugin announces a `removed` per matched tool, or an `added` where it
+ *  reinstates the host's built-in of that name); the registering plugin's name rides in `detail`, advisory
+ *  as ever — resolve the name for anything authoritative. */
 export interface ToolRegistry {
   /** Registers `tool` and returns — there is nothing to await. The name is free in the overwhelming
    *  case, and that path completes in the calling tick, so `setup()` can fire-and-forget. When a
@@ -30,6 +31,10 @@ export interface ToolRegistry {
    *  case can reject into the caller. Registration order across plugins is not a contract; resolve by
    *  name at call time. */
   register(tool: Tool): void;
+  /** Through a plugin's machine, removes only a tool that plugin registered; another's is left in
+   *  place (with a warning), since remove-then-register would replace it without the collision being
+   *  decided. A host built-in the removed tool displaced is current again, as it is when the plugin
+   *  unloads; another plugin's tool it displaced is not, having been replaced rather than suspended. */
   remove(name: string): void;
   resolve(name: string): Tool | null;
   list(): readonly Tool[];
@@ -73,11 +78,23 @@ export interface ToolPresenter {
  * *contribute* profiles live — a storage backend replaying provider definitions it captured in its own
  * medium, or the built-in `provider` tool — exactly as a plugin contributes tools via {@link ToolRegistry}.
  * Keyed by `config.name`; `register` upserts.
+ *
+ * A value is a profile or a {@link ProviderAlias} of one, so a reader of a profile's fields
+ * (`module`, `model`) narrows first (`isProviderAlias`); `has` is true for both, since an alias is a
+ * name a caller may use anywhere a profile's is. `resolve` is the one way from a name to the profile
+ * that runs.
  */
-export interface ProviderRegistry extends ReadonlyMap<string, ProviderConfig> {
-  register(config: ProviderConfig): void;
-  /** Explicit delete (the `provider` tool's `remove`) — removes the profile outright. */
+export interface ProviderRegistry extends ReadonlyMap<string, ProviderEntry> {
+  /** Throws if the entry would break the one-hop rule: an alias whose target is not a profile, or a
+   *  name that aliases point at being turned into an alias itself. */
+  register(entry: ProviderEntry): void;
+  /** Explicit delete (the `provider` tool's `remove`) — removes the entry outright. Throws if it is a
+   *  profile an alias points at: the alias would go on being accepted and then fail at every call. */
   remove(name: string): boolean;
+  /** The profile `name` runs on: itself, or its alias's target. `undefined` when the name is not
+   *  configured; throws (`invalid`) when it is an alias whose target is not, which `revert` or a
+   *  hand-edited store can leave behind. */
+  resolve(name: string): ProviderConfig | undefined;
   /**
    * Undo a contribution: restore the boot-baseline profile for `name` if one existed (a plugin-supplied
    * profile that shadowed a configured one), otherwise delete it. A plugin that registers providers

@@ -1,6 +1,6 @@
 import type { HookPoint } from './hooks.js';
 import type { ISODate, MimeType } from './primitives.js';
-import type { ProviderMeta, TurnEntry, UsageRecord } from './provider.js';
+import type { ProviderMeta, TurnEntry } from './provider.js';
 
 // ── Messages & Session ────────────────────────────────────────────────────────
 
@@ -9,7 +9,7 @@ export type MessageRole = 'user' | 'assistant' | 'tool' | 'system' | 'marker';
 export type MessageContent = (
   // ── prose and reasoning: what the model said ──
   | { type: 'text';              text: string }
-  | { type: 'thinking';          thinking: string; signature: string }
+  | { type: 'thinking';          thinking: string; signature: string; meta?: ProviderMeta }
   | { type: 'redacted-thinking'; data: string }
   | { type: 'reasoning';         reasoning: string }
   | { type: 'refusal';           text: string }
@@ -41,7 +41,8 @@ export type MessageContent = (
   | { type: 'form';              fields: FormField[]; submitLabel?: string }
   | { type: 'form-response';     values: Record<string, string> }
   // Durable, opaque annotation — persisted unchanged, elided from every submission. See MarkerData below.
-  | { type: 'marker';            creator: string; data: unknown }
+  // `by` is the chain of tool calls that produced it, stamped by the host (see CallFrame).
+  | { type: 'marker';            creator: string; data: unknown; by?: CallFrame[] }
 
   // ── a provider block this build does not know: preserved verbatim rather than dropped ──
   | { type: 'unknown-content';   blockType: string; raw: unknown }
@@ -74,7 +75,7 @@ export type MessageContent = (
  * Unregistered creators fall back to `data: unknown`. The base `MessageContent` member stays
  * loose (`creator: string`) so the union and its exhaustive switches are unaffected.
  *
- * One of matbot's five open-registry augmentation points — same technique at each; see
+ * One of matbot's six open-registry augmentation points — same technique at each; see
  * docs/DEVELOPING.md *Open-registry augmentation* for the shared shape and the rules that follow from it.
  */
 export interface MarkerData {
@@ -87,13 +88,43 @@ export interface MarkerData {
    *  not — the model's own text is already truncated in the transcript; a block telling it so would
    *  invite it to narrate the cut-off rather than continue past it. */
   'matbot-truncation': { reason: 'max-tokens' | 'stream-end'; raw?: string };
+  /** Opens a sub-turn's private transcript: how many turns below a conversation it is. See `subTurnDepth`. */
+  'matbot-sub-turn': { depth: number };
 }
 
 export type Marker<K extends string = string> = {
   type:    'marker';
   creator: K;
   data:    K extends keyof MarkerData ? MarkerData[K] : unknown;
+  by?:     CallFrame[];
 };
+
+/**
+ * One tool call in the chain that produced a marker. A marker a tool yields is stamped with `by`, the
+ * calls it came through, OUTERMOST FIRST: the call the runner made, then each nested call a composed body
+ * (or any `makeToolBox` owner) made inside it, down to the tool that yielded it.
+ *
+ * It is what a consumer needs to say where a record came from without trusting the record: a reader asking
+ * "was this written by a call `my-plugin` made?" looks at the frames, not at anything in `data`, which is the
+ * writer's to say. So the host builds every frame and a tool cannot supply one — a `by` on the event a tool
+ * yields is not read (the runner builds the stored block from `creator` and `data` alone), and the frames a
+ * nested call carries up travel on a symbol only the host writes (`/host`'s `withCallFrames`).
+ *
+ * - `tool` is the name the call was made by. A name is a weak identity — a tool can be wrapped, and a
+ *   reload may register another under it — so read it as what was called, never as who answered.
+ * - `plugin` is the host's own stamp of who registered the tool (`Tool.pluginName`), which a tool cannot
+ *   choose. It is the field to decide on. Absent for a tool registered outside any plugin.
+ * - `callId` is set on the frame of a call the transcript records (the runner's own), so the frame can be
+ *   joined to its `tool-call` block. A nested call is recorded nowhere, so it has none.
+ *
+ * Absent `by` means the marker was not yielded by a tool: a hook's, the runner's own bookkeeping, or one
+ * written before 0.5.0. Its absence is not an answer to "who wrote this".
+ */
+export interface CallFrame {
+  tool:     string;
+  plugin?:  string;
+  callId?:  string;
+}
 
 /**
  * One choice in a `select`. A bare string is the ordinary form and means "the value IS the label";
@@ -132,6 +163,15 @@ export interface FormField {
    *  callers never learn whether the answer was a preset or free text (which is why a picked option
    *  resolves to a string, never an index). Ignored for other types. */
   allowOther?: boolean;
+  /**
+   * select-only presentation hint: the choice is the PRODUCT of these independent axes, which a frontend may
+   * render as one control each — a permission's effect, lifetime and subject. Such a frontend answers with
+   * the chosen values joined by {@link FORM_AXIS_SEPARATOR}, in axis order, and its initial choices are
+   * `default` split the same way. `options` stays the whole answer for a frontend that ignores this, each
+   * value in the same encoding, so it is necessarily a selection from the product: a frontend that cannot
+   * render controls side by side (buttons in a chat) is offered the common cases, never every combination.
+   */
+  axes?:       FormAxis[];
   /** select: matched against an option's VALUE, not its label. */
   default?:    string;
   required?:   boolean;
@@ -140,6 +180,23 @@ export interface FormField {
    *  runner and server never consult this; a frontend with no cancel UI simply can't fire one. */
   cancelable?: boolean;
 }
+
+/** One independent choice in a {@link FormField.axes} select. `label`, when present, captions the control. */
+export interface FormAxis {
+  name:    string;
+  label?:  string;
+  options: FormOption[];
+  /**
+   * Presentation hint: draw this axis as the BUTTONS that send the answer — one per option, each answering
+   * with the other axes' current choices and its own value — in place of a control plus an OK. For the
+   * choice a question ends on (a permission's allow or deny), which then reads as the verb it is. At most
+   * one axis, and the last. A frontend that ignores it draws a control like any other axis.
+   */
+  submit?: boolean;
+}
+
+/** What joins the per-axis values of a {@link FormField.axes} answer. Option values never contain it. */
+export const FORM_AXIS_SEPARATOR = '|';
 
 /**
  * Canonical values a `type: 'confirm'` prompt resolves to. The rendered label and buttons are a

@@ -46,11 +46,11 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   await manager.load();
   // Re-read after a deferred StorageBackend swap lands: the new backend's `skills` namespace replaces
   // the old in-memory set (and re-indexes). No `replay` — the initial load is the boot load above; this
-  // reacts only to future swaps. Ends with the manager (teardown aborts manager.signal).
-  services.mounted.observe({ key: 'StorageBackend', signal: manager.signal }, () => void manager.load());
+  // reacts only to future swaps.
+  services.mounted.observe({ key: 'StorageBackend' }, () => void manager.load());
   // The index is a projection of this store, so its owner rebuilds it when the KnowledgeIndex is swapped or
   // reverts to the host default on unload — the host's drain can't copy out of an index with no `entries()`.
-  services.mounted.observe({ key: 'KnowledgeIndex', signal: manager.signal }, () => void manager.load());
+  services.mounted.observe({ key: 'KnowledgeIndex' }, () => void manager.load());
   await services.register('SkillManager', manager);
 
   services.tools.register(createSkillTool(manager));
@@ -63,7 +63,7 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
   // flagged skill with neither yet (analysis still pending) is simply skipped until it has one.
   services.systemContext.register(async () => {
     const lines = (await manager.all())
-      .filter(s => s.catalogue === true && !s.hidden)
+      .filter(s => s.catalogue === true && !s.hidden && !s.candidate)
       .map(s => ({ name: s.name, summary: (s.catalogSummary?.trim() || s.knowledge?.summary?.trim() || '') }))
       .filter(s => s.summary !== '')
       .map(s => `- ${s.name}: ${s.summary}`);
@@ -79,7 +79,7 @@ export async function setupSkills(services: MatbotMachine): Promise<SkillManager
 /**
  * The cross-runtime base skills plugin: content CRUD via `skill_action`, persisted through the active
  * storage backend and indexed into the knowledge subsystem, plus a `skills_config` tool. Runs in both
- * Node and the browser. It has no filesystem watch — that lives in @matatbread/matbot-skills-node.
+ * Node and the browser.
  */
 export function createSkillsPlugin(): MatbotPluginSpec {
   let manager:  SkillManager   | undefined;

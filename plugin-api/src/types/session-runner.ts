@@ -9,9 +9,9 @@ import type { Store } from './storage.js';
 // ── Session runner ──────────────────────────────────────────────────────────────
 
 /**
- * A view onto a session returned by `SessionRunner.open`. `session` is the authoritative
- * server-side state — committed messages only, ending at the running turn's user message. The
- * in-flight turn and any queued submissions are the delta, delivered over `events`, never overlaid
+ * A view onto a session returned by `SessionRunner.open` when observing it. `session` is the
+ * authoritative server-side state — committed messages only, ending at the running turn's user message.
+ * The in-flight turn and any queued submissions are the delta, delivered over `events`, never overlaid
  * here. `events` is a lazy, per-session live tap: accessing it subscribes to the turn event stream
  * from now (replaying the in-flight turn, then the queue); never touching it costs nothing.
  */
@@ -19,8 +19,22 @@ export interface SessionView {
   session:        Session;
   /** Submissions waiting behind the current turn (does not count the running turn). */
   queued:         number;
-  /** Correlation id of the submission this call enqueued — present only when content was supplied. */
-  traceId?:       string;
+  readonly events: AsyncIterable<PipelineEvent>;
+}
+
+/**
+ * What `SessionRunner.open` returns for a submission: the submission's correlation id and the live tap,
+ * with no `session`. Reading the session there cost a store round trip in front of every submission, for
+ * a field no submitter read, and it was read AFTER the submission had been queued — so a failed read
+ * told the caller the submission had failed when it was already running, and a caller that sent it again
+ * ran it twice. Without it, nothing `open()` awaits comes after the queueing: if it throws, nothing ran.
+ * A session that does not exist is reported on `events` as an `error` whose `failure` is `invalid`.
+ */
+export interface SubmittedView {
+  /** Submissions waiting behind this one's turn, or behind the running turn if this one interrupted it. */
+  queued:          number;
+  /** Correlation id of this submission: its turn's events carry it. */
+  traceId:         string;
   readonly events: AsyncIterable<PipelineEvent>;
 }
 
@@ -81,6 +95,44 @@ export interface SubmitOpenOpts extends OpenOpts {
   /** Interactive prompt implementation for this submission's turn. The frontend owns delivery —
    *  it must target the frontend's per-session client connections, not a single request. */
   prompt?:      PromptFn;
+  /** Stamped on the user message this submission persists as. For an in-process submitter saying what
+   *  the message is — a robo-submit (`ROBO_SUBMIT`), the job that sent it — never a wire field: a frontend
+   *  does not pass a client's metadata through. Merged into one turn by `concatQueue`, only the first
+   *  submission's is kept. */
+  metadata?:    Record<string, unknown>;
+}
+
+/**
+ * Where a turn nobody submitted from a frontend asks its questions — a robo-submit's
+ * (`SessionAppender`). A frontend hands a `prompt` with each submission it makes, so a turn started
+ * anywhere else has none, and every permission it needs would fall to its non-interactive default. A
+ * frontend registers this to say: questions for this session's turns can be put to whoever views it
+ * here, whenever they next do — where a person who submitted would have been asked, the session waits,
+ * showing as `prompting`, until someone answers.
+ *
+ * One registered at a time (a registry service). Absent, or answering `undefined`, ⇒ the turn has no one to
+ * ask, as before.
+ */
+export interface SessionPrompter {
+  /** A prompt for the turn `traceId` of `sessionId`, called once as that turn is submitted. */
+  promptFor(sessionId: string, traceId: string): PromptFn | undefined;
+}
+
+/** A session's live state, as {@link SessionRunner.status} reports it. Nothing here is stored: a restart
+ *  ends every turn and drops every queue, so all of it is false or zero afterwards. */
+export interface SessionStatusReport {
+  /** Any of the three below, or a parallel reply still to be placed. */
+  busy:      boolean;
+  /** A turn is running, or the pump is still settling the one that ran. */
+  running:   boolean;
+  /** Submissions waiting behind the running turn. */
+  queued:    number;
+  /** `parallel` turns in flight beside it. */
+  parallel:  number;
+  /** A turn of this session has asked its submitter's prompt a question nobody has answered yet — the
+   *  session is waiting on a person. Counted by the runner over every submission's `prompt`, so it says
+   *  the same thing whichever frontend draws the question. */
+  prompting: boolean;
 }
 
 /**
@@ -90,7 +142,8 @@ export interface SubmitOpenOpts extends OpenOpts {
  * returns and treats the live `events` stream purely as an optimisation.
  */
 export interface SessionRunner {
-  open(opts: OpenOpts | SubmitOpenOpts): Promise<SessionView>;
+  open(opts: SubmitOpenOpts): Promise<SubmittedView>;
+  open(opts: OpenOpts): Promise<SessionView>;
   /** Abort the running turn (if any), any `parallel` turns beside it, and drop all queued submissions,
    *  emitting `cancelled` for each. */
   abort(sessionId: string): void;
@@ -111,9 +164,8 @@ export interface SessionRunner {
    *  queued submission, or idles. The "give up on this turn" path (a prompt cancel); contrast
    *  `abort`, which also clears the queue. A no-op if nothing is running. */
   cancelTurn(sessionId: string): void;
-  /** Snapshot of a session's live state: whether a turn is running, how many submissions wait behind
-   *  it, and how many `parallel` turns are in flight beside it. `busy` is any of the three. */
-  status(sessionId: string): { busy: boolean; running: boolean; queued: number; parallel: number };
+  /** Snapshot of a session's live state. See {@link SessionStatusReport}. */
+  status(sessionId: string): SessionStatusReport;
   /**
    * Write session `sessionId` from outside its turns — an append, a rename, an edit of its history.
    *

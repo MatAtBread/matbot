@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPlugins, isNotAPluginError, getFailedPlugins, recordFailedPlugin } from '@matatbread/matbot-core';
 import type { MatbotMachine } from '@matatbread/matbot-core';
-import { missingPackageOf } from '@matatbread/matbot-tool-plugin';
+import { missingPackageOf } from '../src/plugins/tools/plugin/add.js';
 
 // Regression guard for the boot crash-loop: a non-plugin entry in matbot.yaml (a bare library
 // mistaken for a plugin) once threw out of the startup batch, exiting the process — which, under
@@ -156,4 +156,33 @@ test('an unresolvable import rethrows with the original code and cause intact', 
       return true;
     },
   );
+});
+
+// `matbotRuntime` is what makes a package a plugin. A host that can read the declaration refuses a package
+// that has none BEFORE importing it — a library has top-level code of its own — which is what lets a
+// shared helper package sit beside the plugins without ever being mistaken for one.
+const undeclared = { ...noopServices, resolver: { identify: async () => 'x', runtimes: async () => undefined } } as unknown as MatbotMachine;
+const declared   = { ...noopServices, resolver: { identify: async () => 'declared-plugin', runtimes: async () => ['node'] } } as unknown as MatbotMachine;
+
+test('a package that declares no matbotRuntime is refused unimported', async () => {
+  // not-a-plugin would fail the shape check IF it were imported; the refusal must name the declaration instead.
+  await loadPlugins([{ spec: notAPlugin, importSpec: notAPlugin }], undeclared, false, undefined, 'skip');
+  const failed = getFailedPlugins().find(f => f.specifier === notAPlugin);
+  assert.ok(failed);
+  assert.match(failed.error, /declares no "matbotRuntime"/);
+  assert.doesNotMatch(failed.error, /does not export/);
+
+  await assert.rejects(
+    loadPlugins([{ spec: notAPlugin, importSpec: notAPlugin }], undeclared, false, undefined, 'throw'),
+    (e: unknown) => isNotAPluginError(e) && /matbotRuntime/.test(e.message),
+  );
+  await assert.rejects(
+    loadPlugins([{ spec: notAPlugin, importSpec: notAPlugin, runtimes: [] }], stubServices, false, undefined, 'throw'),
+    (e: unknown) => isNotAPluginError(e), 'an empty declaration names no runtime either',
+  );
+});
+
+// (A host with no way to read a declaration imports as before: every test above loads with no resolver.)
+test('a declared plugin loads as before', async () => {
+  assert.equal((await loadPlugins([{ spec: validPlugin, importSpec: validPlugin }], declared, false, undefined, 'skip')).length, 1);
 });

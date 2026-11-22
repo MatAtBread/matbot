@@ -1,0 +1,46 @@
+{
+  "name": "@matatbread/matbot-parallel-map-reduce",
+  "matbotRuntime": [
+    "node",
+    "browser"
+  ],
+  "version": "0.5.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "files": [
+    "src"
+  ],
+  "description": "Put one question to each item of a set as concurrent sub-agent turns, append each answer to the conversation, then ask it to combine them.",
+  "keywords": [
+    "matbot",
+    "matbot-plugin",
+    "llm",
+    "ai",
+    "agent"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node -e \"process.env.MATBOT_PUBLISH_ALL || (console.error('Refused: publish with pnpm publish-all from the repo root. It checks versions, contents and the web bundle first.'), process.exit(1))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatAtBread/matbot.git",
+    "directory": "plugins/parallel-map-reduce"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  },
+  "devDependencies": {
+    "typescript": "catalog:",
+    "@matatbread/matbot-plugin-api": "workspace:^"
+  }
+}

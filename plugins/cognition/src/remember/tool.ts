@@ -48,7 +48,10 @@ way, its subject must survive capture unchanged.
 The input names who wrote the message. It is usually the user, but may be the ASSISTANT — when the
 assistant promises to remember something ("I'll remember the table is pgdwell") or owns a mistake ("I
 was wrong; the field is X"), extract the underlying fact it is committing to (here: "The table is
-pgdwell" / "The field is X"), NOT the meta-statement about remembering or apologising.
+pgdwell" / "The field is X"), NOT the meta-statement about remembering or apologising. From an
+ASSISTANT message, extract ONLY the facts it commits to or the corrections it owns: the rest of it —
+its analysis, findings, figures, explanations — is the assistant's own output, not something either
+party asked to keep, and is left out however specific it is.
 
 The input may also carry a few earlier messages as CONTEXT. Use them only to work out who or what the
 message refers to. Never extract a fact that is stated only in the context.
@@ -80,6 +83,20 @@ Rules:
   endorsement. This inference is the main thing to avoid.
 - Exclude greetings, questions, opinions without factual content, task instructions ("remember to
   restart the server"), and anything about the assistant or this conversation itself.
+- Exclude what the assistant's own software can report about itself: its tools, plugins, settings,
+  models and providers, sessions, how it is built, and its bugs ("the merger uses provider X", "the
+  /tools route takes POST"). The software is the authority, and a remembered copy goes stale and then
+  contradicts it. This holds even when the user is developing that software. Other projects of the
+  user's are their world, and are not excluded by this rule.
+- Exclude plans, open tasks and the state of work in progress ("the fix did not take effect", "the
+  user will keep prototyping X"), and counts and readings at a moment ("the store holds 558 facts",
+  "the hall sensor measured 3236 mV").
+- Exclude a history of what happened when: dated events, peaks, runs and incidents ("the unit peaked
+  at 4572 mV on 23 Sep", "its longest run was 69 days", "the router died in August"). Specificity is
+  not durability; what holds true of the subject regardless of date ("the unit takes a 14500 cell")
+  is a fact, what happened to it once is not.
+- These exclusions remove a part of a message, not the message: one that states a durable fact
+  beside a reading or an event still yields the durable fact.
 
 Output ONLY a JSON array of strings — each one a self-contained fact in the third person that names its
 subject explicitly. Split distinct facts into separate elements. Nothing durable -> [].`;
@@ -143,7 +160,12 @@ export function createRememberFactTool(services: MatbotMachine): Tool {
         const res = await services.singleTurn({ provider: ctx.provider, system: EXTRACT_SYSTEM, prompt: extractionPrompt(ctx.session.messages, msg), signal: ctx.signal });
         const m = res.text.match(/\[[\s\S]*\]/);
         const parsed = m ? JSON.parse(m[0]) : [];
-        facts = Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];
+        // A model asked for strings sometimes writes `{ "fact": "…" }` elements; filtering on string alone
+        // dropped those facts with nothing to say so.
+        facts = Array.isArray(parsed)
+          ? parsed.map(f => typeof f === 'object' && f !== null && 'fact' in f ? (f as { fact: unknown }).fact : f)
+                  .filter((f): f is string => typeof f === 'string' && f.trim() !== '')
+          : [];
       } catch (e) {
         // Extraction is a second provider round-trip on the turn's signal, so it is the likeliest thing
         // in flight when a steer or cancel lands. That is an interruption, not a failed extraction:

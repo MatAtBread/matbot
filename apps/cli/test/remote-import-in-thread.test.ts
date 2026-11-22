@@ -160,7 +160,7 @@ test('an origin that never answers fails the import instead of freezing the proc
 
 // The in-thread hooks see `require()` too, which `register()`'s never did. From inside a fetched tree, a
 // `/…` import means a path on the plugin's ORIGIN; a `require('/…')` means a file on this disk, and
-// tool-plugin's dependency notes make exactly that call. Reading it as the former made it a fetch.
+// the plugin tool's dependency notes make exactly that call. Reading it as the former made it a fetch.
 test('a require of an absolute path from inside a fetched tree reads the file, fetching nothing', () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-in-thread-require-')));
   const tree = join(dir, '.plugins', '127.0.0.1:9', 'a');   // port 9 (discard): nothing would answer
@@ -171,6 +171,42 @@ test('a require of an absolute path from inside a fetched tree reads the file, f
     assert.equal(req(join(dir, 'beside.json')).name, 'beside');
     assert.equal(req.resolve(join(dir, 'beside.json')), join(dir, 'beside.json'));
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Issue #116: a cold materialise prefetches the graph its source names, so the import that follows
+// makes no request at all — nothing blocks the thread — and a module no hint could predict (a computed
+// `import()`) is still fetched on demand by the hook, as before.
+test('after a cold materialise, importing the plugin blocks on nothing it could predict', { timeout: 30_000 }, async () => {
+  const { materializeRemote } = await import('../src/plugins/remote-cache.js');
+  const srv = await serve({
+    '/p/package.json': JSON.stringify({ name: '@fixture/matbot-prefetched', matbotRuntime: ['node'], exports: { '.': './src/index.ts' } }),
+    '/p/src/index.ts': [
+      `import { plugin } from './plugin.js';`,
+      `import type { Shape } from './types.js';`,
+      `export { plugin };`,
+      `export const late = async (name: string): Promise<Shape> => (await import(name)).shape;`,
+    ].join('\n'),
+    '/p/src/plugin.ts': `import { helper } from './lib/helper.js';\nexport const plugin = { helper };\n`,
+    '/p/src/lib/helper.ts': `export const helper: string = 'helped';\n`,
+    '/p/src/types.ts': `export type Shape = string;\n`,
+    '/p/src/computed.ts': `export const shape: string = 'computed';\n`,
+  });
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'matbot-prefetched-')));
+  try {
+    const m = await materializeRemote(`${srv.origin}/p/`, join(dir, '.plugins'), dir);
+    const before = (await srv.requests()).length;
+
+    const mod = await import(pathToFileURL(m.entry).href);
+    assert.equal(mod.plugin.helper, 'helped');
+    assert.deepEqual((await srv.requests()).slice(before), [], 'the import fetched nothing: every module was on disk');
+
+    // What the hint could not see is the hook's, as it always was.
+    assert.equal(await mod.late('./computed.js'), 'computed');
+    assert.deepEqual((await srv.requests()).slice(before), ['/p/src/computed.js', '/p/src/computed.ts']);
+  } finally {
+    await srv.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -4,13 +4,14 @@ import { PLUGIN_API_VERSION, refusalMessage } from '@matatbread/matbot-plugin-ap
 declare module '@matatbread/matbot-plugin-api' {
   interface ToolContracts {
     mcp_action:
-      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }>
+      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string | { Vault: string }>; proxyToolName?: string }>
       | ToolContract<{ servers: unknown[] },                                       { action: 'list' }>
       | ToolContract<{ message: string },                                          { action: 'remove'; name: string }>;
   }
 }
 import type { MCPClient, MCPToolDef, MCPRemoteConfig } from '@matatbread/matbot-mcp-http';
-import { makeProxyTool, proxyToolName, RemoteMcpManager } from '@matatbread/matbot-mcp-http';
+import { gateRemoteHeaders, makeProxyTool, proxyToolName, RemoteMcpManager, type RemoteHeaders } from '@matatbread/matbot-mcp-http';
+import { headersSchema } from '@matatbread/matbot-tool-http';
 import process from 'node:process';
 import type { MCPServerConfigLocal, MCPPersistedLocal } from './types.js';
 import { createStdioClient } from './client.js';
@@ -124,7 +125,7 @@ export function createMCPPlugin(): MatbotPluginSpec {
 
   type McpAction =
     | { action: 'add'; name: string; type: 'local';  command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string }
-    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }
+    | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: RemoteHeaders; proxyToolName?: string }
     | { action: 'list' }
     | { action: 'remove'; name: string };
 
@@ -142,6 +143,8 @@ export function createMCPPlugin(): MatbotPluginSpec {
         yield { type: 'result', value: { message: refusalMessage(permit) } };
         return;
       }
+      const secrets = await gateRemoteHeaders(raw.endpoint, raw.headers, ctx);
+      if (!secrets.ok) { yield { type: 'error', message: secrets.message }; return; }
       yield { type: 'stdout', chunk: `Connecting to remote MCP server "${raw.name}"...\n` };
       try {
         const r = await remote!.add({ name: raw.name, endpoint: raw.endpoint, ...(raw.headers !== undefined ? { headers: raw.headers } : {}), ...(raw.proxyToolName !== undefined ? { proxyToolName: raw.proxyToolName } : {}) });
@@ -235,7 +238,10 @@ Two transport types:
 - **remote** — connects to an HTTP endpoint (JSON-RPC over POST, optional SSE).
 
 ACTIONS
-  add    — Connect a server and register its tools (validated before saving).
+  add    — Connect a server and register its tools (validated before saving). A remote server's
+           header can carry a credential without it entering the conversation or the saved config:
+           { "Authorization": { "Vault": "Bearer \${ACME_API_KEY}" } } sends that stored key. The
+           user is asked before a key is sent to the server's origin.
   list   — Show connected servers, their tools, and any server instructions.
   remove — Disconnect a server and forget it; its proxy tools are unregistered.`,
     inputSchema: {
@@ -249,7 +255,7 @@ ACTIONS
         args:     { type: 'array', items: { type: 'string' }, description: 'add, local only: extra arguments appended after the command.' },
         env:      { type: 'object', additionalProperties: { type: 'string' }, description: 'add, local only: environment variables for the server process. Write a secret as ${KEY_NAME} to pass a vault key; it does not inherit them.' },
         endpoint: { type: 'string', description: 'add, remote only: the MCP HTTP endpoint URL.' },
-        headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add, remote only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
+        headers:  { ...headersSchema, description: `add, remote only: HTTP headers sent with every request to the server. ${headersSchema.description}` },
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },

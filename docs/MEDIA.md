@@ -190,7 +190,7 @@ await services.register('MediaStore', myFileStore);
 
 | Medium | Package | File |
 |---|---|---|
-| filesystem | `@matatbread/matbot-files-node` | `plugins/files/src/store.ts` (`FilesystemFileStore`) |
+| filesystem | `@matatbread/matbot-storage-filesystem` | `plugins/storage/filesystem/src/file-store.ts` (`FilesystemFileStore`) |
 | SQLite | `@matatbread/matbot-storage-sqlite` | `plugins/storage/sqlite/src/file-store.ts` |
 | OPFS (browser) | `@matatbread/matbot-browser` | `plugins/browser/src/opfs-file-store.ts` |
 | Google Drive | `@matatbread/matbot-storage-google-drive` | `plugins/storage/google-drive/src/drive-file-store.ts` |

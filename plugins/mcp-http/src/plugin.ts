@@ -1,6 +1,8 @@
 import type { Tool, ToolContract, ToolResultOf, ToolContext, MatbotPluginSpec } from '@matatbread/matbot-plugin-api';
 import { PLUGIN_API_VERSION, refusalMessage } from '@matatbread/matbot-plugin-api';
+import { headersSchema } from '@matatbread/matbot-tool-http';
 import { RemoteMcpManager } from './manager.js';
+import { gateRemoteHeaders, type RemoteHeaders } from './headers.js';
 
 // Connecting a server is privileged — it registers a remote party's tools for the rest of the session —
 // so it declares a gate (`mcp_action.add`), as does disconnecting one (`mcp_action.remove`). How that
@@ -15,14 +17,14 @@ declare module '@matatbread/matbot-plugin-api' {
     // must match. Standalone (browser) mcp-http implements only the `remote` add — a `local` call there is
     // a graceful runtime error.
     mcp_action:
-      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }>
+      | ToolContract<{ message: string; tools: string[]; instructions?: string }, { action: 'add'; name: string; type: 'local'; command: string; args?: string[]; env?: Record<string, string>; proxyToolName?: string } | { action: 'add'; name: string; type: 'remote'; endpoint: string; headers?: Record<string, string | { Vault: string }>; proxyToolName?: string }>
       | ToolContract<{ servers: unknown[] },                                       { action: 'list' }>
       | ToolContract<{ message: string },                                          { action: 'remove'; name: string }>;
   }
 }
 
 type McpRemoteAction =
-  | { action: 'add'; name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }
+  | { action: 'add'; name: string; endpoint: string; headers?: RemoteHeaders; proxyToolName?: string }
   | { action: 'list' }
   | { action: 'remove'; name: string };
 
@@ -39,7 +41,10 @@ SSE response streaming). Local stdio servers are not available here — they nee
 
 ACTIONS
   add    — Connect a remote server and register its tools. Validated before saving; some servers
-           return usage 'instructions' on connect, surfaced in the result and by 'list'.
+           return usage 'instructions' on connect, surfaced in the result and by 'list'. A header
+           can carry a credential without it entering the conversation or the saved config:
+           { "Authorization": { "Vault": "Bearer \${ACME_API_KEY}" } } sends that stored key. The
+           user is asked before a key is sent to the server's origin.
   list   — Show connected servers, their tools, and any instructions.
   remove — Disconnect a server and forget it; its proxy tools are unregistered immediately.`,
     inputSchema: {
@@ -52,7 +57,7 @@ ACTIONS
         // add without it; advertised here so the model is told to send it.
         type:     { type: 'string', enum: ['remote'], description: 'add only: always "remote" — this build connects to HTTP endpoints only.' },
         endpoint: { type: 'string', description: 'add only: the MCP HTTP endpoint URL.' },
-        headers:  { type: 'object', additionalProperties: { type: 'string' }, description: 'add only: HTTP headers, e.g. {"Authorization":"Bearer …"}.' },
+        headers:  { ...headersSchema, description: `add only: HTTP headers sent with every request to the server. ${headersSchema.description}` },
         proxyToolName: { type: 'string', description: 'add only: prefix for this server\'s tool names, replacing the default "mcp__<name>__". Persisted; reconnects keep it.' },
       },
     },
@@ -68,6 +73,8 @@ ACTIONS
               yield { type: 'result', value: { message: refusalMessage(permit) } };
               return;
             }
+            const secrets = await gateRemoteHeaders(act.endpoint, act.headers, ctx);
+            if (!secrets.ok) { yield { type: 'error', message: secrets.message }; return; }
             yield { type: 'stdout', chunk: `Connecting to MCP server "${act.name}"...\n` };
             try {
               const r = await manager.add({ name: act.name, endpoint: act.endpoint, ...(act.headers !== undefined ? { headers: act.headers } : {}), ...(act.proxyToolName !== undefined ? { proxyToolName: act.proxyToolName } : {}) });

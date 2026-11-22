@@ -8,7 +8,10 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { notAPluginError, type ToolContext, type ToolEvent } from '@matatbread/matbot-core';
-import { pluginTool, materializeRemote, releaseRemote, readInstallRecord, writeInstallRecord, localProvision } from '@matatbread/matbot-tool-plugin';
+import { createPluginTool } from '../src/plugins/tools/plugin.js';
+import { materializeRemote, releaseRemote } from '../src/plugins/remote-cache.js';
+import { readInstallRecord, writeInstallRecord } from '../src/plugins/install-record.js';
+import { localProvision } from '../src/plugins/provision.js';
 
 const execFileP = promisify(execFile);
 
@@ -46,7 +49,7 @@ function run(configPath: string, load: Load, allow: (gate: string) => boolean = 
   const asked: string[] = [];
   const labels: string[] = [];
   const ctx = {
-    callId: 't', signal: new AbortController().signal, configPath, prompt: async () => undefined,
+    callId: 't', signal: new AbortController().signal, prompt: async () => undefined,
     gate: async (req: { gate: string; subject: string; label: string }) => {
       asked.push(`${req.gate} ${req.subject}`);
       labels.push(req.label);
@@ -56,7 +59,7 @@ function run(configPath: string, load: Load, allow: (gate: string) => boolean = 
   } as unknown as ToolContext;
   const call = async (input: Record<string, unknown>) => {
     const events: ToolEvent[] = [];
-    for await (const e of pluginTool.executor.execute(input, ctx)) events.push(e as ToolEvent);
+    for await (const e of createPluginTool(configPath).executor.execute(input, ctx)) events.push(e as ToolEvent);
     return events.map(e => 'chunk' in e ? e.chunk : 'message' in e ? e.message : JSON.stringify(e)).join('');
   };
   return { asked, labels, call };
@@ -212,7 +215,17 @@ async function registry(p: { dir: string }, manifest: Record<string, unknown>, o
   const addr = server.address();
   origin = `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : 0}`;
   await writeFile(join(opts.at ?? p.dir, '.npmrc'), `registry=${origin}/\naudit=false\nfund=false\nupdate-notifier=false\n`);
-  return { stop: () => new Promise<void>(d => server.close(() => d())) };
+  // In the environment too, which npm ranks above any .npmrc: `pnpm run` exports `npm_config_registry`
+  // (the public registry) to every script, so under `pnpm test` the npm these tests spawn asked that instead.
+  const inherited = process.env['npm_config_registry'];
+  process.env['npm_config_registry'] = `${origin}/`;
+  return {
+    stop: () => new Promise<void>(d => {
+      if (inherited === undefined) delete process.env['npm_config_registry'];
+      else process.env['npm_config_registry'] = inherited;
+      server.close(() => d());
+    }),
+  };
 }
 
 test('an npm plugin is checked before it is installed, recorded, and remove offers back exactly that', { timeout: 120_000 }, async () => {
@@ -509,4 +522,26 @@ test('what installing a local plugin\'s dependencies created is offered back, an
       await p.cleanup();
     }
   }
+});
+
+// `matbotRuntime` is what makes a package a plugin, so discovery passes over a package without it before
+// importing anything: a shared helper package beside the plugins — which depends on plugin-api, as a
+// library of plugin helpers would — is never run to find out what it is.
+test('discover_local lists a declared plugin and never imports an undeclared package', async () => {
+  const p = await project();
+  try {
+    const write = async (name: string, pkg: Record<string, unknown>, src: string) => {
+      await mkdir(join(p.dir, 'plugins', name), { recursive: true });
+      await writeFile(join(p.dir, 'plugins', name, 'package.json'), JSON.stringify({ name: `@fixture/${name}`, exports: './index.ts', peerDependencies: { '@matatbread/matbot-plugin-api': '*' }, ...pkg }));
+      await writeFile(join(p.dir, 'plugins', name, 'index.ts'), src);
+    };
+    await write('real', { matbotRuntime: ['node'] }, `export const plugin = { apiVersion: '1', manifest: { description: 'real' } };\n`);
+    await write('helper', {}, `(globalThis as Record<string, unknown>)['__helperImported'] = true;\nexport const plugin = { apiVersion: '1' };\n`);
+
+    const { call } = run(p.configPath, async () => undefined);
+    const out = await call({ action: 'discover_local' });
+    assert.match(out, /@fixture\/real/);
+    assert.doesNotMatch(out, /@fixture\/helper/);
+    assert.equal((globalThis as Record<string, unknown>)['__helperImported'], undefined, 'the undeclared package must not be imported');
+  } finally { await p.cleanup(); }
 });

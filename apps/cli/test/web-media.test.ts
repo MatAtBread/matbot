@@ -8,8 +8,8 @@ import type {
   CompletionEvent, Message, MimeType,
 } from '@matatbread/matbot-core';
 import { createWebServer } from '../../../plugins/frontend/web/src/server.js';
-import { createAlsPrincipalCarrier } from '../src/principal-als.js';
-import { createAlsUsageCarrier } from '../src/usage-als.js';
+import { createAlsPrincipalCarrier } from '@matatbread/matbot-host-node';
+import { createAlsUsageCarrier } from '@matatbread/matbot-host-node';
 
 installPrincipalCarrier(createAlsPrincipalCarrier());
 installUsageCarrier(createAlsUsageCarrier());

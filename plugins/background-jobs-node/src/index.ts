@@ -1,12 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { execArgv, argv, execPath } from 'node:process';
+import { execArgv, argv, execPath, env } from 'node:process';
 import { resolve, dirname } from 'node:path';
 import { existsSync }       from 'node:fs';
 import { pathToFileURL }    from 'node:url';
 import type { MatbotMachine, MatbotPluginSpec, AppendResult } from '@matatbread/matbot-plugin-api';
 import { ItemChangeKind } from '@matatbread/matbot-plugin-api';
 import {
-  createBackgroundJobsPlugin, appendFor, jobContext, jobInfo, REPLY_TAIL,
+  createBackgroundJobsPlugin, appendFor, filterJobTriggers, jobContext, jobInfo, REPLY_TAIL,
   type JobInfo, type JobRunner, type RunOutcome, type RunSpec,
 } from '@matatbread/matbot-background-jobs';
 import { connectToParent, relayable, serveJob, type Endpoint, type ParentLink } from './channel.js';
@@ -16,6 +16,11 @@ import { connectToParent, relayable, serveJob, type Endpoint, type ParentLink } 
 // that hangs or leaks can be killed outright, and nothing it does touches this process's heap — at the
 // cost of a whole boot per run. The child never writes a session itself; it asks over an IPC channel,
 // and what it changes elsewhere is announced back over the same channel.
+//
+// So its host is the matbot CLI, as docker-bash's is a machine with docker: a job is the CLI's own command
+// line — the script this process was started as, `--config -`, a config extending the one this process
+// booted with (which the CLI publishes as MATBOT_CONFIG), and the CLI's IS_SUB_AGENT/MATBOT_PRINCIPAL. Under
+// any other host it disables itself; `matbot-background-jobs` runs jobs in-process anywhere.
 
 // When true, jobs run in a new process group and survive the parent exiting.
 const DETACH_JOBS = false;
@@ -78,10 +83,10 @@ export function superviseChild(child: ChildProcess, input: string): Promise<Erro
 }
 
 function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
-  const configPath = machine.configPath;
+  const configPath = env['MATBOT_CONFIG'];
   const script     = argv[1];
   if (configPath === undefined || script === undefined) {
-    console.warn('[background-jobs] no config path or entry script to spawn a job from, so no job can run here.');
+    console.warn('[background-jobs] this process is not the matbot CLI (no MATBOT_CONFIG, or no entry script), so it cannot start a job as one. Use matbot-background-jobs to run jobs in-process.');
     return undefined;
   }
 
@@ -116,7 +121,7 @@ function spawnRunner(machine: MatbotMachine): JobRunner | undefined {
         info:   () => jobInfo(machine, job),
         append: async (sessionId, messages) => {
           const result = await appendFor(machine, job, sessionId, messages);
-          appended += result.messageIds.length;
+          appended += result.traceId !== undefined ? 1 : result.messageIds.length;   // a robo-submit is minted later
           return result;
         },
         notify: n => relay(machine, job, n),
@@ -169,6 +174,11 @@ async function setupJob(services: MatbotMachine, signal: AbortSignal): Promise<v
     }),
   });
   services.systemContext.register(() => jobContext(job));
+  // This process runs nothing but the job's turn, so every session it judges is the job's.
+  if (job.triggers !== undefined && job.triggers !== 'all') {
+    const triggers = job.triggers;
+    await filterJobTriggers(services, () => triggers);
+  }
   // What this job changes, announced where someone is listening. Locally produced only — a relayed one
   // carries an `instance`, and relaying it back would be the loop the field exists to break.
   services.Notifier.consume(

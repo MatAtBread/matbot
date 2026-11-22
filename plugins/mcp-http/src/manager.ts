@@ -3,6 +3,7 @@ import type {
   MCPClient, MCPRemoteConfig, MCPToolDef, MCPPersistedRemote, MCPRemoteServerInfo, McpRemoteService,
 } from './types.js';
 import { createHttpClient, type HttpMCPClient } from './client.js';
+import type { RemoteHeaders } from './headers.js';
 import { makeProxyTool, proxyToolName } from './proxy-tool.js';
 
 interface ActiveRemote { config: MCPRemoteConfig; client: MCPClient; tools: MCPToolDef[]; instructions?: string }
@@ -38,7 +39,7 @@ export class RemoteMcpManager implements McpRemoteService {
     let client: HttpMCPClient;
     let tools:  MCPToolDef[];
     try {
-      client = await createHttpClient(config, signal);
+      client = await createHttpClient(config, signal, this.services.Vault);
       tools  = await client.listTools(signal);
     } catch (e) {
       if (this.closed.signal.aborted) throw new Error(`MCP client closed while connecting to "${config.name}".`);
@@ -57,7 +58,7 @@ export class RemoteMcpManager implements McpRemoteService {
     return tools;
   }
 
-  async add(input: { name: string; endpoint: string; headers?: Record<string, string>; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }> {
+  async add(input: { name: string; endpoint: string; headers?: RemoteHeaders; proxyToolName?: string }): Promise<{ tools: string[]; instructions?: string }> {
     if (this.active.has(input.name)) throw new Error(`An MCP server named "${input.name}" is already connected.`);
     const config: MCPRemoteConfig = {
       type: 'remote', name: input.name, endpoint: input.endpoint,

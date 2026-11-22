@@ -1,18 +1,7 @@
 import { RegistryChangeKind } from '@matatbread/matbot-plugin-api';
 import type { Tool, ToolRegistry, Notifier, ToolContext, ToolEvent, ToolInputError } from './types.js';
 
-/**
- * The shape of the `ToolCallValidator` service — the single-valued predecessor of the `validate` hook,
- * still consulted as one more opinion beside the hooks so a validator written against it keeps working.
- * `undefined` means NO OPINION and is never read as "valid".
- *
- * @deprecated Register a `validate` hook instead. Removed in 0.5.0, with `ToolCallValidator`.
- */
-export interface ToolInputValidator {
-  validateToolCall(tool: string, parameters: unknown): Promise<ToolInputError[] | undefined>;
-}
-
-/** Judges one call: every `validate` hook, and the `ToolCallValidator` service if one is registered. */
+/** Judges one call: every `validate` hook. */
 export type ToolCallJudge = (tool: string, parameters: unknown, signal: AbortSignal) => Promise<ToolInputError[] | undefined>;
 
 /** Cap on the rendered value. Long enough to identify what was sent, short enough that a base64
@@ -40,23 +29,6 @@ function formatError(e: ToolInputError): string {
   }
   if (shown.length > VALUE_CHARS) shown = `${shown.slice(0, VALUE_CHARS)}…`;
   return `${e.path}: ${e.message}, actual value \`${shown}\``;
-}
-
-/**
- * Declared HERE, by the consumer, rather than by a plugin that implements it: two plugins declaring one
- * key must declare it identically or the merge is a TS2717 in a file neither owns. Core reads it, so core
- * names it.
- *
- * Superseded by the `validate` hook, which matbot's own validators now use. A service key holds one value,
- * so a second validator had to capture the first and delegate to it, which made the pair depend on load
- * order and on each other. Still consulted, as one more opinion, so a validator registered here works.
- */
-declare module '@matatbread/matbot-plugin-api' {
-  interface MatbotServices {
-    /** @deprecated Register a `validate` hook instead: several co-exist, where this key holds one. Still
-     *  consulted, as one more opinion beside the hooks; removed in 0.5.0. */
-    ToolCallValidator?: ToolInputValidator;
-  }
 }
 
 /**
@@ -88,15 +60,14 @@ export const TOOL_INPUT_INVALID = 422;
  */
 function validatingTool(tool: Tool, judge: ToolCallJudge): Tool {
   const inner = tool.executor;
-  return {
-    ...tool,
+  return copyTool(tool, {
     executor: {
       execute(input: unknown, ctx: ToolContext): AsyncIterable<ToolEvent> {
         return (async function* () {
           const errs = await judge(tool.name, input, ctx.signal);
           if (errs !== undefined && errs.length > 0) {
             const detail = errs.map(formatError).join('; ');
-            yield { type: 'error', message: `Invalid input for tool "${tool.name}": ${detail}`, code: TOOL_INPUT_INVALID };
+            yield { type: 'error', message: `Invalid input for tool "${tool.name}": ${detail}`, code: TOOL_INPUT_INVALID, failure: 'invalid' };
             return;
           }
           // `yield*` delegates `return`/`throw` as well as values, so an abort still reaches the tool.
@@ -104,11 +75,38 @@ function validatingTool(tool: Tool, judge: ToolCallJudge): Tool {
         })();
       },
     },
-  };
+  });
 }
 
+/**
+ * `tool` with `fields` replaced, keeping its accessors as accessors. A spread reads a getter once and
+ * stores the value, and the host copies every tool it registers (to stamp its owner, to wrap its
+ * executor), so a description built when it is read — the `provider` tool's lists the adapters loaded
+ * NOW — would be frozen at registration, and so would anything a shadow captured of it.
+ */
+export function copyTool(tool: Tool, fields: Partial<Tool>): Tool {
+  const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(tool);
+  for (const [key, value] of Object.entries(fields)) {
+    descriptors[key] = { value, writable: true, enumerable: true, configurable: true };
+  }
+  return Object.defineProperties({}, descriptors) as Tool;
+}
+
+/**
+ * One tool per name, and the host's own registration of each name kept beside it. A plugin's tool that
+ * displaced the host's is withdrawn back to it (by `remove` or the plugin's unload), so a plugin can shadow
+ * a built-in — `provider`, `plugin`, a core tool — and unloading it gives the built-in back, where the
+ * name used to be left empty until a restart. A plugin's tool that displaced ANOTHER plugin's is not:
+ * that one is gone, not suspended, because plugins come and go independently — Y is installed over X,
+ * then X is removed — and a stack would reinstate what nobody has loaded. Only what the host put there
+ * stays for as long as the machine does, which is the same line the swap-members draw (see CLAUDE.md,
+ * "a swap-member reverts to the host's captured boot default").
+ *
+ * "The host's" is a registration with no `pluginName`: a plugin's are always stamped with its name.
+ */
 export class ToolRegistryImpl implements ToolRegistry {
   private readonly tools = new Map<string, Tool>();
+  private readonly builtins = new Map<string, Tool>();
   // The host's notifier proxy, injected at boot (both hosts build it before this registry). Held as the
   // proxy, not a resolved impl, so a later register('Notifier', …) takes effect here too. Optional: a
   // registry built without one (tests) simply announces nothing.
@@ -119,12 +117,17 @@ export class ToolRegistryImpl implements ToolRegistry {
 
   constructor(initial?: Iterable<Tool>, notifier?: Notifier, judge?: ToolCallJudge) {
     this.judge = judge;
-    if (initial !== undefined) for (const tool of initial) this.tools.set(tool.name, this.guard(tool));
+    if (initial !== undefined) for (const tool of initial) this.set(this.guard(tool));
     this.notifier = notifier;
   }
 
   private guard(tool: Tool): Tool {
     return this.judge === undefined ? tool : validatingTool(tool, this.judge);
+  }
+
+  private set(tool: Tool): void {
+    this.tools.set(tool.name, tool);
+    if (tool.pluginName === undefined) this.builtins.set(tool.name, tool);
   }
 
   async validate(name: string, parameters: unknown): Promise<ToolInputError[] | undefined> {
@@ -139,17 +142,31 @@ export class ToolRegistryImpl implements ToolRegistry {
   }
 
   register(tool: Tool): void {
-    this.tools.set(tool.name, this.guard(tool));
+    this.set(this.guard(tool));
     this.announce(tool.name, 'added', tool.pluginName);
   }
 
+  /** A plugin's tool goes back to the host's of that name, if there is one; the host's own goes. */
   remove(name: string): void {
-    if (this.tools.delete(name)) this.announce(name, 'removed');
+    const tool = this.tools.get(name);
+    if (tool !== undefined) this.withdraw(tool);
   }
 
   removeByPlugin(pluginName: string): void {
-    for (const [name, tool] of this.tools) {
-      if (tool.pluginName === pluginName && this.tools.delete(name)) this.announce(name, 'removed');
+    for (const tool of [...this.tools.values()]) if (tool.pluginName === pluginName) this.withdraw(tool);
+  }
+
+  // A reinstated built-in reads as `added`, as a remount does on the mount table's `services` arm: the
+  // name is present, and provided by the host again.
+  private withdraw(tool: Tool): void {
+    const builtin = tool.pluginName === undefined ? undefined : this.builtins.get(tool.name);
+    if (builtin === undefined) {
+      this.tools.delete(tool.name);
+      this.builtins.delete(tool.name);
+      this.announce(tool.name, 'removed');
+    } else {
+      this.tools.set(tool.name, builtin);
+      this.announce(tool.name, 'added');
     }
   }
 

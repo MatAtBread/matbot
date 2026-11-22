@@ -45,7 +45,7 @@ const PROVIDER_SETTING_KEYS = [
 ] as const;
 
 /** Every DreamSettings field `cognition_config` understands, alongside the provider pins above. */
-const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs', 'maxMergesPerPass', 'maxEnrichmentsPerPass'] as const;
+const DREAM_SETTING_KEYS = ['strongThreshold', 'weakThreshold', 'maxClusterSize', 'blocklist', 'weakDeferralMs', 'maxMergesPerPass', 'maxEnrichmentsPerPass', 'weakVerdictsBeforeBacklog', 'clusterAfterBacklogGrowth', 'minClusterSize'] as const;
 
 /** How many `ask_inner_voice` consults are allowed in one turn before further ones short-circuit.
  *  At the (BACKOFF_LIMIT + 1)th call of the turn we stop critiquing and tell Matbot₁ to proceed — the
@@ -248,6 +248,24 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
               else if (typeof v === 'number' && Number.isInteger(v)) next.maxEnrichmentsPerPass = v;
               else { yield { type: 'error', message: '"maxEnrichmentsPerPass" must be an integer, or null to reset to default.' }; return; }
             }
+            if ('weakVerdictsBeforeBacklog' in args) {
+              const v = args.weakVerdictsBeforeBacklog;
+              if (v === null) delete next.weakVerdictsBeforeBacklog;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.weakVerdictsBeforeBacklog = v;
+              else { yield { type: 'error', message: '"weakVerdictsBeforeBacklog" must be an integer, or null to reset to default.' }; return; }
+            }
+            if ('clusterAfterBacklogGrowth' in args) {
+              const v = args.clusterAfterBacklogGrowth;
+              if (v === null) delete next.clusterAfterBacklogGrowth;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.clusterAfterBacklogGrowth = v;
+              else { yield { type: 'error', message: '"clusterAfterBacklogGrowth" must be an integer, or null to reset to default.' }; return; }
+            }
+            if ('minClusterSize' in args) {
+              const v = args.minClusterSize;
+              if (v === null) delete next.minClusterSize;
+              else if (typeof v === 'number' && Number.isInteger(v)) next.minClusterSize = v;
+              else { yield { type: 'error', message: '"minClusterSize" must be an integer, or null to reset to default.' }; return; }
+            }
 
             try {
               validateDreamSettings({ ...DEFAULT_DREAM_SETTINGS, ...next });
@@ -320,7 +338,13 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       '  - `blocklist` — skill names never offered to the ranker (default ["Inner voice"]); ' +
       'case-sensitive exact match.\n' +
       '  - `weakDeferralMs` — milliseconds a weakly-routed fact is excluded from selection before ' +
-      'reconsideration (default 36 hours).\n\n' +
+      'reconsideration (default 36 hours).\n' +
+      '  - `weakVerdictsBeforeBacklog` — how many weak verdicts a fact gets before it moves to the ' +
+      'backlog (`__backlog__`) instead of being deferred again (default 4). Backlogged facts are not ' +
+      're-ranked by dream_time; they await clustering into new skills.\n' +
+      '  - `clusterAfterBacklogGrowth` — how many facts the backlog must gain since the last clustering ' +
+      'before a pass clusters it again (default 30).\n' +
+      '  - `minClusterSize` — the fewest facts a new group needs to become a candidate skill (default 8).\n\n' +
       '`get` returns the EFFECTIVE settings — every key above, defaults already applied where unset — ' +
       'plus `available` (configured provider names). Call it first to learn current values and the ' +
       "object's shape before calling `set`.\n\n" +
@@ -343,6 +367,9 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
       '  maxEnrichmentsPerPass: number;   // integer >= 0\n' +
       '  blocklist:           string[];\n' +
       '  weakDeferralMs:      number;   // milliseconds, >= 0\n' +
+      '  weakVerdictsBeforeBacklog: number;   // integer >= 1\n' +
+      '  clusterAfterBacklogGrowth: number;   // integer >= 1\n' +
+      '  minClusterSize:            number;   // integer >= 2\n' +
       '}\n' +
       '```',
     inputSchema: {
@@ -360,6 +387,9 @@ export function createCognitionConfigTool(services: MatbotMachine): Tool<ToolRes
         maxEnrichmentsPerPass: { type: ['number', 'null'], description: '"set": cap on "none" facts given an enriched second look per pass (0 disables), or null to reset to default. Omit to leave unchanged.' },
         blocklist:           { type: ['array', 'null'], items: { type: 'string' }, description: '"set": skill names never offered to the ranker, or null to reset to default. Omit to leave unchanged.' },
         weakDeferralMs:      { type: ['number', 'null'], description: '"set": deferral window in milliseconds, or null to reset to default. Omit to leave unchanged.' },
+        weakVerdictsBeforeBacklog: { type: ['number', 'null'], description: '"set": weak verdicts before a fact moves to the backlog, or null to reset to default. Omit to leave unchanged.' },
+        clusterAfterBacklogGrowth: { type: ['number', 'null'], description: '"set": backlog growth that triggers clustering, or null to reset to default. Omit to leave unchanged.' },
+        minClusterSize:            { type: ['number', 'null'], description: '"set": fewest facts for a candidate skill, or null to reset to default. Omit to leave unchanged.' },
       },
     },
     executor,

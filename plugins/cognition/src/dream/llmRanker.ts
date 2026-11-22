@@ -7,6 +7,11 @@
  * applies its own thresholds — this ranker has no concept of "strong" vs "weak", that vocabulary
  * lives in the pipeline.
  *
+ * The candidate roster is in the SYSTEM prompt and the fact is the whole message, so everything but the
+ * fact is one prefix shared by every call in a pass — and by every pass until a skill's metadata changes.
+ * A provider's prompt cache is a prefix cache, and the roster is nearly all of each call's input; it used
+ * to follow the fact, which made every call's input unique from its first line.
+ *
  * Calls run in parallel across facts via `Promise.all`. A single fact's call failing — bad JSON,
  * model timeout, anything — yields zero scores for that fact (so the pipeline routes it `none`)
  * and is logged to stderr with the fact id. One bad apple doesn't poison the pass.
@@ -21,11 +26,16 @@
 import type { MatbotMachine } from '@matatbread/matbot-plugin-api';
 import type { Ranker } from './ranker.js';
 import type { RememberedFact, Score, SkillCandidate } from './types.js';
+import { SKILL_DEFINITION } from './skillDefinition.js';
 
 const RANKER_SYSTEM =
-  'You are a ranking judge. You will be shown ONE remembered fact and a list of candidate skills. ' +
+  'You are a ranking judge. The message you are sent is ONE remembered fact; the candidate skills are ' +
+  'listed at the end of these instructions. ' +
   'For each candidate, decide how well the fact belongs in that skill — i.e. how naturally a ' +
   'reader looking up the skill would expect to find this fact recorded there.\n' +
+  SKILL_DEFINITION + '\n' +
+  'A fact that is not skill material belongs in no skill, however closely its topic matches one: score it ' +
+  'low for every candidate.\n' +
   '\n' +
   'Return ONLY a JSON object on the last line of your reply, in this shape:\n' +
   '  {\n' +
@@ -106,17 +116,14 @@ export function createLlmRanker(services: MatbotMachine, provider: string): Rank
     ): Promise<readonly Score[]> {
       if (facts.length === 0 || candidates.length === 0) return [];
       const candidateNames = new Set(candidates.map(c => c.name));
-      const candidateBlock = renderCandidates(candidates);
+      const system = `${RANKER_SYSTEM}\n\nCandidate skills (${candidates.length}):\n${renderCandidates(candidates)}`;
 
       const perFact = await Promise.all(facts.map(async (fact): Promise<Score[]> => {
-        const prompt =
-          `Fact (id ${fact.id}):\n${clipFact(fact.fact)}\n\n` +
-          `Candidate skills (${candidates.length}):\n${candidateBlock}\n\n` +
-          `Score every candidate.`;
+        const prompt = `Fact (id ${fact.id}):\n${clipFact(fact.fact)}\n\nScore every candidate.`;
         let raw: string;
         try {
           const res = await services.singleTurn({
-            provider, signal, system: RANKER_SYSTEM, prompt,
+            provider, signal, system, prompt,
           });
           raw = res.text;
         } catch (e) {

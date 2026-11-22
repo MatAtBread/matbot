@@ -9,8 +9,9 @@ ambient principal carrier, the `Vault`/`Store` interfaces, and the shared error 
 
 Plugins should declare it as a **peer dependency** (the host provides the single shared copy
 — two copies would break `instanceof` checks, the principal carrier, and module
-augmentation). It ships as raw TypeScript and requires **Node 24+** (native type stripping)
-or a bundler.
+augmentation). It ships as raw TypeScript and requires **Node 24+** or a bundler; a host loading it
+from `node_modules` registers the module hooks in `@matatbread/matbot-host-node/register`, since Node's
+native type stripping refuses anything under `node_modules`.
 
 See the [main repository](https://github.com/MatAtBread/matbot) for the full design guide and
 plugin-authoring docs.

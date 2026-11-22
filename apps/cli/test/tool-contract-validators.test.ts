@@ -108,23 +108,23 @@ test('an unknown property is rejected, at its own path', async () => {
   // signature, so every key fails as `never` rather than as excess. Pinned because it is why a closed
   // contract was, before this, the LOOSER of the two.
   // With NO discriminant the arms are tried blind, and each fails for its own reason — so a key that no
-  // arm declares must be named up front. `background` has no `action`; sent `every_action`'s call shape
-  // it used to report `.prompt` missing, which points at the arguments rather than the wrong tool.
-  const background = built.validators['background'];
+  // arm declares must be named up front. `background_job` has no `action`; sent `background_job_action`'s
+  // call shape it would report `.prompt` missing, which points at the arguments rather than the wrong tool.
+  const background = built.validators['background_job'];
   assert.ok(background && !('refused' in background));
   const wrongTool = background.validate({ action: 'cancel', id: 'x' });
   assert.deepEqual(wrongTool.map(e => `${e.path}: ${e.message}`), ['.action: unexpected property', '.id: unexpected property']);
   assert.deepEqual(background.validate({ prompt: 'p', interval: '5m' }), [], 'a key declared by only one arm is not excess');
 
   // A key some arms declare and others don't fails each arm differently, and nothing says which arm
-  // was meant — so the error says why EACH was refused. This is the call a model really made: `name`
-  // on the run-now form, where only the timed forms take one. "No union member matched" told it nothing.
-  const misplaced = background.validate({ prompt: 'p', name: 'n' });
+  // was meant — so the error says why EACH was refused. This is a call a model really makes: both
+  // timings at once, where each form takes one. "No union member matched" told it nothing.
+  const misplaced = background.validate({ prompt: 'p', at: '5m', interval: '5m' });
   assert.equal(misplaced.length, 1, JSON.stringify(misplaced));
   assert.equal(misplaced[0]?.path, '.');
   assert.match(misplaced[0]?.message ?? '', /^matches none of the 3 accepted forms: /);
-  assert.match(misplaced[0]?.message ?? '', /\(2\) \.at: required property missing/);
-  assert.match(misplaced[0]?.message ?? '', /\(3\) \.name: unexpected property/);
+  assert.match(misplaced[0]?.message ?? '', /\(1\) \.at: unexpected property/);
+  assert.match(misplaced[0]?.message ?? '', /\(2\) \.interval: unexpected property/);
 
   const about = built.validators['about_matbot'];
   assert.ok(about && !('refused' in about));

@@ -21,32 +21,26 @@ async function seedCognition(services: MatbotMachine): Promise<void> {
   for (const skill of COGNITION_SKILLS) {
     await skills.importIfAbsent(skill.name, skill.content);
     if (triggers && skill.triggers.length > 0) {
-      const seeded = await triggers.importIfAbsent({
+      await triggers.importIfAbsent({
         conditions: skill.triggers.map(t => ({ kind: t.kind, rule: t.trigger })),
         // `use`, not `load`: a fired trigger should make the skill take effect (its content as a
         // directive), not just surface the raw text.
         invoke:     { tool: 'skill_action', params: { action: 'use', name: skill.name } },
         ...(skill.cooldown !== undefined ? { cooldown: skill.cooldown } : {}),
       });
-      // Backfill the cool-down onto an install seeded before it existed — those triggers are the ones
-      // observed looping. Only when the field is entirely absent, so a user who tuned or cleared it
-      // (`cooldown: {}`) keeps their choice.
-      if (skill.cooldown !== undefined && seeded.cooldown === undefined) {
-        await triggers.update(seeded.id, { cooldown: skill.cooldown });
-      }
     }
   }
 
-  // "Remember this" is compiled into the `remember_fact` direct tool. Ensure exactly one trigger
-  // invokes it with the canonical conditions — repointing any legacy trigger that still loads the
-  // retired "Remember this" skill (so an install seeded under the old model converts in place rather
-  // than ending up with both a skill-load trigger and a remember_fact trigger firing in parallel).
+  // "Remember this" is compiled into the `remember_fact` direct tool, which one trigger invokes with the
+  // canonical conditions. A trigger seeded before 0.2.4 still loads the retired skill instead; it is no
+  // longer converted in place, so say so rather than leave two triggers firing for one fact. The
+  // warning is removed in 0.6.0.
   if (triggers) {
-    const legacy = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
-    if (legacy.length > 0) {
-      for (const t of legacy) await triggers.update(t.id, { invoke: { tool: 'remember_fact' }, conditions: REMEMBER_CONDITIONS });
-    } else {
-      await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    await triggers.importIfAbsent({ conditions: REMEMBER_CONDITIONS, invoke: { tool: 'remember_fact' } });
+    const retired = await triggers.query({ tool: 'skill_action', params: { action: 'load', name: 'Remember this' } });
+    if (retired.length > 0) {
+      console.warn(`[cognition] trigger(s) ${retired.map(t => t.id).join(', ')} still load the retired "Remember this" skill, `
+        + 'which remember_fact replaced. Delete them with trigger_action.');
     }
   }
 }
@@ -76,8 +70,14 @@ async function seedDreamRunsStore(services: MatbotMachine): Promise<void> {
         deferred:            number;
         retired:             number;
         quarantined:         number;
+        duplicates?:         number;
+        backlogged?:         number;
+        known?:              number;
+        orphaned?:           number;
+        released?:           number;
+        clustering?:         { backlog: number; candidates: string[]; mergedInto: string[]; filed: number; declined?: string[]; errors?: string[] };
         unassignedRemaining: number;
-        judgementCalls:      { role: 'rank'|'merge'; inputSize: number; ms: number }[];
+        judgementCalls:      { role: 'rank'|'merge'|'cluster'|'write'; inputSize: number; ms: number }[];
         enriched?:           boolean;
         errors?:             string[];
         error?:              string;
@@ -158,9 +158,16 @@ cognition_config, else falling back to the active turn's provider), and — if a
 threshold — splices the fact in and marks it processed (a \`dreamSkill\` field). A fact that scores too low
 ("none") gets one extra look enriched with conversation context before being retired; a fact that scores
 only weakly is deferred rather than retired, since a future pass against a changed skill set may answer
-differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. Each pass
+differently; a merge that fails outright quarantines the fact rather than retrying indefinitely. A fact whose
+text restates one already decided is retired as a duplicate (\`__duplicate__\`) without being ranked, and a fact
+routed weakly \`weakVerdictsBeforeBacklog\` times (default 4) moves to the backlog (\`__backlog__\`), which
+passes no longer re-rank; a weak fact whose addresses, numbers and quoted identifiers all appear in that skill
+already is retired as \`__known__\`. One pass runs at a time, across processes, by a lease in the
+\`dream_lease\` store. Once the backlog has grown enough, a pass clusters it: a group that belongs in an existing
+skill is merged into it, and a new group becomes a CANDIDATE skill, withheld from the model until adopted
+(\`skill_action adopt\`); deleting a candidate returns its facts to the backlog. Each pass
 writes a structured \`DreamRun\` record to the \`dream_runs\` store. Intended to be invoked via the
-\`background\` tool on a schedule, never inline. One pass at a time is enforced by a process-local mutex.
+\`background\` tool on a schedule, never inline.
 
 It also seeds a remembered_facts store and its \`remembered_facts_action\` tool, written to by remember_fact.
 The store is idempotent: a re-seed on restart keeps the existing data.
@@ -187,6 +194,9 @@ it is purely a data maintenance function.
             createdAt: string;
             dreamSkill?: string;
             ignoreUntil?: string;
+            weakVerdicts?: number;
+            lastVerdict?: { skill: string; score: number; reasoning: string };
+            orphanedFrom?: string;
           }`,
       });
 

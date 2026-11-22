@@ -2,6 +2,7 @@ import type {
   ProviderAdapter, ProviderConfig, Message,
   Tool, CompletionEvent, HealthStatus,
 } from '@matatbread/matbot-plugin-api';
+import { failureForStatus, withFailure } from '@matatbread/matbot-plugin-api';
 import { parseReply, type Piece } from './format.js';
 import { DEFAULT_CONTEXT, REPLY_RESERVE, fitToWindow, size } from './window.js';
 
@@ -69,7 +70,7 @@ export class ChatJimmyAdapter implements ProviderAdapter {
     if (cuts.length > 0) console.warn(`[chatjimmy] to fit the ${contextWindow}-token context window: ${cuts.join('; ')}. The session is unchanged.`);
 
     if (chatMessages.length === 0) {
-      throw new Error('ChatJimmy requires at least one user message');
+      throw withFailure(new Error('ChatJimmy requires at least one user message'), 'invalid');
     }
 
     const body = JSON.stringify({
@@ -101,7 +102,7 @@ export class ChatJimmyAdapter implements ProviderAdapter {
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`ChatJimmy ${res.status}: ${text}`);
+      throw withFailure(new Error(`ChatJimmy ${res.status}: ${text}`), failureForStatus(res.status));
     }
 
     const text = await res.text();
@@ -110,9 +111,9 @@ export class ChatJimmyAdapter implements ProviderAdapter {
 
     // An empty body — no reply, no stats — is how the endpoint refuses a request too long for its window.
     if (!text.trim()) {
-      throw new Error(`ChatJimmy returned an empty response, which it does when a request is too long for its context window `
+      throw withFailure(new Error(`ChatJimmy returned an empty response, which it does when a request is too long for its context window `
         + `(this one was ${size({ systemPrompt, messages: chatMessages })} characters). If that keeps happening, lower `
-        + '`parameters.contextWindow` on this profile.');
+        + '`parameters.contextWindow` on this profile.'), 'invalid');
     }
 
     // Strip stats block

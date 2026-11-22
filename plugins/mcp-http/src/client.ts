@@ -1,4 +1,8 @@
 import type { MCPClient, MCPRemoteConfig, MCPToolDef, MCPToolResult } from './types.js';
+import type { Vault } from '@matatbread/matbot-plugin-api';
+import { failureForStatus, withFailure } from '@matatbread/matbot-plugin-api';
+import { readVaultHeaders, redactor, vaultHeaderKeys, type VaultHeaderKeys } from '@matatbread/matbot-tool-http';
+import type { RemoteHeaders } from './headers.js';
 
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
 const CLIENT_INFO = { name: 'matbot', version: '0.1.0' };
@@ -11,7 +15,7 @@ interface JsonRpcResponse { jsonrpc: string; id?: unknown; result?: unknown; err
 // (brand + guard, not a class) so the check survives a plugin reload — see plugin-api/src/errors.ts.
 interface HttpStatusError extends Error { httpStatus: number }
 function httpStatusError(status: number, message: string): HttpStatusError {
-  return Object.assign(new Error(message), { httpStatus: status });
+  return Object.assign(withFailure(new Error(message), failureForStatus(status)), { httpStatus: status });
 }
 function isHttpStatusError(e: unknown): e is HttpStatusError {
   return typeof e === 'object' && e !== null && typeof (e as Record<string, unknown>).httpStatus === 'number';
@@ -26,7 +30,9 @@ export class HttpMCPClient implements MCPClient {
   instructions: string | undefined;
   private nextId = 1;
   private readonly endpoint: string;
-  private readonly extraHeaders: Record<string, string> | undefined;
+  private readonly extraHeaders: RemoteHeaders;
+  private readonly vaultKeys: VaultHeaderKeys | undefined;
+  private readonly vault: Pick<Vault, 'readSecret'> | undefined;
   // The version this server negotiated in `initialize` (its own reply), sent in the MCP-Protocol-Version
   // header on later requests. Falls back to the version we advertise until the server tells us otherwise.
   private negotiatedVersion = DEFAULT_PROTOCOL_VERSION;
@@ -36,10 +42,24 @@ export class HttpMCPClient implements MCPClient {
   // `protocolVersion` so the manager can persist it and skip the probe on reconnect.
   private headerVersion: string | null | undefined;
 
-  constructor(endpoint: string, extraHeaders?: Record<string, string>, headerVersion?: string | null) {
+  constructor(endpoint: string, extraHeaders?: RemoteHeaders, headerVersion?: string | null, vault?: Pick<Vault, 'readSecret'>) {
     this.endpoint = endpoint;
-    this.extraHeaders = extraHeaders;
+    this.extraHeaders = extraHeaders ?? {};
     this.headerVersion = headerVersion;
+    this.vault = vault;
+    const keys = vaultHeaderKeys(this.extraHeaders);
+    if (!keys.ok) throw new Error(keys.message);
+    this.vaultKeys = keys.value.usedAs.size > 0 ? keys.value : undefined;
+    if (this.vaultKeys !== undefined && vault === undefined) throw new Error('This server\'s headers name vault keys, and no vault was given to read them from.');
+  }
+
+  // Read per request, never held: a key replaced with `store-key` is sent from the next request on, and
+  // the value lives no longer than the request it is sent with.
+  private async resolveHeaders(): Promise<{ headers: Record<string, string>; secrets: string[] }> {
+    if (this.vaultKeys === undefined || this.vault === undefined) return { headers: this.extraHeaders as Record<string, string>, secrets: [] };
+    const read = await readVaultHeaders(this.extraHeaders, this.vaultKeys, this.vault);
+    if (!read.ok) throw new Error(read.message);
+    return read.value;
   }
 
   /** Resolved header policy: version string (send), `null` (omit), or `undefined` (no request has succeeded yet). */
@@ -87,27 +107,46 @@ export class HttpMCPClient implements MCPClient {
   }
 
   private async send(id: number, body: JsonRpcRequest, headerVersion: string | null, signal?: AbortSignal): Promise<unknown> {
+    const extra = await this.resolveHeaders();
+    const redact = redactor(extra.secrets);
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept':       'application/json, text/event-stream',
       ...(headerVersion !== null ? { 'MCP-Protocol-Version': headerVersion } : {}),
-      ...this.extraHeaders,
+      ...extra.headers,
     };
 
-    const resp = await fetch(this.endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      ...(signal !== undefined ? { signal } : {}),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(this.endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        // A redirect is not followed with a key attached: fetch strips only `Authorization` and `Cookie`
+        // when one changes origin, so any other header would reach wherever the server points.
+        ...(extra.secrets.length > 0 ? { redirect: 'manual' as const } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch (e) {
+      // fetch quotes an invalid header value in its TypeError. Only rewritten when there is something
+      // to redact, so an abort stays the error it was.
+      if (extra.secrets.length === 0) throw e;
+      throw new Error(redact(String(e)));
+    }
+    if (extra.secrets.length > 0 && (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400 && resp.headers.has('location')))) {
+      // Node hands back the real 3xx; a browser's manual redirect is opaque, with no Location to read.
+      const location = resp.headers.get('location');
+      throw new Error(`Redirect not followed, because a vault key was attached${location !== null ? `: the server redirected to ${redact(location)}` : ''}. ` +
+                      'If that URL is the server, connect to it directly.');
+    }
     if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
+      const text = redact(await resp.text().catch(() => ''));
       throw httpStatusError(resp.status, `HTTP ${resp.status}: ${text || resp.statusText}`);
     }
 
     const ct = resp.headers.get('content-type') ?? '';
+    const text = redact(await resp.text());
     if (ct.includes('text/event-stream')) {
-      const text = await resp.text();
       for (const line of text.split('\n')) {
         if (!line.startsWith('data: ')) continue;
         let msg: JsonRpcResponse;
@@ -120,7 +159,7 @@ export class HttpMCPClient implements MCPClient {
       throw new Error('No matching response found in SSE stream');
     }
 
-    const data = await resp.json() as JsonRpcResponse;
+    const data = JSON.parse(text) as JsonRpcResponse;
     if (data.error) throw new Error(data.error.message);
     return data.result;
   }
@@ -137,8 +176,8 @@ export class HttpMCPClient implements MCPClient {
   close(): void { /* HTTP is stateless */ }
 }
 
-export async function createHttpClient(config: MCPRemoteConfig, signal?: AbortSignal): Promise<HttpMCPClient> {
-  const client = new HttpMCPClient(config.endpoint, config.headers, config.protocolVersion);
+export async function createHttpClient(config: MCPRemoteConfig, signal?: AbortSignal, vault?: Pick<Vault, 'readSecret'>): Promise<HttpMCPClient> {
+  const client = new HttpMCPClient(config.endpoint, config.headers, config.protocolVersion, vault);
   await client.initialize(signal);
   return client;
 }

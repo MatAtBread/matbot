@@ -1,4 +1,4 @@
-import type { ContractSource, Session, Tool } from '@matatbread/matbot-plugin-api';
+import type { ContractSource, JSONSchema, Session, Tool } from '@matatbread/matbot-plugin-api';
 import { contractArms } from '@matatbread/matbot-plugin-api';
 
 export const MARKER_CREATOR = '@matatbread/matbot-function-tools';
@@ -11,7 +11,7 @@ export const MARKER_CREATOR = '@matatbread/matbot-function-tools';
  * half; `check` finds that.
  */
 export type SessionFunctionMarker =
-  | { op: 'define'; name: string; definition: string; description?: string; definedUnchecked?: true; checkedAgainst?: string }
+  | { op: 'define'; name: string; definition: string; description?: string; definedUnchecked?: true; checkedAgainst?: string; inputSchema?: JSONSchema }
   | { op: 'remove'; name: string }
   /** A later `check` passed under `checkedAgainst`. Applies only while `definition` is still the one in
    *  force, so a stamp recorded before a redefinition — or carried to a fork that replaced it — cannot
@@ -28,11 +28,13 @@ export interface SessionFunctionRecord {
   name: string; definition: string; description?: string; definedUnchecked?: true;
   /** The {@link ToolTypeIndex.environment} fingerprint the check passed under, when one did. */
   checkedAgainst?: string;
+  /** The input schema the checker resolved at define time; absent ⇒ derived from the text. */
+  inputSchema?: JSONSchema;
 }
 
 /** A record as `list` reports it. The fingerprint is ours to COMPARE — a reader gets the conclusion
  *  (`checkedElsewhere`), never an opaque string it would have to interpret. */
-export type SessionFunctionRow = Omit<SessionFunctionRecord, 'checkedAgainst'> & { checkedElsewhere?: true };
+export type SessionFunctionRow = Omit<SessionFunctionRecord, 'checkedAgainst' | 'inputSchema'> & { checkedElsewhere?: true };
 
 /** The session's functions as they stand at its last message: every define, less every later remove. */
 export function sessionFunctions(session: Session): Map<string, SessionFunctionRecord> {
@@ -58,6 +60,7 @@ export function sessionFunctions(session: Session): Map<string, SessionFunctionR
         ...(typeof d.description === 'string' ? { description: d.description } : {}),
         ...(d.definedUnchecked === true ? { definedUnchecked: true as const } : {}),
         ...(typeof d.checkedAgainst === 'string' ? { checkedAgainst: d.checkedAgainst } : {}),
+        ...(d.inputSchema !== null && typeof d.inputSchema === 'object' && !Array.isArray(d.inputSchema) ? { inputSchema: d.inputSchema } : {}),
       });
     }
   }
@@ -86,6 +89,22 @@ export function turnContracts(turnTools: ReadonlyMap<string, Tool> | undefined, 
   const inline = (s: string): string => s.replace(/\bToolContract</g, "import('@matatbread/matbot-plugin-api').ToolContract<");
   const body = [...arms].map(([name, arm]) => `${JSON.stringify(name)}: ${inline(arm)};`).join(' ');
   return `\n\n\n${inline(preamble)}declare module '@matatbread/matbot-plugin-api' { interface ToolContracts { ${body} } }`;
+}
+
+/** What the tools say about `session` for a check made on its behalf: each tool's {@link Tool.sessionType}
+ *  under its own name in `SessionTypes`, so a tool fills its own key and no other. A global function's check
+ *  has no session and gets none of it. A tool whose answer throws is left out and logged: its contract then
+ *  reads as it does for a global function, which is the failure that reports itself. */
+export function sessionTypes(tools: Iterable<Tool>, session: Session): string {
+  const keys = new Map<string, string>();
+  for (const t of tools) {
+    if (t.sessionType === undefined || keys.has(t.name)) continue;
+    let type: string | undefined;
+    try { type = t.sessionType(session); }
+    catch (e) { console.warn(`[function-tools] "${t.name}" could not say what session ${session.id} holds: ${e instanceof Error ? e.message : String(e)}`); continue; }
+    if (type !== undefined) keys.set(t.name, `${JSON.stringify(t.name)}: ${type};`);
+  }
+  return keys.size === 0 ? '' : `\n\n\ndeclare module '@matatbread/matbot-plugin-api' { interface SessionTypes { ${[...keys.values()].join(' ')} } }`;
 }
 
 /** The error a session function gets for a name the registry already holds — at definition, and on any
