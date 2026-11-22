@@ -195,6 +195,20 @@ test('a minor jump is a decision and is kept', () => {
   assert.deepEqual(moves(r), ['@x/api 0.4.15→0.5.0', '@x/cli 0.4.15→0.5.0']);
 });
 
+test('a changeset consumed over an unshipped minor keeps the minor and drops the patch', () => {
+  // Aligned to 0.5.0 (npm has 0.4.15); `changeset version` bumps everything to 0.5.1, a new package included.
+  const r = plan([['@x/core', '0.5.1'], ['@x/api', '0.5.1'], ['@x/cli', '0.5.1'], ['@x/new', '0.5.1']], ['@x/core', '@x/api', '@x/cli', '@x/new'],
+    { '@x/core': ['0.4.15'], '@x/api': ['0.4.15'], '@x/cli': ['0.4.15'] });
+  assert.equal(r.version, '0.5.0');
+  assert.equal(r.moves.length, 4);
+});
+
+test('a minor npm already has releases at its next free patch', () => {
+  const r = plan([['@x/core', '0.5.1'], ['@x/api', '0.5.1'], ['@x/cli', '0.5.1']], ['@x/core'],
+    { '@x/core': ['0.4.15', '0.5.0'], '@x/api': ['0.4.15', '0.5.0'], '@x/cli': ['0.4.15', '0.5.0'] });
+  assert.equal(r.version, '0.5.1');
+});
+
 test('a demoted changelog section is renamed, or folded into the one already there', () => {
   const head = '# @x/p\n\n';
   assert.equal(renameTopSection(`${head}## 0.4.16\n\n- b\n\n## 0.4.12\n\n- old\n`, '0.4.16', '0.4.15'),
