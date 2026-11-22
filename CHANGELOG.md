@@ -60,6 +60,8 @@ Upgrade the CLI and every plugin together: a 0.4.x plugin will not install besid
 
 - A failure in detached work no longer ends the process: neither [a store failure in the turn
   pump](#pump-failures) (#115) nor [one a function body leaves behind](#body-failures-contained).
+- [Permission answers configured in `matbot.yaml`](#yaml-flow) are read. A `deny:` key and the
+  documented `{ '*': [...] }` form were silently no answer.
 
 ### Repository layout
 
@@ -348,6 +350,10 @@ a second host's needs.
   `gate_action`'s own gates. Forgetting a denial (`gate_action.forget-denial`) is now asked every time
   too: it no longer offers "always", and no standing answer decides it. Both prompts are two buttons
   that say what they do (Deny / Cancel, Forget / Keep), via the new `PermissionRequest.answers`.
+- **`tools.overwrite` offers a standing answer for any tool from the incoming plugin** (`<plugin> *`),
+  beside the one for the tool. A plugin that replaces a built-in collides with it again on every reload,
+  since its unload reinstates the built-in; that answer, given once or configured under
+  `default_settings:`, lets the reload proceed unasked.
 - **`FormField.axes`, `FormAxis`, `FORM_AXIS_SEPARATOR`** — a select that is the product of independent
   choices, which a frontend may draw as one control each, answering with the values joined by `|`; an axis
   marked `submit` is drawn as the buttons that send the answer.
@@ -453,6 +459,12 @@ a second host's needs.
 - **A parallel turn stopped before it started is recorded**, with a note where its reply would have been,
   as it was when the stop landed a moment later. A stop arriving while it read its session dropped the
   submission without trace.
+- **Unloading a plugin that shadowed one of the host's own tools reinstates the built-in** (`plugin`,
+  `provider`, a core tool such as `gate_action`), as does the plugin removing its tool; the name was left
+  empty until a restart. A plugin's tool that displaced another plugin's is still replaced, not suspended:
+  plugins come and go independently, so a stack would reinstate what nobody has loaded. The host's copies
+  of a registered tool (the owner stamp, the validating wrapper) keep its accessors, so a `description`
+  getter stays live.
 
 ### Optional
 
@@ -672,6 +684,23 @@ a second host's needs.
   `src/parameters.cts` by path, which no import names, so a fetch never brought it, and on node every
   function-tools check asking for a schema (a `define`) failed with "Cannot find module". The file is now
   declared in `files`, which is what a fetch mirrors beyond what is imported.
+- <a id="yaml-flow"></a>**CLI: `matbot.yaml` reads a key containing a colon, and flow collections.** A key ended at the first
+  colon in its line, quoted or not, so `'deny:tool_function.import':` became the key `'deny` and no
+  configured permission denial could be written; and `[a, b]` and `{ k: v }` were read as strings, so the
+  documented form of every configured permission answer (`'tools.overwrite': { '*': [bash, plugin] }`) was
+  silently no answer. A key now ends at a colon followed by a space or the end of the line, as YAML has
+  it, a quoted one at its closing quote; a flow collection may be nested and span lines until its brackets
+  close, and a malformed one fails naming its line, as does a file that is not a mapping of keys. `plugin
+  add` and `plugin remove` rewrite a flow `plugins:` list in block form.
+- **CLI: a plugin can shadow the `provider` tool.** It is in the registry before any plugin loads, as
+  `plugin` is, so a plugin finds the built-in in `setup()` to delegate to and keeps its name; the CLI used
+  to register `provider` after every plugin's setup, which silently replaced a plugin's own at every boot.
+  Its description, listing the loaded adapters and configured profiles, is built when read, so it includes
+  an adapter `plugin add` loaded after boot.
+- **CLI: two fetches of an http plugin at once into an empty `.plugins/` no longer fail.** Both linked
+  matbot's own packages into `.plugins/node_modules`, and the second failed on finding the first's link.
+  Where that fetch was a fingerprint, the failure was swallowed, and the next `plugin reload` asked about
+  code that had not changed.
 - **CLI `plugin` tool** (formerly `tool-plugin`) — a `github:owner/repo#path:sub` specifier (pnpm's git-subdirectory fragment) is
   refused; write `github:owner/repo/sub` (with `#ref` after it, if any), which fetches the same files. It
   never worked as an install, and since 0.4.5 it was folded into the path with a warning. Refused when the
