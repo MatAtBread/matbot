@@ -1,5 +1,11 @@
 # @matatbread/matbot-tool-types
 
+## 0.5.1
+
+### Patch Changes
+
+- 602f796: `tool_function` `define` type-checks when `tool-types` is installed from npm (#118). The checker's worker `require`d `src/parameters.cts` by path, and node refuses to strip types from a file under `node_modules`, so every checked `define` failed unless `noTypeCheck` was passed. The checker now strips the file itself and hands the worker the text.
+
 ## 0.5.0
 
 See the [0.5.0 release notes](https://github.com/MatAtBread/matbot/blob/main/CHANGELOG.md#050).

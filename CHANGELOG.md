@@ -9,7 +9,9 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
-## Unreleased
+## 0.5.1
+
+A fix for installs from npm: `tool_function` `define` failed its type-check.
 
 ### Optional
 
