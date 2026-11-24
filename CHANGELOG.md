@@ -9,6 +9,18 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.5.1
+
+A fix for installs from npm: `tool_function` `define` failed its type-check.
+
+### Optional
+
+- **`tool-types` installed from npm can type-check a function's definition** ([#118](https://github.com/MatAtBread/matbot/issues/118)).
+  Its checker's worker `require`d `src/parameters.cts` by path, and node refuses to strip types from a file
+  under `node_modules`, so every type-checked `define` (session or global) failed with "Stripping types is
+  currently unsupported for files under node_modules" unless `noTypeCheck` was passed. The checker now strips
+  the file itself and hands the worker the text. The same applies to `caching-tool-types`.
+
 ## 0.5.0
 
 Matbot v0.5.0 is a significant release that removes old, deprecated features and introduces some new ones.

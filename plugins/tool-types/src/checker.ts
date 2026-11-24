@@ -9,7 +9,6 @@
 // own virtual file, the same resolved typescript module), so a checker failure is a plumbing bug
 // that must surface as the caller's error, not be absorbed by a quieter path.
 
-import { fileURLToPath } from 'node:url';
 import { renderToolCheckOmitted } from '@matatbread/matbot-plugin-api';
 import type { ToolCheckDiagnostic, ToolCheckReport } from '@matatbread/matbot-plugin-api';
 
@@ -178,6 +177,17 @@ function reportOf(diags: DiagnosticRecord[], mode: Mode): ToolCheckReport {
 
 type CheckParameters = NonNullable<ToolCheckReport['parameters']>;
 
+// Handed to the worker as stripped text, never as a path to require: installed, this file is under
+// node_modules, where node refuses to strip types (#118), and the worker loads no hooks to do it instead.
+let parametersJs: string | undefined;
+async function parametersSource(): Promise<string> {
+  if (parametersJs === undefined) {
+    const [{ readFile }, { stripTypeScriptTypes }] = await Promise.all([import('node:fs/promises'), import('node:module')]);
+    parametersJs = stripTypeScriptTypes(await readFile(new URL('./parameters.cts', import.meta.url), 'utf8'));
+  }
+  return parametersJs;
+}
+
 async function runWorker(data: Record<string, unknown>, importRefused?: (spec: string) => boolean): Promise<{ diags: DiagnosticRecord[] | null; parameters?: CheckParameters }> {
   const { Worker } = await import('node:worker_threads');
   const { createRequire } = await import('node:module');
@@ -293,7 +303,7 @@ export async function checkSnippetAgainst(opts: {
     ...(opts.importRefused !== undefined ? { askImports: true } : {}),
     ...(opts.withheldGlobals !== undefined ? { withheldGlobals: opts.withheldGlobals } : {}),
     ...(opts.parametersOf !== undefined && opts.parametersOf.length > 0
-      ? { parametersOf: [...opts.parametersOf], parametersModule: fileURLToPath(new URL('./parameters.cts', import.meta.url)) }
+      ? { parametersOf: [...opts.parametersOf], parametersSource: await parametersSource() }
       : {}),
   }, opts.importRefused);
   const report = reportOf(diags ?? [], 'snippet');
@@ -769,9 +779,14 @@ try {
     }
     return out;
   };
+  const parametersModule = function () {
+    const m = { exports: {} };
+    new Function('module', 'exports', 'require', workerData.parametersSource)(m, m.exports, require);
+    return m.exports;
+  };
   // Read from the program just checked, so a schema describes exactly the types that were graded.
   const parameters = workerData.parametersOf && virtual !== null
-    ? require(workerData.parametersModule).parametersOf(ts, program.getTypeChecker(), program.getSourceFile(virtual), workerData.parametersOf)
+    ? parametersModule().parametersOf(ts, program.getTypeChecker(), program.getSourceFile(virtual), workerData.parametersOf)
     : undefined;
   parentPort.postMessage({ ok: errors.length === 0, diagnostics: errors.map(rec), ...(parameters ? { parameters } : {}) });
   } catch (e) {
