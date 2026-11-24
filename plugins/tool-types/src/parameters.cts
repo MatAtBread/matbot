@@ -5,8 +5,9 @@ import type TS from 'typescript';
 // all the browser has; that derivation cannot see a named type, an imported one, an alias, `Omit<…>` or an
 // indexed access, and degrades each to `{}`. Here every one of them arrives already evaluated.
 //
-// Required by the checker's worker, which runs as CommonJS with no loader hooks: hence `.cts`, which node
-// strips like any other TypeScript, and `module.exports` rather than an `export`.
+// Run in the checker's worker, which is CommonJS with no loader hooks: hence `.cts` and `module.exports`
+// rather than an `export`. The checker strips it and hands the worker the text, since node strips nothing
+// under node_modules, where this file is once installed.
 //
 // The conventions are the hand path's, so the two agree wherever both can answer: the JSON projection of the
 // type (`toJSON` wins, a method is absent), a union of scalars as a `type`/`enum` pair, and anything a
