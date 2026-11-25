@@ -1,5 +1,12 @@
 # @matatbread/matbot-core
 
+## 0.5.2
+
+### Patch Changes
+
+- `single_turn` declares its attachment handle as `FileHandle | null`. It was `let handle = null`, whose type widens only under `noImplicitAny`. A host that type-checks matbot's published TypeScript sources with `noImplicitAny` off saw `handle` as `null`, and got six errors in `single-turn.ts`. rtatwo is such a host: it imports matbot from its own sources, now that it runs without a build. No change at runtime.
+  - @matatbread/matbot-plugin-api@0.5.2
+
 ## 0.5.0
 
 See the [0.5.0 release notes](https://github.com/MatAtBread/matbot/blob/main/CHANGELOG.md#050).

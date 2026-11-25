@@ -9,6 +9,15 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## 0.5.2
+
+### Bug fixes
+
+- **`core` type-checks from source with `noImplicitAny` off.** `single_turn`'s attachment handle was
+  `let handle = null`, which widens only under `noImplicitAny`; a host type-checking matbot's published
+  TypeScript sources without it saw `handle` as `null` and got six errors in `single-turn.ts`. It is now
+  declared `FileHandle | null`. No change at runtime.
+
 ## 0.5.1
 
 A fix for installs from npm: `tool_function` `define` failed its type-check.

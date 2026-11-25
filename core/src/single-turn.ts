@@ -1,5 +1,5 @@
 import type {
-  Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore,
+  Tool, ToolEvent, ToolExecutor, ToolContract, ToolResultOf, ToolContext, MatbotMachine, Message, MessageContent, MimeType, UserContent, FileStore, FileHandle,
 } from '@matatbread/matbot-plugin-api';
 import { collectBytes, describeProviders, encodeBase64, failureOf, subTurnDepth, tryCurrentPrincipal } from '@matatbread/matbot-plugin-api';
 import { withCallFrames } from '@matatbread/matbot-plugin-api/host';
@@ -67,7 +67,7 @@ async function resolveAttachments(
   for (const ref of names) {
     const attached = findAttachment(messages, ref);
     const wanted   = attached?.fileId ?? ref;
-    let handle = null;
+    let handle: FileHandle | null = null;
     for (const store of stores) {
       if (store === undefined) continue;
       handle = await store.get(wanted).catch(() => null) ?? await store.getByName(wanted).catch(() => null);

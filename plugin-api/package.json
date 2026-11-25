@@ -1,6 +1,6 @@
 {
   "name": "@matatbread/matbot-plugin-api",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "engines": {
     "node": ">=24.0.0"
   },
