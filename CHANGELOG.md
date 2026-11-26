@@ -9,6 +9,21 @@ filled**, and **Bug fixes** cover `core` (the contract consumers depend on);
 **Optional** covers new or updated plugins, frontends, and apps — more likely to
 churn and less likely to affect a consumer who doesn't use them.
 
+## Unreleased
+
+### Optional
+
+- **`tool-types` installed from npm types and validates source-declared tools** ([#121](https://github.com/MatAtBread/matbot/issues/121)).
+  It recognised plugin-api by a `/plugin-api/` path fragment, which `node_modules/@matatbread/matbot-plugin-api`
+  never matches, and called anything under `node_modules` external, which in an npm install is every plugin.
+  So every tool whose contract is a `ToolContracts` augmentation (`tool_function`, `single_turn`, `about_matbot`,
+  `function_runner_config`, any installed plugin's) had no ts-validation validator, no arm in the dts a function
+  body is checked against, and no wire contract; only `toolContract`-string tools were typed. Finding plugin-api
+  alone would have left an installed plugin's own result types `unknown` in the dts, its augmentations of
+  plugin-api shapes dropped, and named shapes unexpanded on the wire. A file is now classified by the package
+  the scan anchored plugin-api in and the packages of its roots, not by its path. `caching-tool-types` discards
+  a build made before the fix, its key including tool-types' source.
+
 ## 0.5.2
 
 ### Bug fixes
