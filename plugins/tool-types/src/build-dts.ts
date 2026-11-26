@@ -14,9 +14,10 @@ import { anchorPackage } from './anchor.js';
 // Each member's type closure is walked. A referenced named type is classified and:
 //   - plugin-api export  → referenced by name + imported from plugin-api (the generated plugin has it).
 //   - TS-lib global      → referenced by name (global, nothing to do).
-//   - workspace interface/type-alias → its declaration is EMITTED into the DTS (recursing its own refs),
-//                          so the DTS stays self-contained.
-//   - workspace class/enum/function, or any `node_modules`/unresolved type → can't be made
+//   - scanned-package interface/type-alias → its declaration is EMITTED into the DTS (recursing its own
+//                          refs), so the DTS stays self-contained.
+//   - scanned-package class/enum/function, or any external (a `node_modules` package no root is in) or
+//                          unresolved type → can't be made
 //                          self-contained, so that *leaf* is replaced in place with `unknown` and a
 //                          comment naming it (LEAF substitution — `(req: unknown /* IncomingMessage */) =>
 //                          …` keeps the rest of the type useful). `unknown` is sound here: permissive in
@@ -252,6 +253,35 @@ export async function buildToolTypesData(
   if (!found) return null;
   const { pluginApiIndex, roots } = found;
 
+  // Which package a file is, by the packages this build scanned, never by the shape of its path. Installed
+  // from npm, plugin-api is `node_modules/@matatbread/matbot-plugin-api` and EVERY plugin is under
+  // `node_modules`, so a `/plugin-api/` fragment found no plugin-api and `/node_modules/` called every
+  // plugin external: no source contracts, no bundled types, no wire expansion — while the monorepo, where
+  // both fragments happen to hold, was fine (#121). A file is plugin-api's if it is in the package the scan
+  // anchored on, and ours if it is in the package of any root; a `node_modules` inside one of those is
+  // still someone else's. Both spellings of each directory are kept, as TypeScript names a file by its
+  // real path while a root keeps the path it was given.
+  const { existsSync, realpathSync } = await import('node:fs');
+  const { dirname } = await import('node:path');
+  const slashed = (p: string): string => p.replace(/\\/g, '/');
+  const packageDirOf = (file: string): string => {
+    for (let d = dirname(file); ; d = dirname(d)) {
+      if (existsSync(join(d, 'package.json'))) return d;
+      if (dirname(d) === d) return dirname(file);
+    }
+  };
+  const prefixesOf = (dir: string): string[] => {
+    const given = `${slashed(dir)}/`;
+    let real = given;
+    try { real = `${slashed(realpathSync(dir))}/`; } catch { /* the given spelling alone */ }
+    return real === given ? [given] : [given, real];
+  };
+  const inPackages = (prefixes: readonly string[]) => (file: string): boolean =>
+    prefixes.some(p => file.startsWith(p) && !/(^|\/)node_modules\//.test(file.slice(p.length)));
+  const isPluginApiFile = inPackages(prefixesOf(packageDirOf(pluginApiIndex)));
+  const isScannedFile   = inPackages([...new Set(roots.flatMap(r => prefixesOf(packageDirOf(r))))]);
+  const isExternalFile  = (file: string): boolean => file.includes('/node_modules/') && !isScannedFile(file);
+
   const options: TS.CompilerOptions = {
     target:                   ts.ScriptTarget.ES2022,
     module:                   ts.ModuleKind.NodeNext,
@@ -267,7 +297,7 @@ export async function buildToolTypesData(
   const files = new Set(program.getSourceFiles().map(f => f.fileName));
 
   const apiSf = program.getSourceFile(pluginApiIndex)
-    ?? program.getSourceFiles().find(f => f.fileName.includes('/plugin-api/') && /\/index\.d?\.ts$/.test(f.fileName));
+    ?? program.getSourceFiles().find(f => isPluginApiFile(f.fileName) && /\/index\.d?\.ts$/.test(f.fileName));
   if (!apiSf) return null;
   const apiModule = checker.getSymbolAtLocation(apiSf);
   if (!apiModule) return null;
@@ -421,7 +451,7 @@ export async function buildToolTypesData(
   // that drops cross-file augmentations; the canonical declaration's symbol carries the merged set.
   const findCanonicalSymbol = (name: string): TS.Symbol | undefined => {
     for (const sf of program.getSourceFiles()) {
-      if (!sf.fileName.includes('/plugin-api/')) continue;
+      if (!isPluginApiFile(sf.fileName)) continue;
       let found: TS.Symbol | undefined;
       const visit = (n: TS.Node): void => {
         if (found) return;
@@ -438,7 +468,7 @@ export async function buildToolTypesData(
   };
 
   const inPluginApi = (sym: TS.Symbol): boolean =>
-    (sym.declarations ?? []).every(d => d.getSourceFile().fileName.includes('/plugin-api/'));
+    (sym.declarations ?? []).every(d => isPluginApiFile(d.getSourceFile().fileName));
 
   // Classify a referenced type symbol (resolving import aliases to the real declaration first).
   const classify = (raw: TS.Symbol): Classification => {
@@ -452,8 +482,8 @@ export async function buildToolTypesData(
     if (decls.length === 0) return wasAlias ? { tag: 'bail', label: `${raw.name} (external)` } : { tag: 'ignore' };
     const files = decls.map(d => d.getSourceFile());
     if (files.every(f => program.isSourceFileDefaultLibrary(f))) return { tag: 'lib' };
-    if (files.some(f => f.fileName.includes('/plugin-api/')))     return { tag: 'api' };
-    if (files.some(f => f.fileName.includes('/node_modules/')))   return { tag: 'bail', label: `${sym.name} (external)` };
+    if (files.some(f => isPluginApiFile(f.fileName)))  return { tag: 'api' };
+    if (files.some(f => isExternalFile(f.fileName)))   return { tag: 'bail', label: `${sym.name} (external)` };
     const d0 = decls[0]!;
     if (ts.isInterfaceDeclaration(d0) || ts.isTypeAliasDeclaration(d0)) return { tag: 'bundle', sym };
     const kind = ts.isClassDeclaration(d0) ? 'class' : ts.isEnumDeclaration(d0) ? 'enum' : ts.isFunctionDeclaration(d0) ? 'function' : 'value';
@@ -620,7 +650,7 @@ export async function buildToolTypesData(
   const augmentations: string[] = [];
   const seenAugments = new Set<string>();
   for (const sf of program.getSourceFiles()) {
-    if (sf.fileName.includes('/plugin-api/') || sf.fileName.includes('/node_modules/')) continue;
+    if (isPluginApiFile(sf.fileName) || isExternalFile(sf.fileName)) continue;
     ts.forEachChild(sf, n => {
       if (!ts.isModuleDeclaration(n) || !ts.isStringLiteral(n.name)
           || n.name.text !== '@matatbread/matbot-plugin-api'
@@ -702,8 +732,8 @@ export async function buildToolTypesData(
   // declaration alongside the reference, so a name resolves there; a tool description carries nothing
   // but this string, so `result: PluginListResult` would tell the model nothing about the fields. Naming
   // a result type is an API-side decision — it is what makes the shape augmentable — and it must not
-  // cost the model the shape. Only workspace/plugin-api interfaces and aliases expand: a lib or
-  // node_modules name stays as written (`Date`, `AbortSignal` mean more as names than as members), and
+  // cost the model the shape. Only scanned-package interfaces and aliases expand: a lib or
+  // external name stays as written (`Date`, `AbortSignal` mean more as names than as members), and
   // so does anything past the depth cap or already on the path, which is what terminates a recursive
   // shape rather than diverging.
   //
@@ -726,7 +756,7 @@ export async function buildToolTypesData(
       const decls = sym.declarations ?? [];
       if (decls.length === 0) return undefined;
       const files = decls.map(d => d.getSourceFile());
-      if (files.some(f => program.isSourceFileDefaultLibrary(f) || f.fileName.includes('/node_modules/'))) return undefined;
+      if (files.some(f => program.isSourceFileDefaultLibrary(f) || isExternalFile(f.fileName))) return undefined;
 
       const key = declKey(decls[0]!);
       if (path.has(key)) return undefined;
